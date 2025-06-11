@@ -1,11 +1,16 @@
 # core/cnn_patterns.py
 import logging
-import os # Added for MODELS_DIR
-import json # Added for json.dumps
+import os
+import json
 from typing import List, Dict, Any, Tuple, Optional
 import pandas as pd
 import numpy as np
 import talib # Voor candlestick patronen die TA-Lib biedt
+
+# PyTorch Imports
+import torch
+import torch.nn as nn
+from core.pre_trainer import SimpleCNN # Import SimpleCNN class
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
@@ -13,44 +18,108 @@ logger.setLevel(logging.INFO)
 class CNNPatterns:
     """
     Detecteert visuele candlestick- en technische patronen in marktdata.
-    Vertaald van cnnPatternRecognizer-uitgebreid.js.
-    Deze klasse zal later worden uitgebreid met ML-modellen (PyTorch/Keras)
-    voor complexere CNN-patroonherkenning.
+    Integreert nu een PyTorch CNN model voor patroonherkenning.
     """
 
-    # Pad voor het opslaan/laden van getrainde modellen
-    # Gebruik 'data/models' zoals gespecificeerd in de prompt, niet 'models' zoals in pre_trainer
     MODELS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'data', 'models')
+    CNN_MODEL_PATH = os.path.join(MODELS_DIR, 'cnn_patterns_model.pth')
     os.makedirs(MODELS_DIR, exist_ok=True)
 
-
     def __init__(self):
-        self.loaded_models: Dict[str, Any] = {} # Om geladen ML-modellen op te slaan
-        self._load_ml_models() # Poging om ML-modellen te laden bij initialisatie
+        self.loaded_models: Dict[str, Any] = {}
+        self._load_ml_models()
         logger.info("CNNPatterns geïnitialiseerd.")
 
     def _load_ml_models(self):
         """
-        Laadt getrainde Deep Learning-modellen voor patroonherkenning.
-        Dit is een **placeholder** voor de daadwerkelijke modellading.
+        Laadt het getrainde PyTorch SimpleCNN-model.
         """
-        logger.info(f"Poging om ML-modellen te laden vanuit {CNNPatterns.MODELS_DIR}...")
+        logger.info(f"Poging om PyTorch ML-model te laden van {CNNPatterns.CNN_MODEL_PATH}...")
+        if os.path.exists(CNNPatterns.CNN_MODEL_PATH):
+            try:
+                input_channels = 9  # Matches feature_columns in pre_trainer.py
+                num_classes = 2     # bullFlag_label (0 of 1)
 
-        # Placeholder: Geen modellen worden daadwerkelijk geladen.
-        # Verwijder of commentarieer alle voorbeeld Keras/PyTorch laadlogica.
+                model = SimpleCNN(input_channels=input_channels, num_classes=num_classes)
+                # Belangrijk: Roep _set_num_classes_for_fc_init AAN voordat state_dict wordt geladen,
+                # omdat fc1 dynamisch wordt geïnitialiseerd in de forward pass van SimpleCNN.
+                model._set_num_classes_for_fc_init(num_classes)
 
-        if not self.loaded_models: # Dit zal altijd waar zijn voor de placeholder
-            logger.info("Geen Deep Learning-modellen geladen. CNNPatterns zal regelgebaseerd functioneren.")
+                # Laad state_dict. map_location zorgt voor compatibiliteit als getraind op GPU en nu CPU.
+                model.load_state_dict(torch.load(CNNPatterns.CNN_MODEL_PATH, map_location=torch.device('cpu')))
+                model.eval()  # Zet model in evaluatiemodus
 
-    def _predict_pattern_score(self, model_name: str, input_data: np.ndarray) -> float:
+                self.loaded_models['cnn_pattern_recognizer'] = model
+                logger.info(f"PyTorch model 'cnn_pattern_recognizer' succesvol geladen van {CNNPatterns.CNN_MODEL_PATH}.")
+            except Exception as e:
+                logger.error(f"Fout bij het laden van PyTorch model van {CNNPatterns.CNN_MODEL_PATH}: {e}")
+                logger.info("CNNPatterns zal regelgebaseerd functioneren zonder dit model.")
+        else:
+            logger.warning(f"PyTorch model niet gevonden op {CNNPatterns.CNN_MODEL_PATH}. CNNPatterns zal regelgebaseerd functioneren.")
+
+    def _predict_pattern_score(self, model_name: str, input_candles_df: pd.DataFrame) -> float:
         """
-        Voert inferentie uit met een geladen ML-model om een patroonscore te voorspellen.
-        Dit is een **placeholder** voor de daadwerkelijke inferentie.
+        Voert inferentie uit met een geladen PyTorch ML-model om een patroonscore te voorspellen.
         """
-        # Verwijder of commentarieer alle voorbeeld Keras/PyTorch voorspellingslogica.
+        model = self.loaded_models.get(model_name)
+        if not model:
+            logger.warning(f"Model '{model_name}' niet gevonden in self.loaded_models.")
+            return 0.0
 
-        logger.debug(f"Simuleren voorspelling voor model {model_name} met input shape {input_data.shape if input_data is not None else 'N/A'}.")
-        return np.random.rand() # Return a random score (0-1) as a placeholder simulation
+        if input_candles_df is None or input_candles_df.empty:
+            logger.debug(f"Input DataFrame voor '{model_name}' is leeg of None.")
+            return 0.0
+
+        sequence_length = 30  # Moet overeenkomen met training (of uit params_manager halen)
+        feature_cols = ['open', 'high', 'low', 'close', 'volume', 'rsi', 'macd', 'macdsignal', 'macdhist'] # Exacte features
+
+        if len(input_candles_df) < sequence_length:
+            logger.debug(f"Niet genoeg data in input_candles_df ({len(input_candles_df)} rijen) voor sequence_length {sequence_length} voor model '{model_name}'.")
+            return 0.0
+
+        if not all(col in input_candles_df.columns for col in feature_cols):
+            missing_cols = [col for col in feature_cols if col not in input_candles_df.columns]
+            logger.warning(f"Ontbrekende feature kolommen in input_candles_df voor model '{model_name}': {missing_cols}. Kan geen voorspelling doen.")
+            return 0.0
+
+        # Neem de laatste 'sequence_length' candles
+        df_sequence = input_candles_df.iloc[-sequence_length:].copy() # Werk op een kopie
+
+        # Feature extractie
+        sequence_data_pd = df_sequence[feature_cols]
+
+        # Normalisatie (feature-wise min-max scaling to [0,1] for the sequence)
+        # Dit bootst de normalisatie na zoals die in pre_trainer.py is gedefinieerd voor de trainingsdata.
+        # In een ideale situatie zou de scaler (min/max waarden per feature) van de trainingdata worden opgeslagen
+        # en hier worden toegepast. Voor nu, normaliseren we de sequence zelf.
+        min_vals = sequence_data_pd.min(axis=0)
+        max_vals = sequence_data_pd.max(axis=0)
+        range_vals = max_vals - min_vals
+        # Voorkom deling door nul als een feature constant is in de sequence
+        range_vals[range_vals == 0] = 1e-9 # kleine waarde ipv 1 om schaal te behouden als alles 0 is.
+
+        normalized_sequence_pd = (sequence_data_pd - min_vals) / range_vals
+        sequence_array = normalized_sequence_pd.values.astype(np.float32)
+
+        # Tensor Conversion: (batch_size=1, num_features/input_channels, sequence_length)
+        input_tensor = torch.tensor(sequence_array, dtype=torch.float32).permute(1, 0).unsqueeze(0)
+
+        logger.debug(f"Tensor voor model '{model_name}' shape: {input_tensor.shape}")
+
+        try:
+            with torch.no_grad():
+                output_logits = model(input_tensor)
+
+            # Pas softmax toe om waarschijnlijkheden te krijgen
+            probabilities = torch.softmax(output_logits, dim=1)
+
+            # Waarschijnlijkheid van de positieve klasse (index 1, aangenomen dat 0 = geen bullFlag, 1 = bullFlag)
+            positive_class_probability = probabilities[0, 1].item()
+            logger.debug(f"Model '{model_name}' voorspelde logits: {output_logits.numpy()}, probabilities: {probabilities.numpy()}, score (pos class): {positive_class_probability:.4f}")
+            return positive_class_probability
+        except Exception as e:
+            logger.error(f"Fout tijdens inferentie met model '{model_name}': {e}")
+            return 0.0
 
     # --- Helperfuncties voor dataverwerking (uitbreiding van Freqtrade DF naar 'candles' dicts) ---
     def _dataframe_to_candles(self, dataframe: pd.DataFrame) -> List[Dict[str, Any]]:
@@ -726,9 +795,9 @@ class CNNPatterns:
         Vertaald en geoptimaliseerd van detectPatternsMultiTimeframe in cnnPatternRecognizer-uitgebreid.js.
         """
         all_patterns = {
-            "zoomPatterns": {}, # Korte timeframes (1m, 5m, 15m)
-            "contextPatterns": {}, # Middel/lange timeframes (1h, 4h, 12h, 1d, 1w)
-            "patterns": {}, # Geconsolideerde gevalideerde patronen
+            "zoomPatterns": {},
+            "contextPatterns": {},
+            "patterns": {},
             "context": {"trend": "unknown", "volume_spike": False}
         }
 
@@ -737,25 +806,30 @@ class CNNPatterns:
             "context": ['1h', '4h', '12h', '1d', '1w']
         }
 
-        # --- ML Model Inference (Placeholder Integration) ---
-        if not self.loaded_models:
-            logger.info("Geen ML modellen geladen, overgeslagen ML-gebaseerde patroon detectie.")
-        else:
-            logger.info(f"Starten van ML-gebaseerde patroon detectie voor {len(self.loaded_models)} modellen...")
-            for model_name, ml_model_instance in self.loaded_models.items(): # ml_model_instance is not used yet
-                # In a real scenario, prepare specific input_data for each model
-                # For this placeholder, we'll use a dummy array.
-                logger.info(f"Voorbereiden van dummy input data voor ML model: {model_name}")
-                dummy_input_data = np.array([]) # Placeholder for actual data preparation
+        # --- ML Model Inference ---
+        ml_model_name = 'cnn_pattern_recognizer'
+        if ml_model_name in self.loaded_models:
+            # Kies een geschikte DataFrame voor voorspelling. '15m' of '1h' zijn vaak goede kandidaten.
+            # De keuze kan afhangen van de aard van het getrainde model.
+            df_for_prediction = candles_by_timeframe.get('15m')
 
-                # Call the placeholder prediction method
-                score = self._predict_pattern_score(model_name, dummy_input_data)
-                pattern_key = f"ml_{model_name}_score"
+            if df_for_prediction is not None and not df_for_prediction.empty:
+                logger.info(f"Uitvoeren van ML voorspelling met '{ml_model_name}' op {symbol} (15m data).")
+                # De _predict_pattern_score methode verwacht nu een DataFrame
+                score = self._predict_pattern_score(ml_model_name, df_for_prediction)
+
+                # Sla de score op. De key "ml_cnn_bullFlag_score" suggereert dat dit model
+                # specifiek een bullFlag voorspelt.
+                pattern_key = "ml_cnn_bullFlag_score"
                 all_patterns["patterns"][pattern_key] = score
-                logger.info(f"ML Model '{model_name}' gesimuleerde score: {score:.4f} (opgeslagen als {pattern_key})")
+                logger.info(f"ML Model '{ml_model_name}' voorspelde score voor '{pattern_key}': {score:.4f}")
+            else:
+                logger.info(f"Geen geschikte data (15m) gevonden voor ML voorspelling ({ml_model_name}) voor {symbol}. Overslaan.")
+        else:
+            logger.info(f"ML model '{ml_model_name}' niet geladen. Overslaan ML-gebaseerde patroon detectie.")
 
         # --- Regelgebaseerde detectie (bestaande logica) ---
-        available_timeframes = candles_by_timeframe.keys() # Ensure this is defined before use
+        available_timeframes = candles_by_timeframe.keys()
         for tf_group in TIME_FRAME_CONFIG.values():
             for tf_val in tf_group:
                  if tf_val not in available_timeframes:
