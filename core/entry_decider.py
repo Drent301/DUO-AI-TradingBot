@@ -1,14 +1,13 @@
 # core/entry_decider.py
 import logging
 from typing import Dict, Any, Optional
-import asyncio # Nodig voor de async main-test
-import pandas as pd # Nodig voor DataFrame type hinting
-import numpy as np # Voor mock data generatie in test
-from datetime import datetime, timedelta # Voor mock data generatie in test
-import os # Voor dotenv in test
-import dotenv # Voor dotenv in test
-import json # Toegevoegd voor json.dumps in test
-
+import asyncio
+import pandas as pd
+import numpy as np
+from datetime import datetime, timedelta
+import os
+import dotenv
+import json
 
 # Importeer AI-modules
 from core.gpt_reflector import GPTReflector
@@ -17,6 +16,8 @@ from core.prompt_builder import PromptBuilder
 from core.bias_reflector import BiasReflector
 from core.confidence_engine import ConfidenceEngine
 from core.cnn_patterns import CNNPatterns
+from core.params_manager import ParamsManager
+from core.cooldown_tracker import CooldownTracker
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
@@ -24,7 +25,6 @@ logger.setLevel(logging.INFO)
 class EntryDecider:
     """
     Neemt AI-gestuurde entry-besluiten op basis van consensus, confidence, bias en patronen.
-    Vertaald van logica in entryCycle.js en concepten uit entryWatcher.js.
     """
 
     def __init__(self):
@@ -33,75 +33,68 @@ class EntryDecider:
         try:
             self.prompt_builder = PromptBuilder()
         except Exception as e:
-            logger.error(f"Failed to initialize PromptBuilder (it might be empty or have issues): {e}")
-            self.prompt_builder = None # Fallback
+            logger.error(f"Failed to initialize PromptBuilder: {e}")
+            self.prompt_builder = None
         self.bias_reflector = BiasReflector()
         try:
             self.confidence_engine = ConfidenceEngine()
         except Exception as e:
-            logger.error(f"Failed to initialize ConfidenceEngine (it might be empty or have issues): {e}")
-            self.confidence_engine = None # Fallback
-
+            logger.error(f"Failed to initialize ConfidenceEngine: {e}")
+            self.confidence_engine = None
         self.cnn_patterns_detector = CNNPatterns()
+        self.params_manager = ParamsManager()
+        self.cooldown_tracker = CooldownTracker() # Added CooldownTracker
         logger.info("EntryDecider geïnitialiseerd.")
 
-    async def get_consensus(self, prompt: str, token: str, strategy_id: str, current_bias: float, current_confidence: float) -> Dict[str, Any]:
+    async def get_consensus(self, prompt: str, token: str, strategy_id: str, current_learned_bias: float, current_learned_confidence: float) -> Dict[str, Any]:
         """
         Vraagt AI-modellen om input en combineert hun oordelen voor consensus.
-        Vertaald van getConsensus(GPT, Grok) [DUO] uit Functies Overzicht.
         """
         logger.debug(f"Vragen om AI-consensus voor {token} ({strategy_id})...")
 
-        # Haal GPT en Grok reflecties op
-        gpt_response = await self.gpt_reflector.ask_ai(prompt, context={"token": token, "strategy_id": strategy_id})
-        grok_response = await self.grok_reflector.ask_grok(prompt, context={"token": token, "strategy_id": strategy_id})
+        gpt_response = await self.gpt_reflector.ask_ai(prompt, context={"token": token, "strategy_id": strategy_id, "learned_bias": current_learned_bias, "learned_confidence": current_learned_confidence})
+        grok_response = await self.grok_reflector.ask_grok(prompt, context={"token": token, "strategy_id": strategy_id, "learned_bias": current_learned_bias, "learned_confidence": current_learned_confidence})
 
         gpt_confidence = gpt_response.get('confidence', 0.0) or 0.0
         grok_confidence = grok_response.get('confidence', 0.0) or 0.0
-        gpt_intentie = str(gpt_response.get('intentie', '')).upper() # Ensure string and uppercase
-        grok_intentie = str(grok_response.get('intentie', '')).upper() # Ensure string and uppercase
+        gpt_intentie = str(gpt_response.get('intentie', '')).upper()
+        grok_intentie = str(grok_response.get('intentie', '')).upper()
 
-
-        # Bepaal consensus over intentie (LONG/SHORT/HOLD)
         consensus_intentie = "HOLD"
         if gpt_intentie == grok_intentie and gpt_intentie in ["LONG", "SHORT"]:
             consensus_intentie = gpt_intentie
-        elif gpt_intentie in ["LONG", "SHORT"] and (not grok_intentie or grok_intentie == "HOLD"): # Handle empty or HOLD from Grok
+        elif gpt_intentie in ["LONG", "SHORT"] and (not grok_intentie or grok_intentie == "HOLD"):
             consensus_intentie = gpt_intentie
-        elif grok_intentie in ["LONG", "SHORT"] and (not gpt_intentie or gpt_intentie == "HOLD"): # Handle empty or HOLD from GPT
+        elif grok_intentie in ["LONG", "SHORT"] and (not gpt_intentie or gpt_intentie == "HOLD"):
             consensus_intentie = grok_intentie
-        # If they conflict (e.g. GPT LONG, Grok SHORT), default to HOLD or implement more complex resolution
         elif gpt_intentie in ["LONG", "SHORT"] and grok_intentie in ["LONG", "SHORT"] and gpt_intentie != grok_intentie:
-            # Conflicting signals, safer to hold or average confidence and pick higher one?
-            # For now, simple HOLD on conflict.
-            consensus_intentie = "HOLD"
+            # If intentions conflict, default to HOLD. More sophisticated handling could be added.
+            consensus_intentie = "HOLD" # Or consider highest confidence, or other tie-breaking
             logger.info(f"Conflicting AI intentions for {token}: GPT={gpt_intentie}, Grok={grok_intentie}. Defaulting to HOLD.")
 
-
-        # Gecombineerde confidence
-        num_valid_confidences = sum(1 for conf in [gpt_confidence, grok_confidence] if isinstance(conf, (float, int)) and conf > 0)
+        # Calculate combined confidence, ensuring only valid numbers are used
+        num_valid_confidences = sum(1 for conf in [gpt_confidence, grok_confidence] if isinstance(conf, (float, int)) and conf >= 0)
         if num_valid_confidences > 0:
             combined_confidence = (gpt_confidence + grok_confidence) / num_valid_confidences
         else:
-            combined_confidence = 0.0
+            combined_confidence = 0.0 # Default if no valid confidences
+
+        # Handle reported bias from AI responses, fallback to learned_bias if invalid
+        gpt_reported_bias = gpt_response.get('bias', current_learned_bias)
+        if not isinstance(gpt_reported_bias, (float, int)): gpt_reported_bias = current_learned_bias
+
+        grok_reported_bias = grok_response.get('bias', current_learned_bias)
+        if not isinstance(grok_reported_bias, (float, int)): grok_reported_bias = current_learned_bias
+
+        combined_bias_reported = (gpt_reported_bias + grok_reported_bias) / 2.0
 
 
-        # Voor de bias, neem het gemiddelde van de gerapporteerde bias (als aanwezig) of gebruik de huidige_bias
-        gpt_reported_bias = gpt_response.get('bias', current_bias) # Default to current_bias if not in response
-        if not isinstance(gpt_reported_bias, (float, int)): gpt_reported_bias = current_bias # Fallback if type is wrong
-
-        grok_reported_bias = grok_response.get('bias', current_bias)
-        if not isinstance(grok_reported_bias, (float, int)): grok_reported_bias = current_bias
-
-        combined_bias = (gpt_reported_bias + grok_reported_bias) / 2.0
-
-
-        logger.info(f"AI Consensus voor {token}: Intentie={consensus_intentie}, Confidence={combined_confidence:.2f}, Bias={combined_bias:.2f}")
+        logger.info(f"AI Consensus voor {token}: Intentie={consensus_intentie}, Confidence={combined_confidence:.2f}, Reported Bias={combined_bias_reported:.2f}")
 
         return {
             "consensus_intentie": consensus_intentie,
             "combined_confidence": combined_confidence,
-            "combined_bias": combined_bias, # This is AI's *perceived/suggested* bias for this situation
+            "combined_bias_reported": combined_bias_reported, # This is the bias *reported by AI*, not necessarily the strategy's learned_bias
             "gpt_raw": gpt_response,
             "grok_raw": grok_response
         }
@@ -109,111 +102,142 @@ class EntryDecider:
 
     async def should_enter(
         self,
-        dataframe: pd.DataFrame, # De Freqtrade dataframe met indicatoren
+        dataframe: pd.DataFrame, # Base timeframe DataFrame
         symbol: str,
         current_strategy_id: str,
-        trade_context: Optional[Dict[str, Any]] = None # Extra context zoals stake_amount
+        trade_context: Optional[Dict[str, Any]] = None, # Includes candles_by_timeframe, current_price etc.
+        # De volgende zijn leerbare parameters, doorgegeven vanuit de strategie
+        learned_bias: float = 0.5, # Current learned bias for the symbol/strategy
+        learned_confidence: float = 0.5, # Current learned confidence for the symbol/strategy
+        entry_conviction_threshold: float = 0.7 # Minimum AI confidence to consider entry
     ) -> Dict[str, Any]:
         """
         Bepaalt of een entry moet worden geplaatst op basis van AI-consensus en drempelwaarden.
-        Geoptimaliseerde entry-besluitvorming met GPT/Grok-consensus.
-        Vertaald van entryCycle.js logica.
         """
         logger.debug(f"[EntryDecider] Evalueren entry voor {symbol} met strategie {current_strategy_id}...")
 
         if dataframe.empty:
             logger.warning(f"[EntryDecider] Geen dataframe beschikbaar voor {symbol}. Kan geen entry besluit nemen.")
-            return {"enter": False, "reason": "no_dataframe", "confidence": 0, "bias": 0.5, "ai_intent": "HOLD"}
+            return {"enter": False, "reason": "no_dataframe", "confidence": 0, "learned_bias": learned_bias, "ai_intent": "HOLD", "pattern_details": {}}
 
-        # Haal huidige bias en confidence op
-        # Handle potential None from ConfidenceEngine if it's not implemented
-        learned_bias = self.bias_reflector.get_bias_score(symbol, current_strategy_id)
-        learned_confidence = self.confidence_engine.get_confidence_score(symbol, current_strategy_id) if self.confidence_engine else 0.5
-        if not self.confidence_engine:
-            logger.warning("ConfidenceEngine not available, using default confidence 0.5 (due to missing engine).")
+        # --- AI-specifieke Cooldown Check ---
+        if self.cooldown_tracker.is_cooldown_active(symbol, current_strategy_id):
+            cooldown_info = self.cooldown_tracker._cooldown_state.get(symbol, {}).get(current_strategy_id, {})
+            cooldown_reason = cooldown_info.get('reason', 'unknown')
+            cooldown_end_time_str = cooldown_info.get('end_time', 'N/A')
+            logger.info(f"Entry geweigerd voor {symbol} door AI-specifieke cooldown (reden: {cooldown_reason}, eindigt: {cooldown_end_time_str}).")
+            return {"enter": False, "reason": f"ai_cooldown_active_{cooldown_reason}", "confidence": learned_confidence, "learned_bias": learned_bias, "ai_intent": "HOLD", "pattern_details": {}}
+
+
+        # --- Time-of-Day Effectiveness Check ---
+        current_hour = datetime.now().hour # Use current time for this check
+        # Fetch timeOfDayEffectiveness from params_manager (expected to be a dict like {"0": 0.2, "1": -0.1, ...})
+        time_effectiveness_data = self.params_manager.get_param("timeOfDayEffectiveness", strategy_id=None) # Global parameter
+
+        hour_effectiveness = 0.0 # Default to neutral if not found or data is malformed
+        if isinstance(time_effectiveness_data, dict):
+            hour_effectiveness = time_effectiveness_data.get(str(current_hour), 0.0)
+        else:
+            logger.warning(f"timeOfDayEffectiveness data is not a dict or not found: {time_effectiveness_data}. Using neutral (0.0).")
+
+        # Adjust AI consensus confidence based on time-of-day effectiveness
+        # Positive effectiveness increases confidence, negative decreases it.
+        # The multiplier's sensitivity can be tuned (e.g., * 0.5 means a score of 1.0 or -1.0 from effectiveness changes confidence by +/-50%)
+        time_adjusted_confidence_multiplier = 1.0 + (hour_effectiveness * 0.5)
+        time_adjusted_confidence_multiplier = max(0.1, min(time_adjusted_confidence_multiplier, 2.0)) # Clamp multiplier (e.g., 0.1x to 2.0x)
+
+        logger.debug(f"Time-of-day effectiveness for hour {current_hour}: {hour_effectiveness:.2f}. Base Confidence Multiplier: {time_adjusted_confidence_multiplier:.2f}.")
 
 
         # Genereer prompt voor AI
-        # Ensure 'timeframe' attribute exists, default if not
-        tf_attr = dataframe.attrs.get('timeframe', '5m')
-        if not tf_attr: # If it's None or empty string
-            logger.warning(f"DataFrame for {symbol} missing 'timeframe' attribute, defaulting to '5m'.")
-            tf_attr = '5m'
-        candles_by_timeframe = {tf_attr: dataframe}
+        # Ensure candles_by_timeframe is properly constructed, including the base dataframe
+        candles_by_timeframe = trade_context.get('candles_by_timeframe', {}) if trade_context else {}
+        base_tf_name = dataframe.attrs.get('timeframe', 'unknown_tf') # Get timeframe name from df attributes
+        if base_tf_name not in candles_by_timeframe and not dataframe.empty:
+             candles_by_timeframe[base_tf_name] = dataframe.copy()
 
 
+        prompt = None
         if self.prompt_builder:
             prompt = await self.prompt_builder.generate_prompt_with_data(
                 candles_by_timeframe=candles_by_timeframe,
                 symbol=symbol,
-                prompt_type='marketAnalysis', # Specific for entry
+                prompt_type='marketAnalysis', # Or 'entrySignal'
                 current_bias=learned_bias,
                 current_confidence=learned_confidence
             )
         else:
-            logger.error("PromptBuilder not available. Cannot generate prompt.")
-            prompt = None # Fallback
+            logger.error("[EntryDecider] PromptBuilder not available. Cannot generate prompt for entry decision.")
+            return {"enter": False, "reason": "prompt_builder_unavailable", "confidence": learned_confidence, "learned_bias": learned_bias, "ai_intent": "HOLD", "pattern_details": {}}
 
-        if not prompt:
+        if not prompt: # Should be redundant if PromptBuilder error is caught, but as a safeguard
             logger.warning(f"[EntryDecider] Geen prompt gegenereerd voor {symbol}. Entry geweigerd.")
-            return {"enter": False, "reason": "no_prompt", "confidence": learned_confidence, "bias": learned_bias, "ai_intent": "HOLD"}
+            return {"enter": False, "reason": "no_prompt_generated", "confidence": learned_confidence, "learned_bias": learned_bias, "ai_intent": "HOLD", "pattern_details": {}}
 
         # Vraag AI-consensus
         consensus_result = await self.get_consensus(prompt, symbol, current_strategy_id, learned_bias, learned_confidence)
-
         consensus_intentie = consensus_result['consensus_intentie']
         ai_combined_confidence = consensus_result['combined_confidence']
-        # ai_reported_bias = consensus_result['combined_bias'] # Bias reported by AI for this specific prompt
 
-        # Haal actuele drempelwaarden op (kunnen lerende variabelen zijn)
-        entry_conviction_threshold = 0.7 # Voorbeeld, kan uit config/lerend systeem komen
-        bias_threshold_for_entry = 0.55 # Moet een licht positieve geleerde bias hebben
+        # Pas AI-consensus confidence aan met time-of-day multiplier
+        final_ai_confidence = ai_combined_confidence * time_adjusted_confidence_multiplier
+        final_ai_confidence = min(final_ai_confidence, 1.0) # Ensure it doesn't exceed 1.0 (max confidence)
+        final_ai_confidence = max(final_ai_confidence, 0.0) # Ensure it doesn't go below 0.0 (min confidence)
 
-        ai_cooldown_active = False # Placeholder
+        logger.info(f"Symbol: {symbol}, Initial AI Conf: {ai_combined_confidence:.2f}, Time Multiplier: {time_adjusted_confidence_multiplier:.2f}, Final AI Conf: {final_ai_confidence:.2f}")
+
 
         # CNN patroon check
         pattern_data = await self.cnn_patterns_detector.detect_patterns_multi_timeframe(candles_by_timeframe, symbol)
         has_strong_cnn_pattern = False
+        # cnnPatternWeight = self.params_manager.get_param("cnnPatternWeight", strategy_id=current_strategy_id) # Fetched but not used yet
+
         if pattern_data and pattern_data.get('patterns'):
             bullish_patterns = ['bullishEngulfing', 'CDLENGULFING', 'morningStar', 'CDLMORNINGSTAR',
-                                'threeWhiteSoldiers', 'CDL3WHITESOLDIERS', 'bullFlag',
-                                'bullishFractal', 'bullishRSIDivergence', 'CDLHAMMER', 'CDLINVERTEDHAMMER', 'CDLPIERCING']
+                                'threeWhiteSoldiers', 'CDL3WHITESOLDIERS', 'bullFlag', 'bullishFractal',
+                                'bullishRSIDivergence', 'CDLHAMMER', 'CDLINVERTEDHAMMER', 'CDLPIERCING', 'ascendingTriangle', 'pennant']
+            # Check if any of the detected patterns (keys in pattern_data['patterns']) are in our bullish_patterns list
             if any(p.upper() in (key.upper() for key in pattern_data['patterns'].keys()) for p in bullish_patterns):
                 has_strong_cnn_pattern = True
                 logger.info(f"Sterk bullish CNN patroon gedetecteerd voor {symbol}: {pattern_data['patterns']}")
 
-
         # AI-besluitvormingslogica
-        # Gebruik learned_bias (de historisch geleerde voorkeur) en ai_combined_confidence (AI's zekerheid nu)
-        if consensus_intentie == "LONG" and            ai_combined_confidence >= entry_conviction_threshold and            learned_bias >= bias_threshold_for_entry and            has_strong_cnn_pattern and            not ai_cooldown_active:
+        # Entry conditions: AI intent is LONG, final (time-adjusted) confidence meets threshold,
+        # learned bias is sufficiently bullish, and a strong CNN pattern is present.
+        if consensus_intentie == "LONG" and \
+           final_ai_confidence >= entry_conviction_threshold and \
+           learned_bias >= 0.55 and \
+           has_strong_cnn_pattern:
 
-            logger.info(f"[EntryDecider] ✅ Entry GOEDKEURING voor {symbol}. Consensus: {consensus_intentie}, AI Conf: {ai_combined_confidence:.2f}, Geleerde Bias: {learned_bias:.2f}, Patroon: {has_strong_cnn_pattern}.")
+            logger.info(f"[EntryDecider] ✅ Entry GOEDKEURING voor {symbol}. Consensus: {consensus_intentie}, Final AI Conf: {final_ai_confidence:.2f} (Threshold: {entry_conviction_threshold:.2f}), Geleerde Bias: {learned_bias:.2f} (Threshold: >=0.55), Patroon: {has_strong_cnn_pattern}.")
             return {
                 "enter": True,
-                "reason": "AI_CONSENSUS_LONG",
-                "confidence": ai_combined_confidence, # AI's confidence for this decision
-                "bias": learned_bias, # The strategy's learned bias
+                "reason": "AI_CONSENSUS_LONG_CONDITIONS_MET",
+                "confidence": final_ai_confidence,
+                "learned_bias": learned_bias,
                 "ai_intent": consensus_intentie,
-                "ai_details": consensus_result,
+                "ai_details": consensus_result, # Full AI consensus details
                 "pattern_details": pattern_data.get('patterns', {})
             }
         else:
+            # Construct detailed reason for rejection
             reason_parts = []
-            if consensus_intentie != "LONG": reason_parts.append(f"ai_intent_{consensus_intentie}")
-            if ai_combined_confidence < entry_conviction_threshold: reason_parts.append(f"ai_conf_low_{ai_combined_confidence:.2f}")
-            if learned_bias < bias_threshold_for_entry: reason_parts.append(f"learned_bias_low_{learned_bias:.2f}")
-            if not has_strong_cnn_pattern: reason_parts.append("no_strong_bullish_pattern")
-            if ai_cooldown_active: reason_parts.append("ai_cooldown")
+            if consensus_intentie != "LONG": reason_parts.append(f"ai_intent_not_long ({consensus_intentie})")
+            if final_ai_confidence < entry_conviction_threshold: reason_parts.append(f"final_ai_conf_low ({final_ai_confidence:.2f} < {entry_conviction_threshold:.2f})")
+            if learned_bias < 0.55: reason_parts.append(f"learned_bias_low ({learned_bias:.2f} < 0.55)")
+            if not has_strong_cnn_pattern: reason_parts.append("no_strong_bullish_cnn_pattern")
 
-            full_reason_str = "_".join(reason_parts) if reason_parts else "conditions_not_met"
+            full_reason_str = "_".join(reason_parts) if reason_parts else "entry_conditions_not_met"
+            if not reason_parts and consensus_intentie == "LONG": # If intent was long but other conditions failed
+                 full_reason_str = f"intent_long_other_conditions_failed_conf{final_ai_confidence:.2f}_bias{learned_bias:.2f}_pattern{has_strong_cnn_pattern}"
 
 
-            logger.info(f"[EntryDecider] ❌ Entry GEWEIGERD voor {symbol}. Reden: {full_reason_str}. AI Intentie: {consensus_intentie}, AI Conf: {ai_combined_confidence:.2f}, Geleerde Bias: {learned_bias:.2f}, Patroon: {has_strong_cnn_pattern}.")
+            logger.info(f"[EntryDecider] ❌ Entry GEWEIGERD voor {symbol}. Reden: {full_reason_str}. AI Intentie: {consensus_intentie}, Final AI Conf: {final_ai_confidence:.2f}, Geleerde Bias: {learned_bias:.2f}, Patroon: {has_strong_cnn_pattern}.")
             return {
                 "enter": False,
                 "reason": full_reason_str,
-                "confidence": ai_combined_confidence,
-                "bias": learned_bias,
+                "confidence": final_ai_confidence, # Report final (potentially adjusted) confidence
+                "learned_bias": learned_bias,
                 "ai_intent": consensus_intentie,
                 "ai_details": consensus_result,
                 "pattern_details": pattern_data.get('patterns', {})
@@ -221,23 +245,19 @@ class EntryDecider:
 
 # Voorbeeld van hoe je het zou kunnen gebruiken (voor testen)
 if __name__ == "__main__":
-    # Corrected path for .env when running this script directly
     dotenv_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '.env')
     dotenv.load_dotenv(dotenv_path)
 
-    # Setup basic logging for the test
     import sys
-    # import json # Already imported at the top
     logging.basicConfig(level=logging.INFO,
                         format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
                         handlers=[logging.StreamHandler(sys.stdout)])
 
-
-    # Mock Freqtrade DataFrame
-    def create_mock_dataframe_for_entry(timeframe: str = '5m', num_candles: int = 100) -> pd.DataFrame:
+    # Mock Freqtrade DataFrame (same as in cnn_patterns test)
+    def create_mock_dataframe_for_entry_decider(timeframe: str = '5m', num_candles: int = 100) -> pd.DataFrame:
         data = []
-        now = datetime.utcnow() # Use UTC for consistency
-        interval_seconds_map = {
+        now = datetime.utcnow() # Use utcnow for consistency
+        interval_seconds_map = { # Expanded map
             '1m': 60, '5m': 300, '15m': 900, '1h': 3600,
             '4h': 14400, '12h': 43200, '1d': 86400
         }
@@ -247,32 +267,34 @@ if __name__ == "__main__":
         for i in range(num_candles):
             date = now - timedelta(seconds=(num_candles - 1 - i) * interval_seconds)
             open_ = 100 + i * 0.1 + np.random.rand() * 2
-            close_ = open_ + (np.random.rand() - 0.5) * 5
+            close_ = open_ + (np.random.rand() - 0.5) * 5 # Allow more variation
             high_ = max(open_, close_) + np.random.rand() * 2
             low_ = min(open_, close_) - np.random.rand() * 2
             volume = 1000 + np.random.rand() * 500
 
-            rsi = 30 if i == num_candles - 1 else 50 + (np.random.rand() - 0.5) * 30
+            # Mock indicators (can be more sophisticated if needed)
+            rsi = 50 + (np.random.rand() - 0.5) * 30
             macd_val = (np.random.rand() - 0.5) * 0.1
-            macdsignal_val = macd_val * (0.8 + np.random.rand() * 0.2)
+            macdsignal_val = macd_val * (0.8 + np.random.rand()*0.2)
             macdhist_val = macd_val - macdsignal_val
 
+            # Simplified Bollinger Bands for mock data
             sma_period = 20
             std_dev_multiplier = 2
-            if i >= sma_period -1 and len(data) >= sma_period -1:
-                # Ensure we use 'close' which is at index 4
-                recent_closes_for_bb = [r[4] for r in data[-(sma_period-1):]] + [close_]
-                if len(recent_closes_for_bb) == sma_period:
+            # current_candle_data_for_sma = [] # Not used
+            if i >= sma_period -1 and len(data) >= sma_period -1: # check i against sma_period-1
+                recent_closes_for_bb = [r[4] for r in data[-(sma_period-1):]] + [close_] # use index 4 for close
+                if len(recent_closes_for_bb) == sma_period: # Ensure we have exactly sma_period points
                     sma = np.mean(recent_closes_for_bb)
                     std_dev = np.std(recent_closes_for_bb)
                     bb_middle = sma
                     bb_upper = sma + std_dev_multiplier * std_dev
                     bb_lower = sma - std_dev_multiplier * std_dev
-                else:
+                else: # Fallback if not enough data yet for full SMA
                     bb_middle = open_
                     bb_upper = high_
                     bb_lower = low_
-            else:
+            else: # Fallback for initial candles
                 bb_middle = open_
                 bb_upper = high_
                 bb_lower = low_
@@ -283,7 +305,7 @@ if __name__ == "__main__":
         df['date'] = pd.to_datetime(df['date'])
         df.set_index('date', inplace=True)
         df.attrs['timeframe'] = timeframe
-        df.attrs['pair'] = 'ETH/USDT' # Example pair
+        df.attrs['pair'] = 'ETH/USDT' # Add pair attribute for context
         return df
 
     async def run_test_entry_decider():
@@ -291,112 +313,113 @@ if __name__ == "__main__":
         test_symbol = "ETH/USDT"
         test_strategy_id = "DUOAI_Strategy"
 
-        mock_df = create_mock_dataframe_for_entry(timeframe='5m', num_candles=60)
-        # Ensure last candle is bullish for pattern detection
-        last_idx = mock_df.index[-1]
-        mock_df.loc[last_idx, 'open'] = mock_df.loc[last_idx, 'low'] + 0.1 # Open near low
-        mock_df.loc[last_idx, 'close'] = mock_df.loc[last_idx, 'high'] - 0.1 # Close near high
-        mock_df.loc[last_idx, 'volume'] = mock_df['volume'].mean() * 3
+        # Create mock dataframes
+        mock_df_5m = create_mock_dataframe_for_entry_decider(timeframe='5m', num_candles=60)
+        # Make last candle bullish for pattern detection test
+        last_idx = mock_df_5m.index[-1]
+        mock_df_5m.loc[last_idx, 'open'] = mock_df_5m.loc[last_idx, 'low'] + 0.1
+        mock_df_5m.loc[last_idx, 'close'] = mock_df_5m.loc[last_idx, 'high'] - 0.1
+        mock_df_5m.loc[last_idx, 'volume'] = mock_df_5m['volume'].mean() * 3
+
+        mock_candles_by_timeframe = {
+            '5m': mock_df_5m,
+            '1h': create_mock_dataframe_for_entry_decider('1h', 60)
+        }
+        mock_trade_context = {"stake_amount": 100, "candles_by_timeframe": mock_candles_by_timeframe, "current_price": mock_df_5m['close'].iloc[-1]}
 
 
-        # Mock dependencies that might be empty
-        if decider.prompt_builder is None: # If PromptBuilder failed to init
-            class MockPromptBuilder:
-                async def generate_prompt_with_data(self, **kwargs):
-                    logger.info("Using MOCK PromptBuilder.generate_prompt_with_data")
-                    return f"Mock prompt for {kwargs.get('symbol', 'unknown')}: Analyse market for entry."
-            decider.prompt_builder = MockPromptBuilder()
-
-        if decider.confidence_engine is None: # If ConfidenceEngine failed to init
-            class MockConfidenceEngine:
-                def get_confidence_score(self, token, strategy_id): # Ensure signature matches
-                    logger.info("Using MOCK ConfidenceEngine.get_confidence_score")
-                    return 0.75 # Default good confidence
-            decider.confidence_engine = MockConfidenceEngine()
-
-
-        # Patch BiasReflector and ConfidenceEngine for predictable test values
-        original_bias_get = decider.bias_reflector.get_bias_score
-        # Store original get_confidence_score if ConfidenceEngine was initialized, else it's None
-        original_conf_get = decider.confidence_engine.get_confidence_score if decider.confidence_engine else None
-
-
-        decider.bias_reflector.get_bias_score = lambda t, s: 0.7
-        if decider.confidence_engine: # Only patch if it exists
-            # Store the original method reference before patching, if not already stored
-            if not hasattr(decider.confidence_engine, 'get_confidence_score_original_ref'):
-                 decider.confidence_engine.get_confidence_score_original_ref = original_conf_get
-            decider.confidence_engine.get_confidence_score = lambda token, strategy_id: 0.8
-
-
-        print("\n--- Test EntryDecider (met mocked AI responses en bias/confidence) ---")
-
+        # Store original methods to restore after test
+        original_prompt_builder_generate = decider.prompt_builder.generate_prompt_with_data if decider.prompt_builder else None
         original_gpt_ask = decider.gpt_reflector.ask_ai
-        original_grok_ask = decider.grok_reflector.ask_ai
+        original_grok_ask = decider.grok_reflector.ask_grok
         original_cnn_detect = decider.cnn_patterns_detector.detect_patterns_multi_timeframe
-
-        async def mock_ask_ai_gpt_positive(prompt, context):
-            return {"reflectie": "GPT: Markt ziet er veelbelovend uit.", "confidence": 0.85, "intentie": "LONG", "emotie": "optimistisch", "bias": 0.7}
-        async def mock_ask_ai_grok_positive(prompt, context):
-            return {"reflectie": "Grok: Sterke accumulatie.", "confidence": 0.8, "intentie": "LONG", "emotie": "positief", "bias": 0.65}
-        async def mock_cnn_detect_bullish(candles_by_tf, symbol):
-            return {"patterns": {"bullishEngulfing": True, "CDLENGULFING": True}, "context": {"trend": "uptrend"}}
-
-        decider.gpt_reflector.ask_ai = mock_ask_ai_gpt_positive
-        decider.grok_reflector.ask_ai = mock_ask_ai_grok_positive
-        decider.cnn_patterns_detector.detect_patterns_multi_timeframe = mock_cnn_detect_bullish
+        original_bias_get = decider.bias_reflector.get_bias_score
+        original_conf_get = decider.confidence_engine.get_confidence_score if decider.confidence_engine else None
+        original_params_get = decider.params_manager.get_param
+        original_cooldown_active = decider.cooldown_tracker.is_cooldown_active
 
 
-        entry_decision = await decider.should_enter(
-            dataframe=mock_df, symbol=test_symbol, current_strategy_id=test_strategy_id,
-            trade_context={"stake_amount": 100}
+        # --- Test Scenario 1: Positive Entry (Good Time of Day) ---
+        print("\n--- Test EntryDecider (Positief Scenario, Goed Uur) ---")
+        # Mock dependencies for a positive entry
+        if decider.prompt_builder:
+            async def mock_generate_prompt_positive(*args, **kwargs): return "Mock prompt for positive entry."
+            decider.prompt_builder.generate_prompt_with_data = mock_generate_prompt_positive
+        async def mock_ask_ai_positive(*args, **kwargs): return {"reflectie": "AI: Markt veelbelovend.", "confidence": 0.85, "intentie": "LONG", "emotie": "optimistisch", "bias": 0.7}
+        decider.gpt_reflector.ask_ai = mock_ask_ai_positive
+        decider.grok_reflector.ask_ai = mock_ask_ai_positive # Simplified: Grok agrees
+        async def mock_cnn_bullish(*args, **kwargs): return {"patterns": {"bullishEngulfing": True, "CDLENGULFING": True}, "context": {"trend": "uptrend"}}
+        decider.cnn_patterns_detector.detect_patterns_multi_timeframe = mock_cnn_bullish
+
+        # Mock params_manager for positive time-of-day effectiveness
+        def mock_params_get_positive_time(key, strategy_id=None):
+            if key == "timeOfDayEffectiveness": return {str(datetime.now().hour): 0.5} # Positive effectiveness
+            if key == "entryConvictionThreshold": return 0.7
+            if key == "cnnPatternWeight": return 1.0 # Example value
+            return 0.0 # Default
+        decider.params_manager.get_param = mock_params_get_positive_time
+        decider.cooldown_tracker.is_cooldown_active = lambda t, s: False # Ensure no cooldown
+
+        entry_decision_positive = await decider.should_enter(
+            dataframe=mock_df_5m, symbol=test_symbol, current_strategy_id=test_strategy_id,
+            trade_context=mock_trade_context,
+            learned_bias=0.7, learned_confidence=0.8, entry_conviction_threshold=0.7
         )
-        print("\nResultaat Entry Besluit (Positief Scenario):", json.dumps(entry_decision, indent=2, default=str))
-        assert entry_decision['enter'] is True
+        print("Resultaat (Positief Scenario):", json.dumps(entry_decision_positive, indent=2, default=str))
+        assert entry_decision_positive['enter'] is True
+        assert "AI_CONSENSUS_LONG_CONDITIONS_MET" in entry_decision_positive['reason']
+        assert entry_decision_positive['confidence'] > 0.8 # Expected to be boosted by time effectiveness
 
-        # Test geval met lage AI confidence
-        print("\n--- Test EntryDecider (met lage AI confidence) ---")
-        async def mock_ask_ai_gpt_low_conf(prompt, context):
-            return {"reflectie": "GPT: Onzeker.", "confidence": 0.4, "intentie": "LONG", "emotie": "neutraal", "bias": 0.5}
-        async def mock_ask_ai_grok_low_conf(prompt, context):
-            return {"reflectie": "Grok: Geen duidelijk signaal.", "confidence": 0.3, "intentie": "HOLD", "emotie": "onzeker", "bias": 0.5}
-        decider.gpt_reflector.ask_ai = mock_ask_ai_gpt_low_conf
-        decider.grok_reflector.ask_ai = mock_ask_ai_grok_low_conf
+        # --- Test Scenario 2: Negative Time-of-Day Effectiveness Blocks Entry ---
+        print("\n--- Test EntryDecider (Negatief Uur Blokkeert Entry) ---")
+        # Keep AI positive, but time of day is bad
+        decider.gpt_reflector.ask_ai = mock_ask_ai_positive # Re-assign as it might have been changed by other tests if run in parallel
+        decider.grok_reflector.ask_ai = mock_ask_ai_positive
+        decider.cnn_patterns_detector.detect_patterns_multi_timeframe = mock_cnn_bullish
 
-        entry_decision_low_conf = await decider.should_enter(
-            dataframe=mock_df, symbol=test_symbol, current_strategy_id=test_strategy_id
+        def mock_params_get_negative_time(key, strategy_id=None):
+            if key == "timeOfDayEffectiveness": return {str(datetime.now().hour): -0.8} # Strong negative effectiveness
+            if key == "entryConvictionThreshold": return 0.7
+            if key == "cnnPatternWeight": return 1.0
+            return 0.0
+        decider.params_manager.get_param = mock_params_get_negative_time
+
+        entry_decision_neg_time = await decider.should_enter(
+            dataframe=mock_df_5m, symbol=test_symbol, current_strategy_id=test_strategy_id,
+            trade_context=mock_trade_context,
+            learned_bias=0.7, learned_confidence=0.8, entry_conviction_threshold=0.7
         )
-        print("\nResultaat Entry Besluit (Lage AI Confidence):", json.dumps(entry_decision_low_conf, indent=2, default=str))
-        assert entry_decision_low_conf['enter'] is False
-        assert "ai_conf_low" in entry_decision_low_conf['reason']
+        print("Resultaat (Negatief Uur):", json.dumps(entry_decision_neg_time, indent=2, default=str))
+        assert entry_decision_neg_time['enter'] is False
+        assert "final_ai_conf_low" in entry_decision_neg_time['reason'] # Confidence should be reduced below threshold
 
-        # Test geval met bearish AI intentie
-        print("\n--- Test EntryDecider (met bearish AI intentie) ---")
-        async def mock_ask_ai_gpt_bearish(prompt, context):
-            return {"reflectie": "GPT: Markt zwak.", "confidence": 0.8, "intentie": "SHORT", "emotie": "bearish", "bias": 0.3}
-        async def mock_ask_ai_grok_bearish(prompt, context):
-            return {"reflectie": "Grok: Daling verwacht.", "confidence": 0.7, "intentie": "SHORT", "emotie": "negatief", "bias": 0.25}
-        decider.gpt_reflector.ask_ai = mock_ask_ai_gpt_bearish
-        decider.grok_reflector.ask_ai = mock_ask_ai_grok_bearish
+        # --- Test Scenario 3: Cooldown Active Blocks Entry ---
+        print("\n--- Test EntryDecider (Cooldown Actief Blokkeert Entry) ---")
+        decider.cooldown_tracker.is_cooldown_active = lambda t, s: True # Mock cooldown as active
+        # Ensure params_manager is reset to a state that would otherwise allow entry
+        decider.params_manager.get_param = mock_params_get_positive_time
 
-        entry_decision_bearish_ai = await decider.should_enter(
-            dataframe=mock_df, symbol=test_symbol, current_strategy_id=test_strategy_id
+        entry_decision_cooldown = await decider.should_enter(
+            dataframe=mock_df_5m, symbol=test_symbol, current_strategy_id=test_strategy_id,
+            trade_context=mock_trade_context,
+            learned_bias=0.7, learned_confidence=0.8, entry_conviction_threshold=0.7
         )
-        print("\nResultaat Entry Besluit (Bearish AI):", json.dumps(entry_decision_bearish_ai, indent=2, default=str))
-        assert entry_decision_bearish_ai['enter'] is False
-        assert "ai_intent_SHORT" in entry_decision_bearish_ai['reason']
-
-        # Herstel originele methods
-        decider.bias_reflector.get_bias_score = original_bias_get
-        if decider.confidence_engine and hasattr(decider.confidence_engine, 'get_confidence_score_original_ref'):
-            decider.confidence_engine.get_confidence_score = decider.confidence_engine.get_confidence_score_original_ref
-        elif decider.confidence_engine and original_conf_get: # If it was the original class and we have its original method
-             decider.confidence_engine.get_confidence_score = original_conf_get
+        print("Resultaat (Cooldown Actief):", json.dumps(entry_decision_cooldown, indent=2, default=str))
+        assert entry_decision_cooldown['enter'] is False
+        assert "ai_cooldown_active" in entry_decision_cooldown['reason']
 
 
+        # Restore original methods
+        if decider.prompt_builder:
+            decider.prompt_builder.generate_prompt_with_data = original_prompt_builder_generate
         decider.gpt_reflector.ask_ai = original_gpt_ask
-        decider.grok_reflector.ask_ai = original_grok_ask
+        decider.grok_reflector.ask_grok = original_grok_ask
         decider.cnn_patterns_detector.detect_patterns_multi_timeframe = original_cnn_detect
+        decider.bias_reflector.get_bias_score = original_bias_get
+        if decider.confidence_engine:
+            decider.confidence_engine.get_confidence_score = original_conf_get
+        decider.params_manager.get_param = original_params_get
+        decider.cooldown_tracker.is_cooldown_active = original_cooldown_active
 
 
     asyncio.run(run_test_entry_decider())
