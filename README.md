@@ -102,7 +102,7 @@ python scripts/fetch_market_data.py --symbols BTCUSDT,ETHUSDT --intervals 1d,4h 
 ### Data Storage
 
 *   Fetched data is stored in CSV files.
-*   **Location**: `data/binance/{SYMBOL}/{INTERVAL}/`
+*   **Location**: By default, data is stored in `data/binance/{SYMBOL}/{INTERVAL}/`. This base path (`data/binance`) can be configured in `config/config.json` under `data_sources.binance.data_directory`.
 *   **Filename Convention**: `{SYMBOL}_{INTERVAL}_{START_OPEN_TIME_MS}.csv` (where `START_OPEN_TIME_MS` is the millisecond timestamp of the first k-line in the file).
 *   **Format**: Each row in the CSV represents a single k-line with the following columns: `open_time`, `open`, `high`, `low`, `close`, `volume`, `close_time`, `quote_asset_volume`, `number_of_trades`, `taker_buy_base_asset_volume`, `taker_buy_quote_asset_volume`.
 

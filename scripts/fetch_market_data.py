@@ -88,20 +88,4 @@ def main():
     logger.info("All fetching tasks complete.")
 
 if __name__ == "__main__":
-    # Create 'scripts' directory if it doesn't exist
-    # This is mostly for the subtask environment; in a real repo, it would exist.
-    # However, the script itself is IN the scripts directory, so this check might be redundant
-    # or intended for a different context (e.g. if script was in root and creating 'scripts').
-    # For safety, keeping it as specified.
-    script_dir = os.path.dirname(os.path.abspath(__file__))
-    if not os.path.exists(script_dir) and os.path.basename(script_dir) == 'scripts':
-         # This condition is tricky: if the script is run as "python scripts/fetch_market_data.py",
-         # then script_dir is ".../project_root/scripts".
-         # If the 'scripts' dir itself is missing, this script can't be in it to run.
-         # This line likely intends to ensure the *target* for some output, or is a general safeguard.
-         # Given the file path is `scripts/fetch_market_data.py`, `script_dir` will be `.../scripts`.
-         # So `os.makedirs(script_dir, exist_ok=True)` would ensure its own directory exists, if it could run.
-         # The original `os.makedirs('scripts', exist_ok=True)` implies running from project root.
-         # I will use the original line as per instructions, assuming it's run from project root.
-        os.makedirs('scripts', exist_ok=True)
     main()

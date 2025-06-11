@@ -75,7 +75,8 @@
   },
   "data_sources": {
     "binance": {
-      "api_url": "https://api.binance.com/api/v3"
+      "api_url": "https://api.binance.com/api/v3",
+      "data_directory": "data/binance"
     }
   }
 }
