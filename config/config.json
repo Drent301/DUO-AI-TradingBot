@@ -72,5 +72,10 @@
   "db_url": "sqlite:///freqtrade.sqlite",
   "internals": {
     "process_throttle_secs": 5
+  },
+  "data_sources": {
+    "binance": {
+      "api_url": "https://api.binance.com/api/v3"
+    }
   }
 }

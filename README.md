@@ -71,6 +71,34 @@ python main.py
 
 This would typically initialize the `AIOptimizer` and start its periodic optimization cycles, interacting with a running Freqtrade instance or its data.
 
+## Fetching Historical Market Data
+
+The project includes a script to download historical k-line (candlestick) data from Binance. This data is stored locally and can be used for backtesting, analysis, or training machine learning models.
+
+The script `scripts/fetch_market_data.py` handles fetching and saving the data, including logic to resume downloads if interrupted.
+
+### How to Run
+
+You can run the script from the project's root directory:
+
+```bash
+python scripts/fetch_market_data.py --symbols BTCUSDT,ETHUSDT --intervals 1d,4h --start_date "2020-01-01" --end_date "2023-12-31"
+```
+
+### Command-Line Arguments
+
+*   `--symbols SYMBOLS`: **Required**. A comma-separated list of trading symbols to fetch data for (e.g., `BTCUSDT,ETHUSDT,ADAUSDT`). Symbols should match Binance's naming.
+*   `--intervals INTERVALS`: **Required**. A comma-separated list of k-line intervals (e.g., `1m,5m,15m,1h,4h,1d,1w`).
+*   `--start_date START_DATE`: **Required**. The start date for data fetching. Format: "YYYY-MM-DD" or "YYYY-MM-DD HH:MM:SS".
+*   `--end_date END_DATE`: **Optional**. The end date for data fetching. Format: "YYYY-MM-DD" or "YYYY-MM-DD HH:MM:SS". If not provided, data will be fetched up to the current time.
+
+### Data Storage
+
+*   Fetched data is stored in CSV files.
+*   **Location**: `data/binance/{SYMBOL}/{INTERVAL}/`
+*   **Filename Convention**: `{SYMBOL}_{INTERVAL}_{START_OPEN_TIME_MS}.csv` (where `START_OPEN_TIME_MS` is the millisecond timestamp of the first k-line in the file).
+*   **Format**: Each row in the CSV represents a single k-line with the following columns: `open_time`, `open`, `high`, `low`, `close`, `volume`, `close_time`, `quote_asset_volume`, `number_of_trades`, `taker_buy_base_asset_volume`, `taker_buy_quote_asset_volume`.
+
 ## Disclaimer
 
 Trading cryptocurrencies involves significant risk. This software is provided "as is" without warranty of any kind. The developers are not responsible for any financial losses incurred through the use of this software. Always do your own research and exercise caution.
