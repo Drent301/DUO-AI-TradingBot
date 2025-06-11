@@ -20,7 +20,10 @@
       "USDC/USDT",
       "WBTC/USDT",
       "LINK/USDT",
-      "UNI/USDT"
+      "UNI/USDT",
+      "ZEN/BTC",
+      "LSK/BTC",
+      "ETH/BTC"
     ],
     "pair_blacklist": [],
     "markets": {
