@@ -128,11 +128,9 @@ class EntryDecider:
         # Haal huidige bias en confidence op
         # Handle potential None from ConfidenceEngine if it's not implemented
         learned_bias = self.bias_reflector.get_bias_score(symbol, current_strategy_id)
-        if self.confidence_engine:
-            learned_confidence = self.confidence_engine.get_confidence_score(symbol, current_strategy_id)
-        else:
-            logger.warning("ConfidenceEngine not available, using default confidence 0.5 for entry decision.")
-            learned_confidence = 0.5
+        learned_confidence = self.confidence_engine.get_confidence_score(symbol, current_strategy_id) if self.confidence_engine else 0.5
+        if not self.confidence_engine:
+            logger.warning("ConfidenceEngine not available, using default confidence 0.5 (due to missing engine).")
 
 
         # Genereer prompt voor AI
