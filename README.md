@@ -15,29 +15,50 @@ DUO-AI Freqtrade Integration is an advanced system designed to augment Freqtrade
 *   **Strategy Management (`strategy_manager.py`)**: Manages the parameters and performance tracking of Freqtrade strategies, interfacing with the Freqtrade database and parameter files.
 *   **AI Optimization Loop (`ai_optimizer.py`)**: Orchestrates the periodic optimization process, including performance analysis, reflection, and strategy mutation.
 
+## Setup & Installation
+
+1.  **Freqtrade**: Ensure you have a working Freqtrade installation. Freqtrade is now installed as a Python package.
+2.  **Python Environment**: Set up a Python environment (e.g., venv) with dependencies from `requirements.txt`.
+    ```bash
+    python -m venv .venv
+    source .venv/bin/activate # or .venv\Scripts\activate for Windows
+    pip install -r requirements.txt
+    ```
+3.  **API-sleutels (`.env`):**
+    Creëer een bestand genaamd `.env` in de hoofdmap van het project. Vul dit bestand met je API-sleutels voor OpenAI, Grok en Bitvavo. **Dit bestand mag NOOIT naar GitHub worden gecommit.**
+    ```
+    OPENAI_API_KEY="sk-YOUR_OPENAI_API_KEY"
+    OPENAI_MODEL="gpt-4o"
+    GROK_API_KEY="grok-YOUR_GROK_API_KEY"
+    GROK_MODEL="grok-1"
+    GROK_LIVE_SEARCH_API_URL="https://api.x.ai/v1/live-search" # Pas dit aan naar het officiële Grok Live Search API endpoint zodra bekend
+    BITVAVO_API_KEY="YOUR_BITVAVO_API_KEY"
+    BITVAVO_SECRET_KEY="YOUR_BITVAVO_SECRET_KEY"
+    ```
+4.  **Freqtrade Configuration (`config/config.json`):**
+    Refer to the "Configuration" section below for details on setting up `config/config.json`. The base configuration is present in the repository.
+5.  **Database**: Ensure Freqtrade is configured to use an SQLite database (e.g., `freqtrade.sqlite`), as this is used by the AI components for performance analysis.
+
 ## Configuration
 
-### Pair Whitelist
+### Freqtrade `config/config.json`
 
-The `pair_whitelist` in your Freqtrade configuration should be carefully selected. The AI system will operate on these pairs. Example:
-
-```json
-"exchange": {
-    "pair_whitelist": [
-        "ETH/USDT",
-        "BTC/USDT",
-        "ADA/USDT",
-        "SOL/USDT",
-        "XRP/USDT",
-        // Add more pairs as needed, ensure they are valid on your exchange
-    ]
-    // ... other exchange settings
-},
-```
-
-### Dynamic Adjustments
-
-The system's approach to dynamic Freqtrade configuration adjustments involves the AI providing advice or suggesting modifications to strategy parameters or filter lists. These are not "hot-swaps" of the main Freqtrade `config.json` during live operations but rather updates to strategy-specific parameters or through controlled mechanisms that Freqtrade supports for dynamic loading (e.g., strategy parameters).
+*   **Pair Whitelist**: The `pair_whitelist` in your Freqtrade `config.json` should be carefully selected. The AI system will operate on these pairs. The `pair_whitelist` has been updated with several commonly traded pairs. The currently included example pairs are: `"ETH/EUR", "BTC/EUR", "ZEN/EUR", "WETH/USDT", "USDC/USDT", "WBTC/USDT", "LINK/USDT", "UNI/USDT", "ZEN/BTC", "LSK/BTC", "ETH/BTC"`.
+    **Important**: Controleer de beschikbaarheid van alle gewenste paren op uw exchange (e.g., Bitvavo), aangezien niet alle exchanges alle cross-paren ondersteunen (bijvoorbeeld `LSK/BTC`).
+    ```json
+    "exchange": {
+        "pair_whitelist": [
+            "ETH/EUR",
+            "BTC/EUR",
+            // ... other pairs ...
+            "LSK/BTC",
+            "ETH/BTC"
+        ]
+        // ... other exchange settings
+    },
+    ```
+*   **API Keys in `config.json`**: The API keys (`key`, `secret`) specified within `config/config.json` for the exchange are typically placeholders. In a live Freqtrade setup, these are often overridden by environment variables (which can be loaded from the `.env` file described in the "Setup & Installation" section).
+*   **Dynamic Adjustments**: The system's approach to dynamic Freqtrade configuration adjustments involves the AI providing advice or suggesting modifications to strategy parameters or filter lists. These are not "hot-swaps" of the main Freqtrade `config.json` during live operations but rather updates to strategy-specific parameters or through controlled mechanisms that Freqtrade supports for dynamic loading.
 
 ## Critical Testing Advisory
 
@@ -47,20 +68,6 @@ The system's approach to dynamic Freqtrade configuration adjustments involves th
 *   **Dry-Run**: Run the bot in a simulated environment (dry-run mode) on a live market to observe its behavior without risking real capital.
 *   **Gradual Exposure**: If moving to live trading, start with minimal capital and closely monitor performance and behavior.
 
-## Setup & Installation (Conceptual)
-
-1.  **Freqtrade**: Ensure you have a working Freqtrade installation.
-2.  **Python Environment**: Set up a Python environment (e.g., venv) with dependencies from `requirements.txt`.
-    ```bash
-    python -m venv .venv
-    source .venv/bin/activate # or .venv\Scripts\activate for Windows
-    pip install -r requirements.txt
-    ```
-3.  **Configuration**:
-    *   Configure Freqtrade (`config.json`) with your exchange details, strategy (e.g., `DUOAI_Strategy`), and whitelisted pairs.
-    *   Set up any necessary API keys or environment variables (e.g., in a `.env` file).
-4.  **Database**: Ensure Freqtrade is configured to use an SQLite database, as this is used by the AI components for performance analysis.
-
 ## Usage (Conceptual)
 
 The primary entry point for the AI optimization logic is `main.py`.
@@ -69,7 +76,7 @@ The primary entry point for the AI optimization logic is `main.py`.
 python main.py
 ```
 
-This would typically initialize the `AIOptimizer` and start its periodic optimization cycles, interacting with a running Freqtrade instance or its data.
+This would typically initialize the `AIOptimizer` and start its periodic optimization cycles, interacting with a running Fregtrade instance or its data.
 
 ## Fetching Historical Market Data
 
