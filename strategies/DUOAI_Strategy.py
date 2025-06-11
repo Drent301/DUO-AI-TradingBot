@@ -58,6 +58,13 @@ class DUOAI_Strategy(IStrategy):
     # Define informative timeframes to fetch data for AI modules
     # These are required by `cnn_patterns` and `prompt_builder` for multi-timeframe context.
     # Updated to include all pairs from config.json's pair_whitelist and relevant timeframes.
+    CONCEPTUAL_PAIR_WHITELIST = [
+        "ETH/EUR", "ETH/BTC", "WETH/USDT",
+        "BTC/EUR",
+        "ZEN/EUR", "ZEN/BTC",
+        "USDC/USDT", "WBTC/USDT", "LINK/USDT", "UNI/USDT",
+        "LSK/BTC"
+    ]
     informative_timeframes = ['1h', '4h', '1d'] # These are the timeframes to merge into base DF
 
     # Define `informative_pairs` for Freqtrade to fetch all necessary data.
@@ -65,22 +72,9 @@ class DUOAI_Strategy(IStrategy):
     # For now, hardcode based on expected pairs and common timeframes.
     # In a production setup, this could be generated from config.json at startup.
     informative_pairs = [
-        # ETH pairs
-        ("ETH/EUR", "1h"), ("ETH/EUR", "4h"), ("ETH/EUR", "1d"),
-        ("ETH/BTC", "1h"), ("ETH/BTC", "4h"), ("ETH/BTC", "1d"),
-        ("WETH/USDT", "1h"), ("WETH/USDT", "4h"), ("WETH/USDT", "1d"),
-        # BTC pairs
-        ("BTC/EUR", "1h"), ("BTC/EUR", "4h"), ("BTC/EUR", "1d"),
-        # ZEN pairs
-        ("ZEN/EUR", "1h"), ("ZEN/EUR", "4h"), ("ZEN/EUR", "1d"),
-        ("ZEN/BTC", "1h"), ("ZEN/BTC", "4h"), ("ZEN/BTC", "1d"),
-        # Other USDT pairs
-        ("USDC/USDT", "1h"), ("USDC/USDT", "4h"), ("USDC/USDT", "1d"),
-        ("WBTC/USDT", "1h"), ("WBTC/USDT", "4h"), ("WBTC/USDT", "1d"),
-        ("LINK/USDT", "1h"), ("LINK/USDT", "4h"), ("LINK/USDT", "1d"),
-        ("UNI/USDT", "1h"), ("UNI/USDT", "4h"), ("UNI/USDT", "1d"),
-        # LSK/BTC (if available on Bitvavo)
-        ("LSK/BTC", "1h"), ("LSK/BTC", "4h"), ("LSK/BTC", "1d")
+        (pair, tf)
+        for pair in CONCEPTUAL_PAIR_WHITELIST
+        for tf in informative_timeframes
     ]
 
 
