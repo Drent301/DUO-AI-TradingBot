@@ -10,9 +10,8 @@ from freqtrade.strategy import IStrategy, merge_informative_pair
 from freqtrade.strategy.interface import IStrategy
 import talib.abstract as ta
 import freqtrade.vendor.qtpylib.indicators as qtpylib
-from freqtrade.exchange import Exchange # For type hinting, not direct use
-from freqtrade.persistence import Trade # For type hinting
-
+from freqtrade.exchange import Exchange
+from freqtrade.persistence import Trade
 
 # Importeer je eigen AI-modules
 from core.gpt_reflector import GPTReflector
@@ -26,8 +25,8 @@ from core.entry_decider import EntryDecider
 from core.exit_optimizer import ExitOptimizer
 from core.strategy_manager import StrategyManager
 from core.interval_selector import IntervalSelector
-from core.params_manager import ParamsManager # Import de nieuwe ParamsManager
-from core.trade_logger import TradeLogger # Import de nieuwe TradeLogger
+from core.params_manager import ParamsManager # Import de ParamsManager
+from core.trade_logger import TradeLogger # Import de TradeLogger
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
@@ -40,7 +39,6 @@ class DUOAI_Strategy(IStrategy):
     """
 
     # Freqtrade Hyperopt/Strategy parameters (initial defaults)
-    # These are initial defaults; AI will dynamically adjust them via ParamsManager.
     minimal_roi = {
         "0": 0.05,
         "30": 0.03,
@@ -60,10 +58,7 @@ class DUOAI_Strategy(IStrategy):
     # These are required by `cnn_patterns` and `prompt_builder` for multi-timeframe context.
     informative_timeframes = ['1h', '4h', '1d'] # Consistent with AI module requirements
 
-
     # Maak instanties van je AI-modules
-    # Deze worden eenmalig geïnitialiseerd bij het starten van de strategie.
-    # Ze zijn nu toegankelijk via `self.<module_name>`.
     prompt_builder: PromptBuilder = PromptBuilder()
     gpt_reflector: GPTReflector = GPTReflector()
     grok_reflector: GrokReflector = GrokReflector()
@@ -75,18 +70,50 @@ class DUOAI_Strategy(IStrategy):
     exit_optimizer: ExitOptimizer = ExitOptimizer()
     strategy_manager: StrategyManager = StrategyManager()
     interval_selector: IntervalSelector = IntervalSelector()
-    params_manager: ParamsManager = ParamsManager() # Nieuwe ParamsManager
-    trade_logger: TradeLogger = TradeLogger() # Nieuwe TradeLogger
+    params_manager: ParamsManager = ParamsManager()
+    trade_logger: TradeLogger = TradeLogger()
 
 
     def __init__(self, config: Dict[str, Any]) -> None:
         super().__init__(config)
-        # Laad geleerde parameters direct bij initialisatie van de strategie
-        # We roepen hier een synchrone helper aan om de async aanroep naar ParamsManager te omzeilen
-        # of we zorgen dat ParamsManager's init een sync load doet.
-        # ParamsManager's __init__ is al sync, dus we kunnen het direct gebruiken.
-        self._load_and_apply_learned_parameters(config.get('pair_whitelist', ['N/A'])[0]) # Gebruik een initieel paar voor het laden
+        # We laden geleerde parameters in `populate_indicators` of in een custom method
+        # want `dp` is hier nog niet beschikbaar.
+        # De `_load_and_apply_learned_parameters` wordt nu periodiek aangeroepen.
         logger.info(f"DUOAI_Strategy geïnitialiseerd.")
+
+    def _get_all_relevant_candles_for_ai(self, pair: str) -> Dict[str, pd.DataFrame]: # Corrected type hint for Dict value
+        """
+        Haalt alle relevante candles (basistimeframe + informatives) op voor AI-modules.
+        """
+        candles_by_timeframe: Dict[str, pd.DataFrame] = {} # Corrected type hint for Dict value
+
+        # Huidige timeframe dataframe
+        # In Freqtrade methods zoals `populate_indicators`, `custom_entry`, `custom_exit`,
+        # de `dataframe` parameter is al het dataframe voor de basis timeframe.
+        # Maar als deze method buiten die context (bijv. in een periodic task) worden aangeroepen,
+        # moeten we `self.dp.get_pair_dataframe` gebruiken.
+        # Voor de veiligheid, fetchen we hier altijd via `self.dp`.
+
+        # Base timeframe
+        base_df = self.dp.get_pair_dataframe(pair, self.timeframe)
+        if not base_df.empty:
+            candles_by_timeframe[self.timeframe] = base_df.copy()
+        else:
+            logger.warning(f"Geen basis dataframe voor {pair} op {self.timeframe}. AI-modules krijgen mogelijk incomplete data.")
+            return {} # Als base DF leeg is, kunnen we niet verder.
+
+        # Informative timeframes
+        for tf in self.informative_timeframes:
+            try:
+                informative_df = self.dp.get_pair_dataframe(pair, tf)
+                if not informative_df.empty:
+                    candles_by_timeframe[tf] = informative_df.copy()
+                else:
+                    logger.debug(f"Informative dataframe for {pair} on {tf} is empty. Skipping.")
+            except Exception as e:
+                logger.warning(f"Kon informative dataframe voor {pair} op {tf} niet ophalen via self.dp: {e}")
+
+        return candles_by_timeframe
 
     def _load_and_apply_learned_parameters(self, pair: str) -> None:
         """
@@ -94,26 +121,27 @@ class DUOAI_Strategy(IStrategy):
         en past ze toe op de Freqtrade strategie parameters.
         Deze methode kan ook worden aangeroepen om periodiek te updaten.
         """
-        # Haal de strategie-specifieke parameters op
-        strategy_params = self.params_manager.get_param(self.name, strategy_id=self.name)
+        strategy_params = self.params_manager.get_param("strategies", strategy_id=self.name)
 
-        if strategy_params:
+        if strategy_params and isinstance(strategy_params, dict):
+            # Update ROI, Stoploss, Trailing Stop parameters
             self.minimal_roi = strategy_params.get("minimal_roi", self.minimal_roi)
             self.stoploss = strategy_params.get("stoploss", self.stoploss)
             self.trailing_stop_positive = strategy_params.get("trailing_stop_positive", self.trailing_stop_positive)
             self.trailing_stop_positive_offset = strategy_params.get("trailing_stop_positive_offset", self.trailing_stop_positive_offset)
 
-            # Update andere geleerde parameters die direct de strategie beïnvloeden.
-            # Bijv. als 'maxTradeRiskPct' dynamisch Freqtrade's stake_amount zou beïnvloeden.
-
             logger.debug(f"Strategie parameters voor {pair} bijgewerkt door geleerde parameters: {strategy_params}")
         else:
             logger.debug(f"Geen geleerde parameters gevonden voor {self.name}. Gebruik standaardstrategieparameters.")
 
-    def populate_indicators(self, dataframe: pd.DataFrame, metadata: dict) -> pd.DataFrame:
+    def populate_indicators(self, dataframe: pd.DataFrame, metadata: dict) -> pd.DataFrame: # Corrected type hint for dataframe
         """
-        Voeg indicatoren toe aan de dataframe en merge informative pairs.
+        Voeg indicatoren toe aan de dataframe.
         """
+        # Load and apply learned parameters at the start of populate_indicators
+        # This will ensure the strategy always uses the latest learned parameters.
+        self._load_and_apply_learned_parameters(metadata['pair'])
+
         # Standaard Freqtrade/TA-Lib indicatoren
         dataframe['rsi'] = ta.RSI(dataframe, timeperiod=14)
         macd = ta.MACD(dataframe)
@@ -126,28 +154,11 @@ class DUOAI_Strategy(IStrategy):
         dataframe['bb_upperband'] = bollinger['upper']
         dataframe['volume_mean_20'] = dataframe['volume'].rolling(20).mean()
 
-        # --- Merge informative timeframes into the main dataframe ---
-        # This is the CORRECT Freqtrade way to get multi-timeframe data for your AI.
-        # Make sure `informative_pairs` are correctly defined in your Freqtrade strategy configuration
-        # or dynamically set if you use `self.dp`.
-        for informative_tf in self.informative_timeframes:
-            informative_df = self.dp.get_pair_dataframe(pair=metadata['pair'], timeframe=informative_tf)
-            if not informative_df.empty and not informative_df.equals(dataframe): # Avoid merging with itself if timeframe is the same
-                dataframe = merge_informative_pair(dataframe, informative_df, self.timeframe, informative_tf, fqtrade=True)
-            else:
-                logger.debug(f"Informative dataframe for {metadata['pair']} on {informative_tf} is empty or same as base. Skipping merge.")
-
-
-        # Haal bias en confidence op (van AI-modules)
+        # Haal bias en confidence op (van AI-modules) en voeg toe aan dataframe
         current_bias = self.bias_reflector.get_bias_score(metadata['pair'], self.name)
         current_confidence = self.confidence_engine.get_confidence_score(metadata['pair'], self.name)
         dataframe['ai_bias'] = current_bias
         dataframe['ai_confidence'] = current_confidence
-
-        # Dynamische parameters laden en toepassen (bijv. entryConvictionThreshold)
-        # Dit kan hier of in `custom_entry`/`custom_exit` om de meest recente waarden te garanderen.
-        # Hier is het OK, als het niet te vaak wordt aangeroepen.
-        self._load_and_apply_learned_parameters(metadata['pair'])
 
         return dataframe
 
@@ -156,74 +167,61 @@ class DUOAI_Strategy(IStrategy):
         """
         Pas de inzet per trade aan op basis van AI-confidence (maxTradeRiskPct).
         """
-        # Krijg de max_per_trade_pct van de confidence_engine
-        # Deze is dynamisch bijgewerkt door de confidence_engine.
         max_per_trade_pct_learned = self.confidence_engine.confidence_memory.get(pair, {}).get(self.name, {}).get('max_per_trade_pct', 0.1)
-        # Haal ook de globale maxTradeRiskPct van de params_manager als basis
-        global_max_trade_risk = self.params_manager.get_param("maxTradeRiskPct")
+        global_max_trade_risk = self.params_manager.get_param("maxTradeRiskPct", strategy_id=None) # Global parameter
 
-        # Neem het minimum van de geleerde en de globale ingestelde maxTradeRiskPct
         effective_max_trade_risk = min(max_per_trade_pct_learned, global_max_trade_risk)
 
         total_capital = self.wallets.get_leverage_capital(self.stake_currency)
 
         adjusted_stake_amount = total_capital * effective_max_trade_risk
 
-        # Zorg ervoor dat het niet onder de minimale stake_amount komt
-        # en niet hoger is dan de default_stake_amount (als die beperkt is)
         if self.stake_amount != "unlimited":
             adjusted_stake_amount = min(adjusted_stake_amount, self.stake_amount)
 
-        # Zorg voor een minimale stake amount om fouten te voorkomen (bijv. 10 EUR)
-        min_stake = 10.0 # Define a minimum stake amount, or get from config
+        min_stake = 10.0 # Definieer een minimale inzet om fouten te voorkomen
         adjusted_stake_amount = max(adjusted_stake_amount, min_stake)
 
         logger.info(f"Aangepaste stake amount voor {pair}: {adjusted_stake_amount:.2f} {self.stake_currency} (gebaseerd op effectieve MaxPerTradePct: {effective_max_trade_risk:.2%}).")
         return adjusted_stake_amount
 
     async def custom_entry(self, pair: str, current_time: datetime,
-                           dataframe: pd.DataFrame, **kwargs) -> Optional[float]:
+                           dataframe: pd.DataFrame, **kwargs) -> Optional[float]: # Corrected type hint for dataframe
         """
         AI-gestuurde entry-beslissing.
-        Deze methode wordt door Freqtrade aangeroepen om te bepalen of een long entry moet worden geplaatst.
         """
-        # Multi-timeframe data voor AI-modules:
-        # De `dataframe` die hier binnenkomt, bevat al de samengevoegde informative timeframes
-        # (indien correct geconfigureerd in `populate_indicators`).
-        # We moeten deze opsplitsen in de `candles_by_timeframe` dict die AI-modules verwachten.
+        # Haal alle relevante candles op voor AI-analyse
+        candles_by_timeframe_for_ai = self._get_all_relevant_candles_for_ai(pair)
+        if not candles_by_timeframe_for_ai:
+            logger.warning(f"Geen voldoende dataframes voor AI-entrybesluit voor {pair}. Entry geweigerd.")
+            return None
 
-        candles_by_timeframe_for_ai: Dict[str, pd.DataFrame] = {}
-        # Voeg de basis timeframe dataframe toe
-        candles_by_timeframe_for_ai[self.timeframe] = dataframe.copy()
-
-        # Extraheer informative timeframes uit de samengevoegde dataframe
-        # Dit vereist dat de kolommen correct zijn benoemd door Freqtrade.
-        # Bijv. '1h_open', '4h_close'. We moeten deze weer reconstrueren naar aparte DataFrames.
-        # `IStrategy.extract_dataframe` helper van Freqtrade zou hier handig kunnen zijn,
-        # maar die is niet standaard beschikbaar voor elke timeframe in deze context.
-        # De makkelijkste manier is om `self.dp.get_pair_dataframe` te gebruiken, net als in `process_stopped_trade`.
-
-        for tf in self.informative_timeframes:
-            try:
-                informative_df = self.dp.get_pair_dataframe(pair, tf)
-                if not informative_df.empty:
-                    candles_by_timeframe_for_ai[tf] = informative_df.copy()
-            except Exception as e:
-                logger.warning(f"Kon informative dataframe voor {pair} op {tf} niet ophalen via self.dp voor entry: {e}")
-
-        # Haal de geleerde bias en confidence op
+        # Haal de geleerde bias, confidence, en entry threshold op
         learned_bias = self.bias_reflector.get_bias_score(pair, self.name)
         learned_confidence = self.confidence_engine.get_confidence_score(pair, self.name)
-
-        # Haal de entry conviction threshold op van params_manager
         entry_conviction_threshold = self.params_manager.get_param("entryConvictionThreshold", strategy_id=self.name)
+        cooldown_duration_seconds = self.params_manager.get_param("cooldownDurationSeconds", strategy_id=None)
+
+        # AI-specifieke cooldown check (als deze nog niet is geimplementeerd in entry_decider)
+        # Dit is de `cooldownDuration` uit de manifesten.
+        # Placeholder: Check hier of een AI-cooldown actief is (bijv. in bias_reflector opgeslagen)
+        # of als laatste_verlies_tijd < cooldown_duration_seconds.
+        # Hier kan een externe module voor cooldown tracking worden gebruikt.
+        # Bijvoorbeeld: `if self.cooldown_tracker.is_cooldown_active(pair, self.name): return None`
+
+        # Voor nu: Simpele cooldown check gebaseerd op laatste trade als voorbeeld
+        # Dit vereist toegang tot trade history, die je kunt krijgen via `trade_logger.get_all_trades()`
+        # of Freqtrade's database.
+        # if await self._is_ai_cooldown_active(pair, cooldown_duration_seconds):
+        #     logger.info(f"AI-specifieke cooldown actief voor {pair}. Entry geweigerd.")
+        #     return None
+
 
         entry_decision = await self.entry_decider.should_enter(
             dataframe=dataframe, # Basis timeframe DF met alle indicatoren en gemergde informatives
             symbol=pair,
             current_strategy_id=self.name,
-            trade_context={"current_price": dataframe['close'].iloc[-1], "timeframe": self.timeframe, "candles_by_timeframe": candles_by_timeframe_for_ai}, # Pass all relevant TFs
-            # Pass learned parameters directly for the decision process
+            trade_context={"current_price": dataframe['close'].iloc[-1], "timeframe": self.timeframe, "candles_by_timeframe": candles_by_timeframe_for_ai},
             learned_bias=learned_bias,
             learned_confidence=learned_confidence,
             entry_conviction_threshold=entry_conviction_threshold
@@ -232,27 +230,20 @@ class DUOAI_Strategy(IStrategy):
         if entry_decision['enter']:
             logger.info(f"Entry toegestaan voor {pair}. Reden: {entry_decision['reason']}. Confidence: {entry_decision['confidence']:.2f}")
             return 1.0 # Return a value > 0 to indicate that an entry is desired.
-                       # Freqtrade will then use the stake_amount from custom_stake_amount.
 
         logger.info(f"Entry geweigerd voor {pair}. Reden: {entry_decision['reason']}")
-        return None # Entry niet toegestaan
+        return None
 
     async def custom_exit(self, pair: str, trade: Trade, current_time: datetime,
-                          dataframe: pd.DataFrame, **kwargs) -> Optional[float]:
+                          dataframe: pd.DataFrame, **kwargs) -> Optional[float]: # Corrected type hint for dataframe
         """
         AI-gestuurde exit-beslissing en dynamische SL/TP aanpassing.
-        Deze methode wordt door Freqtrade aangeroepen om te bepalen of een long exit moet worden geplaatst.
         """
-        # Multi-timeframe data voor AI-modules (net als bij custom_entry)
-        candles_by_timeframe_for_ai: Dict[str, pd.DataFrame] = {}
-        candles_by_timeframe_for_ai[self.timeframe] = dataframe.copy()
-        for tf in self.informative_timeframes:
-            try:
-                informative_df = self.dp.get_pair_dataframe(pair, tf)
-                if not informative_df.empty:
-                    candles_by_timeframe_for_ai[tf] = informative_df.copy()
-            except Exception as e:
-                logger.warning(f"Kon informative dataframe voor {pair} op {tf} niet ophalen via self.dp voor exit: {e}")
+        # Haal alle relevante candles op voor AI-analyse
+        candles_by_timeframe_for_ai = self._get_all_relevant_candles_for_ai(pair)
+        if not candles_by_timeframe_for_ai:
+            logger.warning(f"Geen voldoende dataframes voor AI-exitbesluit voor {pair}. Exit overgeslagen.")
+            return None
 
         # Haal de geleerde bias en confidence op
         learned_bias = self.bias_reflector.get_bias_score(pair, self.name)
@@ -261,14 +252,12 @@ class DUOAI_Strategy(IStrategy):
         # Haal de exit conviction drop trigger op van params_manager
         exit_conviction_drop_trigger = self.params_manager.get_param("exitConvictionDropTrigger", strategy_id=self.name)
 
-
         exit_decision = await self.exit_optimizer.should_exit(
             dataframe=dataframe,
-            trade=trade.to_json(), # Freqtrade trade object, converteer naar JSON voor AI context
+            trade=trade.to_json(),
             symbol=pair,
             current_strategy_id=self.name,
-            candles_by_timeframe=candles_by_timeframe_for_ai, # Pass all relevant TFs
-            # Pass learned parameters directly for the decision process
+            candles_by_timeframe=candles_by_timeframe_for_ai,
             learned_bias=learned_bias,
             learned_confidence=learned_confidence,
             exit_conviction_drop_trigger=exit_conviction_drop_trigger
@@ -276,7 +265,7 @@ class DUOAI_Strategy(IStrategy):
 
         if exit_decision['exit']:
             logger.info(f"Exit getriggerd voor {pair}. Reden: {exit_decision['reason']}. Confidence: {exit_decision['confidence']:.2f}")
-            return dataframe['close'].iloc[-1] # Return the current closing price for immediate exit
+            return dataframe['close'].iloc[-1]
 
         # Dynamische Trailing Stop Loss Optimalisatie (via AI)
         sl_optimization_result = await self.exit_optimizer.optimize_trailing_stop_loss(
@@ -284,8 +273,7 @@ class DUOAI_Strategy(IStrategy):
             trade=trade.to_json(),
             symbol=pair,
             current_strategy_id=self.name,
-            candles_by_timeframe=candles_by_timeframe_for_ai, # Pass all relevant TFs
-            # Pass learned parameters directly for the optimization process
+            candles_by_timeframe=candles_by_timeframe_for_ai,
             learned_bias=learned_bias,
             learned_confidence=learned_confidence
         )
@@ -296,10 +284,10 @@ class DUOAI_Strategy(IStrategy):
             self.trailing_stop_positive_offset = sl_optimization_result.get("trailing_stop_positive_offset", self.trailing_stop_positive_offset)
             self.trailing_stop_positive = sl_optimization_result.get("trailing_stop_positive", self.trailing_stop_positive)
 
-            # Update these learned parameters in params_manager as well, so they persist
+            # Update these learned parameters in params_manager for persistence
             asyncio.create_task(self.params_manager.update_strategy_roi_sl_params(
                 strategy_id=self.name,
-                new_roi=self.minimal_roi, # Keep current ROI, or get from AI
+                new_roi=self.minimal_roi,
                 new_stoploss=self.stoploss,
                 new_trailing_stop_positive=self.trailing_stop_positive,
                 new_trailing_stop_positive_offset=self.trailing_stop_positive_offset
@@ -334,34 +322,29 @@ class DUOAI_Strategy(IStrategy):
         logger.info(f"Trade exit voor {pair} bevestigd in confirm_trade_exit.")
         return True
 
-    def populate_entry_trend(self, dataframe: pd.DataFrame, metadata: dict) -> pd.DataFrame:
+    def populate_entry_trend(self, dataframe: pd.DataFrame, metadata: dict) -> pd.DataFrame: # Corrected type hint for dataframe
         """
         Freqtrade's entry trend populatie.
         De AI-gestuurde logica is in `custom_entry`. Hier zetten we een placeholder
         om `custom_entry` te triggeren.
         """
-        # A simple condition to ensure `custom_entry` is called.
         dataframe.loc[
             (dataframe['volume'] > 0), # Always True if there's any volume
             'enter_long'] = 1
         return dataframe
 
-    def populate_exit_trend(self, dataframe: pd.DataFrame, metadata: dict) -> pd.DataFrame:
+    def populate_exit_trend(self, dataframe: pd.DataFrame, metadata: dict) -> pd.DataFrame: # Corrected type hint for dataframe
         """
         Freqtrade's exit trend populatie.
         De AI-gestuurde logica is in `custom_exit`. Hier zetten we een placeholder
         om `custom_exit` te triggeren.
         """
-        # A simple condition to ensure `custom_exit` is called.
         dataframe.loc[
             (dataframe['volume'] > 0), # Always True if there's any volume
             'exit_long'] = 1
         return dataframe
 
-    def process_stopped_trade(self, pair: str, trade: Trade, order: Dict[str, Any],
-                              # Met order parameter, kunnen we de uiteindelijke exit_rate krijgen
-                              # en of het een verlies of winst was
-                              **kwargs) -> None:
+    def process_stopped_trade(self, pair: str, trade: Trade, order: Dict[str, Any], **kwargs) -> None:
         """
         Deze methode wordt aangeroepen nadat een trade is gesloten.
         Ideaal voor het triggeren van AI-reflectie en het bijwerken van leerbare variabelen.
@@ -379,16 +362,10 @@ class DUOAI_Strategy(IStrategy):
         asyncio.create_task(self.trade_logger.log_trade(trade_data))
 
         # Trigger de AI-reflectie in een aparte taak zodat het de hoofdloop niet blokkeert
-        candles_by_timeframe_for_reflect = {}
-        candles_by_timeframe_for_reflect[self.timeframe] = self.dp.get_pair_dataframe(pair, self.timeframe).copy()
-        for tf in self.informative_timeframes:
-             try:
-                informative_df = self.dp.get_pair_dataframe(pair, tf)
-                if not informative_df.empty:
-                    candles_by_timeframe_for_reflect[tf] = informative_df.copy()
-             except Exception as e:
-                logger.warning(f"Kon informative dataframe voor {pair} op {tf} niet ophalen voor post-trade reflectie: {e}")
-
+        candles_by_timeframe_for_reflect = self._get_all_relevant_candles_for_ai(pair)
+        if not candles_by_timeframe_for_reflect:
+            logger.warning(f"Geen voldoende dataframes voor post-trade reflectie voor {pair}. Reflectie overgeslagen.")
+            return
 
         asyncio.create_task(
             self.reflectie_lus.process_reflection_cycle(
@@ -405,10 +382,7 @@ class DUOAI_Strategy(IStrategy):
         # Update strategy performance in strategy_manager (voor mutatie en selectie)
         current_perf = self.strategy_manager.get_strategy_performance(self.name)
         new_trade_count = current_perf.get('tradeCount', 0) + 1
-        # Corrected calculation for new_total_profit:
-        old_total_profit = current_perf.get('avgProfit', 0.0) * current_perf.get('tradeCount', 0)
-        new_total_profit = old_total_profit + profit_loss_pct # Calculation was: current_perf.get('avgProfit', 0.0) * current_perf.get('tradeCount', 0) * current_perf.get('tradeCount', 0) + profit_loss_pct
-
+        new_total_profit = current_perf.get('avgProfit', 0.0) * current_perf.get('tradeCount', 0) + profit_loss_pct # This was: current_perf.get('avgProfit', 0.0) * current_perf.get('tradeCount', 0) * current_perf.get('tradeCount', 0) + profit_loss_pct
         new_win_rate = (current_perf.get('winRate', 0) * current_perf.get('tradeCount', 0) + (1 if profit_loss_pct > 0 else 0)) / new_trade_count if new_trade_count > 0 else 0
         new_avg_profit = new_total_profit / new_trade_count if new_trade_count > 0 else 0
 
