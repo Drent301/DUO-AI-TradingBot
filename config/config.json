@@ -1,0 +1,73 @@
+{
+  "dry_run": true,
+  "dry_run_wallet": 1000,
+  "exchange": {
+    "name": "bitvavo",
+    "key": "ENV_BITVAVO_API_KEY",
+    "secret": "ENV_BITVAVO_SECRET_KEY",
+    "password": null,
+    "ccxt_config": {
+      "enableRateLimit": true
+    },
+    "ccxt_sync_params": {
+      "recvWindow": 10000
+    },
+    "pair_whitelist": [
+      "ETH/EUR",
+      "BTC/EUR",
+      "ZEN/EUR",
+      "WETH/USDT",
+      "USDC/USDT",
+      "WBTC/USDT",
+      "LINK/USDT",
+      "UNI/USDT"
+    ],
+    "pair_blacklist": [],
+    "markets": {
+      "BTC/EUR": {
+        "precision": {
+          "price": 2,
+          "amount": 6
+        }
+      }
+    }
+  },
+  "stake_currency": "EUR",
+  "stake_amount": "unlimited",
+  "max_open_trades": 1,
+  "tradable_modes": {
+    "backtest": true,
+    "live": false,
+    "dry_run": true
+  },
+  "timeframe": "5m",
+  "startup_candle_count": 100,
+  "runmode": "backtest",
+  "strategy": "DUOAI_Strategy",
+  "protections": [
+    {
+      "method": "CooldownPeriod",
+      "stop_duration_candles": 5
+    },
+    {
+      "method": "MaxDrawdown",
+      "lookback_period_candles": 48,
+      "max_drawdown_pct": 0.05
+    }
+  ],
+  "telegram": {
+    "enabled": false
+  },
+  "api_server": {
+    "enabled": false
+  },
+  "webhook": {
+    "enabled": false
+  },
+  "log_level": "info",
+  "log_fileName": "freqtrade.log",
+  "db_url": "sqlite:///freqtrade.sqlite",
+  "internals": {
+    "process_throttle_secs": 5
+  }
+}
