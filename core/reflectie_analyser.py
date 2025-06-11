@@ -19,7 +19,11 @@ ANALYSE_LOG = os.path.join(MEMORY_DIR, 'reflectie-analyse.json') # Nieuw
 # Zorg dat de memory map bestaat
 os.makedirs(MEMORY_DIR, exist_ok=True)
 
-# Helperfunctie voor JSON-laden (async)
+# Import ParamsManager for class usage
+from core.params_manager import ParamsManager
+
+
+# Helperfunctie voor JSON-laden (async) - module level or static method
 async def _load_json_async(filepath: str) -> List[Dict[str, Any]]:
     def read_file_sync():
         if not os.path.exists(filepath) or os.path.getsize(filepath) == 0:
@@ -347,146 +351,397 @@ async def analyze_timeframe_bias(reflections: Optional[List[Dict[str, Any]]] = N
     logger.debug(f'[AnalyzeTimeframeBias] Result: {bias_by_timeframe}')
     return bias_by_timeframe
 
-async def generate_mutation_proposal(
-    strategy: Dict[str, Any],
-    bias: float, # Overall bias for the strategy
-    performance: Dict[str, Any],
-    timeframe_bias_analysis: Optional[Dict[str, Any]] = None # Result from analyze_timeframe_bias
-) -> Optional[Dict[str, Any]]:
-    """
-    Genereer mutatievoorstel met timeframe-data.
-    Vertaald van generateMutationProposal in reflectieAnalyser.js.
-    """
-    if timeframe_bias_analysis is None:
-        timeframe_bias_analysis = await analyze_timeframe_bias() # Load all reflections if not provided
 
-    proposal = await predict_strategy_adjustment(strategy, bias, performance)
-    if not proposal: return None
+class ReflectieAnalyser:
+    def __init__(self, params_manager: ParamsManager):
+        self.params_manager = params_manager
+        logger.info("ReflectieAnalyser geïnitialiseerd met ParamsManager.")
 
-    proposal['timeframeSpecificAdjustments'] = {} # Changed key for clarity
-    strategy_id_str = strategy['id'] # Ensure it's a string
+    async def analyse_reflecties(self, logs: Optional[List[Dict[str, Any]]] = None) -> Dict[str, Any]:
+        """
+        Geoptimaliseerde analyse van reflecties.
+        Laadt logs van REFLECTIE_LOG als geen logs worden meegegeven.
+        """
+        if logs is None:
+            logs = await _load_json_async(REFLECTIE_LOG)
 
-    if timeframe_bias_analysis: # Ensure it's not None
-        for timeframe, strategies_on_tf in timeframe_bias_analysis.items():
-            if strategy_id_str in strategies_on_tf:
-                tf_bias_info = strategies_on_tf[strategy_id_str]
-                # Potentially suggest timeframe-specific parameter tweaks if bias is strong on that TF
-                # Example: If 5m timeframe has strong positive bias (tf_bias_info['averageBias'] > 0.7)
-                # and overall proposal is to strengthen, maybe make 5m parameters even more aggressive.
-                proposal['timeframeSpecificAdjustments'][timeframe] = {
-                    "averageBias": tf_bias_info["averageBias"],
-                    "confidence": tf_bias_info["confidence"],
-                    "suggestedAction": "Monitor" # Placeholder for more detailed TF-specific logic
-                }
+        if not isinstance(logs, list) or not logs:
+            logger.debug('[AnalyseReflecties] Geen logs beschikbaar of ongeldig type.')
+            return {"biasScores": {}, "summary": {}}
 
+        valid_logs = [log for log in logs if validate_reflection(log)]
+        if not valid_logs:
+            logger.debug('[AnalyseReflecties] Geen geldige reflecties na validatie.')
+            return {"biasScores": {}, "summary": {}}
 
-    proposal['rationale'] = {
-        "overallBiasImpact": f"Overall AI bias towards strategy: {bias:.2f}",
-        "performanceImpact": f"Win Rate: {performance.get('winRate', 0):.2%}, Avg Profit: {performance.get('avgProfit', 0):.2%}, Trades: {performance.get('tradeCount', 0)}",
-        "timeframeConsiderations": f"Timeframe-specific biases: {json.dumps(proposal['timeframeSpecificAdjustments'])}" if proposal['timeframeSpecificAdjustments'] else 'No specific timeframe bias data applied to this proposal.',
-        "recommendedAction": proposal.get('adjustments', {}).get('action', 'maintain').capitalize(),
-        "confidenceInProposal": proposal.get('confidence', 0.0)
-    }
+        bias_scores: Dict[str, Dict[str, Any]] = {}
 
-    # Log bias outcome (simplified for now, should be more structured)
-    # This is a new log file, so we'll append.
-    bias_outcome_entry = {
-        "strategyId": strategy_id_str,
-        "timestamp": datetime.now().isoformat(),
-        "overallBias": bias,
-        "performance": performance,
-        "proposedAction": proposal.get('adjustments', {}).get('action', 'maintain'),
-        "proposedParameters": proposal.get('adjustments', {}).get('parameterChanges', {}),
-        "proposalConfidence": proposal.get('confidence', 0.0)
-    }
+        for log in valid_logs:
+            strategy_id = log['strategyId']
+            bias = log['combined_bias']
+            confidence = log['combined_confidence']
 
-    existing_bias_outcomes = await _load_json_async(BIAS_OUTCOME_LOG)
-    if not isinstance(existing_bias_outcomes, list): existing_bias_outcomes = [] # Ensure it's a list
-    existing_bias_outcomes.append(bias_outcome_entry)
-    await _write_json_async(BIAS_OUTCOME_LOG, existing_bias_outcomes)
+            if strategy_id not in bias_scores:
+                bias_scores[strategy_id] = {"totalBias": 0.0, "totalWeight": 0.0, "count": 0, "averageBias": 0.0, "confidence":0.0}
 
+            weight = confidence
+            bias_scores[strategy_id]["totalBias"] += bias * weight
+            bias_scores[strategy_id]["totalWeight"] += weight
+            bias_scores[strategy_id]["count"] += 1
 
-    logger.debug(f'[GenerateMutationProposal] Result: {proposal}')
-    return proposal
+        for strategy_id_key in bias_scores:
+            entry = bias_scores[strategy_id_key]
+            entry["averageBias"] = entry["totalBias"] / entry["totalWeight"] if entry["totalWeight"] > 0 else 0.0
+            entry["confidence"] = entry["count"] / len(valid_logs) if len(valid_logs) > 0 else 0.0
+
+        total_reflections = len(valid_logs)
+        strategies_analyzed = len(bias_scores)
+        average_overall_bias = _mean([s['averageBias'] for s in bias_scores.values()])
+
+        summary = {
+            "totalReflections": total_reflections,
+            "strategiesAnalyzed": strategies_analyzed,
+            "averageOverallBias": average_overall_bias,
+            "timestamp": datetime.now().isoformat()
+        }
+        analysis_data_to_store = {"biasScores": bias_scores, "summary": summary}
+        await _write_json_async(ANALYSE_LOG, analysis_data_to_store)
+        logger.debug(f'[AnalyseReflecties] Result: {analysis_data_to_store}')
+        return analysis_data_to_store
+
+    async def calculate_bias_score(self, reflections: Optional[List[Dict[str, Any]]] = None) -> float:
+        """
+        Bereken gewogen bias-score voor een set reflecties.
+        """
+        if reflections is None:
+            reflections = await _load_json_async(REFLECTIE_LOG)
+        if not reflections:
+            logger.debug('[CalculateBiasScore] Geen reflecties beschikbaar.')
+            return 0.0
+        valid_reflections = [r for r in reflections if validate_reflection(r)]
+        if not valid_reflections:
+            logger.debug('[CalculateBiasScore] Geen geldige reflecties.')
+            return 0.0
+        total_bias = 0.0
+        total_weight = 0.0
+        for reflection in valid_reflections:
+            bias = reflection['combined_bias']
+            confidence = reflection['combined_confidence']
+            weight = confidence
+            total_bias += bias * weight
+            total_weight += weight
+        score = total_bias / total_weight if total_weight > 0 else 0.0
+        logger.debug(f'[CalculateBiasScore] Result: {score}')
+        return score
+
+    async def analyze_reflection_consistency(self, logs: Optional[List[Dict[str, Any]]] = None) -> Dict[str, Any]:
+        """
+        Analyseer consistentie van reflecties.
+        """
+        if logs is None:
+            logs = await _load_json_async(REFLECTIE_LOG)
+        if not logs or len(logs) < 2:
+            logger.debug('[AnalyzeReflectionConsistency] Te weinig logs voor consistentie-analyse.')
+            return {"consistencyScore": 0.0, "details": {}}
+        valid_logs = [log for log in logs if validate_reflection(log)]
+        if len(valid_logs) < 2:
+            logger.debug('[AnalyzeReflectionConsistency] Te weinig geldige reflecties.')
+            return {"consistencyScore": 0.0, "details": {}}
+        details: Dict[str, Any] = {}
+        total_variance_sum = 0.0
+        strategy_count = 0
+        grouped: Dict[str, List[float]] = {}
+        for log in valid_logs:
+            strategy_id = log['strategyId']
+            if strategy_id not in grouped:
+                grouped[strategy_id] = []
+            grouped[strategy_id].append(log['combined_bias'])
+        for strategy_id_key in grouped:
+            biases = grouped[strategy_id_key]
+            if len(biases) < 2: continue
+            variance = float(np.var(biases))
+            details[strategy_id_key] = {"variance": variance, "sampleSize": len(biases)}
+            total_variance_sum += variance
+            strategy_count += 1
+        average_variance = total_variance_sum / strategy_count if strategy_count > 0 else 0.0
+        consistency_score = 1 / (1 + average_variance) if strategy_count > 0 else 0.0
+        result = {"consistencyScore": consistency_score, "details": details}
+        logger.debug(f'[AnalyzeReflectionConsistency] Result: {result}')
+        return result
+
+    async def _calculate_adjustment_score(
+        self,
+        strategy_id: str, # Added strategy_id for fetching params
+        bias: float,
+        performance: Dict[str, Any]
+    ) -> float:
+        win_rate = performance.get('winRate', 0.0)
+        avg_profit = performance.get('avgProfit', 0.0)
+        trade_count = performance.get('tradeCount', 0)
+
+        # Fetch constants from ParamsManager
+        avg_profit_scale_factor = self.params_manager.get_param("predictAdjust_avgProfitScaleFactor", strategy_id=strategy_id, default=600)
+        avg_profit_score_min_max = self.params_manager.get_param("predictAdjust_avgProfitScoreMinMax", strategy_id=strategy_id, default=30)
+        win_rate_weight = self.params_manager.get_param("predictAdjust_winRateWeight", strategy_id=strategy_id, default=50)
+        trade_count_divisor = self.params_manager.get_param("predictAdjust_tradeCountDivisor", strategy_id=strategy_id, default=5)
+        trade_count_score_max = self.params_manager.get_param("predictAdjust_tradeCountScoreMax", strategy_id=strategy_id, default=20)
+        bias_high_threshold = self.params_manager.get_param("predictAdjust_biasHighThreshold", strategy_id=strategy_id, default=0.7)
+        bias_low_threshold = self.params_manager.get_param("predictAdjust_biasLowThreshold", strategy_id=strategy_id, default=0.3)
+        bias_influence_multiplier = self.params_manager.get_param("predictAdjust_biasInfluenceMultiplier", strategy_id=strategy_id, default=30)
+
+        logger.info(f"[{strategy_id}] Using adjustment score params: avgProfitScaleFactor={avg_profit_scale_factor}, avgProfitScoreMinMax={avg_profit_score_min_max}, "
+                    f"winRateWeight={win_rate_weight}, tradeCountDivisor={trade_count_divisor}, tradeCountScoreMax={trade_count_score_max}, "
+                    f"biasHighThreshold={bias_high_threshold}, biasLowThreshold={bias_low_threshold}, biasInfluenceMultiplier={bias_influence_multiplier}")
+
+        scaled_avg_profit_score = min(max(avg_profit * avg_profit_scale_factor, -avg_profit_score_min_max), avg_profit_score_min_max)
+        performance_score = (win_rate * win_rate_weight) + scaled_avg_profit_score + (min(trade_count / trade_count_divisor if trade_count_divisor > 0 else 0, trade_count_score_max))
+
+        adjustment_score = performance_score
+        if bias > bias_high_threshold and performance_score > 50: # Assuming 50 is a neutral performance score
+            adjustment_score += (bias - bias_high_threshold) * bias_influence_multiplier
+        elif bias < bias_low_threshold and performance_score < 50:
+            adjustment_score -= (bias_low_threshold - bias) * bias_influence_multiplier
+
+        return max(0, min(100, adjustment_score))
+
+    async def predict_strategy_adjustment(
+        self,
+        strategy: Dict[str, Any],
+        bias: float,
+        performance: Dict[str, Any]
+    ) -> Optional[Dict[str, Any]]:
+        if not strategy or not isinstance(strategy, dict) or 'id' not in strategy:
+            logger.debug('[PredictStrategyAdjustment] Ongeldige strategie.')
+            return None
+        strategy_id = strategy['id']
+        if not isinstance(bias, (int, float)) or np.isnan(bias):
+            logger.debug(f'[{strategy_id}] Ongeldige bias: {bias}.')
+            return None
+        if not performance or not isinstance(performance, dict):
+            logger.debug(f'[{strategy_id}] Ongeldige performance.')
+            return None
+
+        parameters = strategy.get('parameters', {})
+        adjustment_score = await self._calculate_adjustment_score(strategy_id, bias, performance)
+
+        proposal = {"strategyId": strategy_id, "adjustments": {}, "confidence": 0.0, "currentAdjustmentScore": adjustment_score}
+
+        # Fetch thresholds and multipliers for parameter adjustment
+        adjustment_strengthen_threshold = self.params_manager.get_param("predictAdjust_adjStrengthenThreshold", strategy_id=strategy_id, default=70)
+        adjustment_weaken_threshold = self.params_manager.get_param("predictAdjust_adjWeakenThreshold", strategy_id=strategy_id, default=30)
+        param_strengthen_multiplier = self.params_manager.get_param("predictAdjust_paramStrengthenMultiplier", strategy_id=strategy_id, default=1.1)
+        param_weaken_multiplier = self.params_manager.get_param("predictAdjust_paramWeakenMultiplier", strategy_id=strategy_id, default=0.9)
+        param_ema_max = self.params_manager.get_param("predictAdjust_paramEmaMax", strategy_id=strategy_id, default=50)
+        param_ema_min = self.params_manager.get_param("predictAdjust_paramEmaMin", strategy_id=strategy_id, default=5)
+        param_rsi_max = self.params_manager.get_param("predictAdjust_paramRsiMax", strategy_id=strategy_id, default=85)
+        param_rsi_min = self.params_manager.get_param("predictAdjust_paramRsiMin", strategy_id=strategy_id, default=15)
+
+        logger.info(f"[{strategy_id}] Using parameter adjustment thresholds/multipliers: adjStrengthenThreshold={adjustment_strengthen_threshold}, adjWeakenThreshold={adjustment_weaken_threshold}, "
+                    f"paramStrengthenMultiplier={param_strengthen_multiplier}, paramWeakenMultiplier={param_weaken_multiplier}, emaMax={param_ema_max}, emaMin={param_ema_min}, "
+                    f"rsiMax={param_rsi_max}, rsiMin={param_rsi_min}")
+
+        if adjustment_score > adjustment_strengthen_threshold:
+            proposal['adjustments'] = {"action": "strengthen", "parameterChanges": {}}
+            if 'emaPeriod' in parameters and isinstance(parameters['emaPeriod'], (int, float)):
+                proposal['adjustments']['parameterChanges']['emaPeriod'] = int(min(parameters['emaPeriod'] * param_strengthen_multiplier, param_ema_max))
+            if 'rsiThreshold' in parameters and isinstance(parameters['rsiThreshold'], (int, float)):
+                proposal['adjustments']['parameterChanges']['rsiThreshold'] = int(min(parameters['rsiThreshold'] * param_strengthen_multiplier, param_rsi_max))
+            proposal['confidence'] = adjustment_score / 100
+        elif adjustment_score < adjustment_weaken_threshold:
+            proposal['adjustments'] = {"action": "weaken", "parameterChanges": {}}
+            if 'emaPeriod' in parameters and isinstance(parameters['emaPeriod'], (int, float)):
+                proposal['adjustments']['parameterChanges']['emaPeriod'] = int(max(parameters['emaPeriod'] * param_weaken_multiplier, param_ema_min))
+            if 'rsiThreshold' in parameters and isinstance(parameters['rsiThreshold'], (int, float)):
+                proposal['adjustments']['parameterChanges']['rsiThreshold'] = int(max(parameters['rsiThreshold'] * param_weaken_multiplier, param_rsi_min))
+            proposal['confidence'] = (100 - adjustment_score) / 100
+        else:
+            proposal['adjustments'] = {"action": "maintain"}
+            proposal['confidence'] = 0.5 + (abs(adjustment_score - 50)/100)
+
+        logger.debug(f'[{strategy_id}] PredictStrategyAdjustment Proposal: {proposal}')
+        return proposal
+
+    async def analyze_timeframe_bias(self, reflections: Optional[List[Dict[str, Any]]] = None) -> Dict[str, Any]:
+        """
+        Analyseer timeframe-specifieke reflecties.
+        """
+        if reflections is None:
+            reflections = await _load_json_async(REFLECTIE_LOG)
+        if not reflections:
+            logger.debug('[AnalyzeTimeframeBias] Geen reflecties beschikbaar.')
+            return {}
+        valid_reflections = [r for r in reflections if validate_reflection(r)]
+        if not valid_reflections:
+            logger.debug('[AnalyzeTimeframeBias] Geen geldige reflecties.')
+            return {}
+        bias_by_timeframe: Dict[str, Dict[str, Any]] = {}
+        for reflection in valid_reflections:
+            strategy_id = reflection['strategyId']
+            bias = reflection['combined_bias']
+            confidence = reflection['combined_confidence']
+            timeframe = reflection.get('timeframe') or reflection.get('trade_context', {}).get('timeframe')
+            if not timeframe: continue
+            if timeframe not in bias_by_timeframe:
+                bias_by_timeframe[timeframe] = {}
+            if strategy_id not in bias_by_timeframe[timeframe]:
+                bias_by_timeframe[timeframe][strategy_id] = {"totalBias": 0.0, "totalWeight": 0.0, "count": 0, "averageBias": 0.0, "confidence":0.0}
+            weight = confidence
+            bias_by_timeframe[timeframe][strategy_id]["totalBias"] += bias * weight
+            bias_by_timeframe[timeframe][strategy_id]["totalWeight"] += weight
+            bias_by_timeframe[timeframe][strategy_id]["count"] += 1
+        for timeframe_key in bias_by_timeframe:
+            for strategy_id_key in bias_by_timeframe[timeframe_key]:
+                entry = bias_by_timeframe[timeframe_key][strategy_id_key]
+                entry["averageBias"] = entry["totalBias"] / entry["totalWeight"] if entry["totalWeight"] > 0 else 0.0
+                entry["confidence"] = entry["count"] / sum(1 for r in valid_reflections if r.get('strategyId') == strategy_id_key and (r.get('timeframe') or r.get('trade_context', {}).get('timeframe')) == timeframe_key) if sum(1 for r in valid_reflections if r.get('strategyId') == strategy_id_key and (r.get('timeframe') or r.get('trade_context', {}).get('timeframe')) == timeframe_key) > 0 else 0.0
+        logger.debug(f'[AnalyzeTimeframeBias] Result: {bias_by_timeframe}')
+        return bias_by_timeframe
+
+    async def generate_mutation_proposal(
+        self, # Added self
+        strategy: Dict[str, Any],
+        bias: float, # Overall bias for the strategy
+        performance: Dict[str, Any],
+        timeframe_bias_analysis: Optional[Dict[str, Any]] = None # Result from analyze_timeframe_bias
+    ) -> Optional[Dict[str, Any]]:
+        """
+        Genereer mutatievoorstel met timeframe-data.
+        """
+        if timeframe_bias_analysis is None:
+            timeframe_bias_analysis = await self.analyze_timeframe_bias() # Call as method
+
+        proposal = await self.predict_strategy_adjustment(strategy, bias, performance) # Call as method
+        if not proposal: return None
+
+        proposal['timeframeSpecificAdjustments'] = {}
+        strategy_id_str = strategy['id']
+
+        if timeframe_bias_analysis:
+            for timeframe, strategies_on_tf in timeframe_bias_analysis.items():
+                if strategy_id_str in strategies_on_tf:
+                    tf_bias_info = strategies_on_tf[strategy_id_str]
+                    proposal['timeframeSpecificAdjustments'][timeframe] = {
+                        "averageBias": tf_bias_info["averageBias"],
+                        "confidence": tf_bias_info["confidence"],
+                        "suggestedAction": "Monitor"
+                    }
+
+        proposal['rationale'] = {
+            "overallBiasImpact": f"Overall AI bias towards strategy: {bias:.2f}",
+            "performanceImpact": f"Win Rate: {performance.get('winRate', 0):.2%}, Avg Profit: {performance.get('avgProfit', 0):.2%}, Trades: {performance.get('tradeCount', 0)}",
+            "timeframeConsiderations": f"Timeframe-specific biases: {json.dumps(proposal['timeframeSpecificAdjustments'])}" if proposal['timeframeSpecificAdjustments'] else 'No specific timeframe bias data applied to this proposal.',
+            "recommendedAction": proposal.get('adjustments', {}).get('action', 'maintain').capitalize(),
+            "confidenceInProposal": proposal.get('confidence', 0.0)
+        }
+
+        bias_outcome_entry = {
+            "strategyId": strategy_id_str,
+            "timestamp": datetime.now().isoformat(),
+            "overallBias": bias,
+            "performance": performance,
+            "proposedAction": proposal.get('adjustments', {}).get('action', 'maintain'),
+            "proposedParameters": proposal.get('adjustments', {}).get('parameterChanges', {}),
+            "proposalConfidence": proposal.get('confidence', 0.0)
+        }
+        existing_bias_outcomes = await _load_json_async(BIAS_OUTCOME_LOG)
+        if not isinstance(existing_bias_outcomes, list): existing_bias_outcomes = []
+        existing_bias_outcomes.append(bias_outcome_entry)
+        await _write_json_async(BIAS_OUTCOME_LOG, existing_bias_outcomes)
+        logger.debug(f'[{strategy_id_str}] GenerateMutationProposal Result: {proposal}')
+        return proposal
 
 # Voorbeeld van hoe je het zou kunnen gebruiken (voor testen)
 if __name__ == "__main__":
     import asyncio
-    import sys # voor logging in test
+    import sys
 
-    # Setup basic logging for the test
     logging.basicConfig(level=logging.INFO,
                         format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
                         handlers=[logging.StreamHandler(sys.stdout)])
 
-
-    # Mock data voor reflecties
     mock_reflections_data = [
-        {
-            "token": "ETH/USDT", "strategyId": "DUOAI_Strategy", "combined_confidence": 0.8, "combined_bias": 0.7,
-            "timeframe": "5m", "trade_context": {"timeframe": "5m", "profit_pct": 0.03}, "timestamp": "2025-06-11T10:00:00Z"
-        },
-        {
-            "token": "ETH/USDT", "strategyId": "DUOAI_Strategy", "combined_confidence": 0.6, "combined_bias": 0.4,
-             "timeframe": "1h", "trade_context": {"timeframe": "1h", "profit_pct": -0.01}, "timestamp": "2025-06-11T11:00:00Z"
-        },
-        {
-            "token": "BTC/USDT", "strategyId": "Another_Strategy", "combined_confidence": 0.9, "combined_bias": 0.9,
-             "timeframe": "15m", "trade_context": {"timeframe": "15m", "profit_pct": 0.05}, "timestamp": "2025-06-11T12:00:00Z"
-        },
-        {
-            "token": "ETH/USDT", "strategyId": "DUOAI_Strategy", "combined_confidence": 0.7, "combined_bias": 0.6,
-             "timeframe": "5m", "trade_context": {"timeframe": "5m", "profit_pct": 0.01}, "timestamp": "2025-06-11T13:00:00Z"
-        },
-         { # Invalid reflection example
-            "token": "XRP/USDT", "strategyId": "Test_Strategy", "combined_confidence": "high", "combined_bias": "positive",
-             "timeframe": "1d", "trade_context": {"timeframe": "1d"}, "timestamp": "2025-06-11T14:00:00Z"
-        }
+        {"token": "ETH/USDT", "strategyId": "DUOAI_Strategy", "combined_confidence": 0.8, "combined_bias": 0.7, "timeframe": "5m", "trade_context": {"timeframe": "5m"}, "timestamp": "2025-06-11T10:00:00Z"},
+        {"token": "ETH/USDT", "strategyId": "DUOAI_Strategy", "combined_confidence": 0.6, "combined_bias": 0.4, "timeframe": "1h", "trade_context": {"timeframe": "1h"}, "timestamp": "2025-06-11T11:00:00Z"},
+        {"token": "BTC/USDT", "strategyId": "Another_Strategy", "combined_confidence": 0.9, "combined_bias": 0.9, "timeframe": "15m", "trade_context": {"timeframe": "15m"}, "timestamp": "2025-06-11T12:00:00Z"},
     ]
-    # Pre-populate REFLECTIE_LOG for testing functions that load it
+
     async def setup_mock_log():
         await _write_json_async(REFLECTIE_LOG, mock_reflections_data)
-        # Clear other logs for clean test run
         await _write_json_async(ANALYSE_LOG, [])
         await _write_json_async(BIAS_OUTCOME_LOG, [])
 
+    class MockParamsManager:
+        def __init__(self, custom_params=None):
+            self.params = custom_params if custom_params else {}
+            logger.info(f"MockParamsManager initialized with params: {self.params}")
+
+        def get_param(self, param_name: str, strategy_id: Optional[str] = None, default: Any = None) -> Any:
+            # Simple mock: strategy_id not used here, but could be for more complex mocks
+            value = self.params.get(param_name, default)
+            # logger.info(f"[MockParamsManager] get_param: '{param_name}' (Strategy: {strategy_id}) -> Value: {value} (Default was: {default})")
+            return value
 
     async def run_test_reflectie_analyser():
-        await setup_mock_log() # Setup the mock log file
+        await setup_mock_log()
 
-        print("\n--- Test analyse_reflecties (loading from file) ---")
-        analysis_result = await analyse_reflecties() # Pass no args to load from file
-        print(json.dumps(analysis_result, indent=2))
+        # --- Test Scenario A: Default Values ---
+        print("\n--- Test Scenario A: Using Default Parameter Values ---")
+        mock_pm_default = MockParamsManager() # No custom params, should use defaults
+        analyser_default = ReflectieAnalyser(params_manager=mock_pm_default)
 
-        print("\n--- Test calculate_bias_score (loading from file) ---")
-        bias_score = await calculate_bias_score() # Pass no args
-        print(f"Berekende bias score: {bias_score:.2f}")
+        analysis_result_default = await analyser_default.analyse_reflecties()
+        bias_score_default = await analyser_default.calculate_bias_score()
+        consistency_result_default = await analyser_default.analyze_reflection_consistency()
+        timeframe_bias_result_default = await analyser_default.analyze_timeframe_bias()
 
-        print("\n--- Test analyze_reflection_consistency (loading from file) ---")
-        consistency_result = await analyze_reflection_consistency() # Pass no args
-        print(json.dumps(consistency_result, indent=2))
-
-        print("\n--- Test analyze_timeframe_bias (loading from file) ---")
-        timeframe_bias_result = await analyze_timeframe_bias() # Pass no args
-        print(json.dumps(timeframe_bias_result, indent=2))
-
-        print("\n--- Test generate_mutation_proposal ---")
         mock_strategy_params = {"id": "DUOAI_Strategy", "parameters": {"emaPeriod": 20, "rsiThreshold": 70}}
         mock_performance_stats = {"winRate": 0.65, "avgProfit": 0.02, "tradeCount": 100}
+        duo_ai_bias_default = analysis_result_default.get("biasScores", {}).get("DUOAI_Strategy", {}).get("averageBias", 0.5)
 
-        # Use an overall bias for the strategy, e.g., from the analysis_result or a specific calculation
-        duo_ai_bias = analysis_result.get("biasScores", {}).get("DUOAI_Strategy", {}).get("averageBias", 0.5)
+        print(f"DUOAI_Strategy Bias for Default Test: {duo_ai_bias_default:.2f}")
+        proposal_default = await analyser_default.generate_mutation_proposal(
+            mock_strategy_params, duo_ai_bias_default, mock_performance_stats, timeframe_bias_result_default)
+        print("Mutation Proposal (Default Params):")
+        print(json.dumps(proposal_default, indent=2))
+        # Based on bias 0.59, perf score with defaults: (0.65*50) + min(max(0.02*600, -30),30) + min(100/5, 20) = 32.5 + 12 + 20 = 64.5
+        # Bias 0.59 is not >0.7 or <0.3. So adjustment_score = 64.5.
+        # 64.5 is not > 70 (adjStrengthenThreshold default) and not < 30 (adjWeakenThreshold default). So action "maintain".
+        assert proposal_default['adjustments']['action'] == 'maintain'
+        assert abs(proposal_default['currentAdjustmentScore'] - 64.5) < 0.1
 
 
-        mutation_proposal_result = await generate_mutation_proposal(
-            mock_strategy_params,
-            duo_ai_bias,
-            mock_performance_stats,
-            timeframe_bias_result # Pass the result from analyze_timeframe_bias
-        )
-        print(json.dumps(mutation_proposal_result, indent=2))
+        # --- Test Scenario B: Custom Values ---
+        print("\n--- Test Scenario B: Using Custom Parameter Values ---")
+        custom_params_for_test = {
+            "predictAdjust_avgProfitScaleFactor": 800, # Default 600
+            "predictAdjust_winRateWeight": 60,         # Default 50
+            "predictAdjust_adjStrengthenThreshold": 60, # Default 70 - Lowered to make strengthen easier
+            "predictAdjust_paramStrengthenMultiplier": 1.2, # Default 1.1
+            "predictAdjust_paramEmaMax": 60 # Default 50
+        }
+        mock_pm_custom = MockParamsManager(custom_params=custom_params_for_test)
+        analyser_custom = ReflectieAnalyser(params_manager=mock_pm_custom)
+
+        # Re-use analysis results as they don't depend on these params
+        duo_ai_bias_custom = analysis_result_default.get("biasScores", {}).get("DUOAI_Strategy", {}).get("averageBias", 0.5)
+
+        print(f"DUOAI_Strategy Bias for Custom Test: {duo_ai_bias_custom:.2f}")
+        proposal_custom = await analyser_custom.generate_mutation_proposal(
+            mock_strategy_params, duo_ai_bias_custom, mock_performance_stats, timeframe_bias_result_default)
+        print("Mutation Proposal (Custom Params):")
+        print(json.dumps(proposal_custom, indent=2))
+
+        # Recalculate expected score with custom params:
+        # scaled_avg_profit_score = min(max(0.02 * 800, -30), 30) = min(max(16, -30), 30) = 16
+        # performance_score = (0.65 * 60) + 16 + min(100/5, 20) = 39 + 16 + 20 = 75
+        # Bias 0.59 is not >0.7 or <0.3. So adjustment_score = 75.
+        # Custom adjStrengthenThreshold = 60. Since 75 > 60, action should be "strengthen".
+        assert proposal_custom['adjustments']['action'] == 'strengthen'
+        assert abs(proposal_custom['currentAdjustmentScore'] - 75) < 0.1
+        # Check if emaPeriod was strengthened using custom multiplier and max
+        # Original emaPeriod = 20. New = int(min(20 * 1.2, 60)) = int(min(24, 60)) = 24
+        assert proposal_custom['adjustments']['parameterChanges']['emaPeriod'] == 24
 
         print(f"\nCheck {ANALYSE_LOG} and {BIAS_OUTCOME_LOG} for saved analysis and proposals.")
-
 
     asyncio.run(run_test_reflectie_analyser())

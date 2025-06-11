@@ -23,10 +23,14 @@ class CNNPatterns:
 
     MODELS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'data', 'models')
     CNN_MODEL_PATH = os.path.join(MODELS_DIR, 'cnn_patterns_model.pth')
+    SCALER_PARAMS_PATH = os.path.join(MODELS_DIR, 'cnn_scaler_params.json') # Path for scaler parameters
     os.makedirs(MODELS_DIR, exist_ok=True)
 
     def __init__(self):
         self.loaded_models: Dict[str, Any] = {}
+        self.scaler_feature_columns: Optional[List[str]] = None
+        self.scaler_min_vals: Optional[np.ndarray] = None
+        self.scaler_max_vals: Optional[np.ndarray] = None
         self._load_ml_models()
         logger.info("CNNPatterns geïnitialiseerd.")
 
@@ -34,36 +38,83 @@ class CNNPatterns:
         """
         Laadt het getrainde PyTorch SimpleCNN-model.
         """
+        """
+        Laadt het getrainde PyTorch SimpleCNN-model en de scaler parameters.
+        """
+        # Load CNN model
         logger.info(f"Poging om PyTorch ML-model te laden van {CNNPatterns.CNN_MODEL_PATH}...")
         if os.path.exists(CNNPatterns.CNN_MODEL_PATH):
             try:
-                input_channels = 9  # Matches feature_columns in pre_trainer.py
+                # Assuming feature_columns are known or derived from scaler_params
+                # For now, using a typical number of input_channels. This will be verified by scaler_params.
+                # input_channels = 9 # This will be determined by len(self.scaler_feature_columns) later
                 num_classes = 2     # bullFlag_label (0 of 1)
 
-                model = SimpleCNN(input_channels=input_channels, num_classes=num_classes)
-                # Belangrijk: Roep _set_num_classes_for_fc_init AAN voordat state_dict wordt geladen,
-                # omdat fc1 dynamisch wordt geïnitialiseerd in de forward pass van SimpleCNN.
-                model._set_num_classes_for_fc_init(num_classes)
+                # Defer model instantiation until scaler_params are loaded to know input_channels
+                # model = SimpleCNN(input_channels=input_channels, num_classes=num_classes)
+                # model._set_num_classes_for_fc_init(num_classes)
+                # model.load_state_dict(torch.load(CNNPatterns.CNN_MODEL_PATH, map_location=torch.device('cpu')))
+                # model.eval()
+                # self.loaded_models['cnn_pattern_recognizer'] = model
+                # logger.info(f"PyTorch model 'cnn_pattern_recognizer' succesvol geladen van {CNNPatterns.CNN_MODEL_PATH}.")
+                self.model_state_dict = torch.load(CNNPatterns.CNN_MODEL_PATH, map_location=torch.device('cpu'))
+                logger.info(f"PyTorch model state_dict succesvol geladen van {CNNPatterns.CNN_MODEL_PATH}.")
 
-                # Laad state_dict. map_location zorgt voor compatibiliteit als getraind op GPU en nu CPU.
-                model.load_state_dict(torch.load(CNNPatterns.CNN_MODEL_PATH, map_location=torch.device('cpu')))
-                model.eval()  # Zet model in evaluatiemodus
-
-                self.loaded_models['cnn_pattern_recognizer'] = model
-                logger.info(f"PyTorch model 'cnn_pattern_recognizer' succesvol geladen van {CNNPatterns.CNN_MODEL_PATH}.")
             except Exception as e:
                 logger.error(f"Fout bij het laden van PyTorch model van {CNNPatterns.CNN_MODEL_PATH}: {e}")
-                logger.info("CNNPatterns zal regelgebaseerd functioneren zonder dit model.")
+                self.model_state_dict = None
         else:
-            logger.warning(f"PyTorch model niet gevonden op {CNNPatterns.CNN_MODEL_PATH}. CNNPatterns zal regelgebaseerd functioneren.")
+            logger.warning(f"PyTorch model niet gevonden op {CNNPatterns.CNN_MODEL_PATH}.")
+            self.model_state_dict = None
+
+        # Load scaler parameters
+        logger.info(f"Poging om CNN scaler parameters te laden van {CNNPatterns.SCALER_PARAMS_PATH}...")
+        if os.path.exists(CNNPatterns.SCALER_PARAMS_PATH):
+            try:
+                with open(CNNPatterns.SCALER_PARAMS_PATH, 'r') as f:
+                    scaler_params = json.load(f)
+                self.scaler_feature_columns = scaler_params['feature_columns']
+                self.scaler_min_vals = np.array(scaler_params['min_vals'])
+                self.scaler_max_vals = np.array(scaler_params['max_vals'])
+                logger.info(f"CNN scaler parameters succesvol geladen. Features: {self.scaler_feature_columns}")
+
+                # Now instantiate the model if state_dict was loaded
+                if self.model_state_dict and self.scaler_feature_columns:
+                    input_channels = len(self.scaler_feature_columns)
+                    num_classes = 2 # Assuming 2 classes
+                    model = SimpleCNN(input_channels=input_channels, num_classes=num_classes)
+                    model._set_num_classes_for_fc_init(num_classes)
+                    model.load_state_dict(self.model_state_dict)
+                    model.eval()
+                    self.loaded_models['cnn_pattern_recognizer'] = model
+                    logger.info(f"PyTorch model 'cnn_pattern_recognizer' geïnstantieerd en state_dict toegepast.")
+                elif not self.model_state_dict:
+                    logger.warning("Scaler parameters geladen, maar model state_dict niet. CNN model niet volledig operationeel.")
+
+
+            except Exception as e:
+                logger.error(f"Fout bij het laden of verwerken van scaler parameters van {CNNPatterns.SCALER_PARAMS_PATH}: {e}")
+                self.scaler_feature_columns = None
+                self.scaler_min_vals = None
+                self.scaler_max_vals = None
+        else:
+            logger.warning(f"CNN scaler parameters niet gevonden op {CNNPatterns.SCALER_PARAMS_PATH}. CNN-voorspellingen zullen niet mogelijk zijn.")
+            self.scaler_feature_columns = None
+            self.scaler_min_vals = None
+            self.scaler_max_vals = None
 
     def _predict_pattern_score(self, model_name: str, input_candles_df: pd.DataFrame) -> float:
         """
         Voert inferentie uit met een geladen PyTorch ML-model om een patroonscore te voorspellen.
+        Gebruikt nu geladen scaler parameters.
         """
         model = self.loaded_models.get(model_name)
         if not model:
-            logger.warning(f"Model '{model_name}' niet gevonden in self.loaded_models.")
+            logger.warning(f"Model '{model_name}' niet gevonden of niet correct geladen in self.loaded_models.")
+            return 0.0
+
+        if not self.scaler_feature_columns or self.scaler_min_vals is None or self.scaler_max_vals is None:
+            logger.warning(f"Scaler parameters (feature_columns, min_vals, max_vals) niet geladen voor model '{model_name}'. Kan geen voorspelling doen.")
             return 0.0
 
         if input_candles_df is None or input_candles_df.empty:
@@ -71,38 +122,45 @@ class CNNPatterns:
             return 0.0
 
         sequence_length = 30  # Moet overeenkomen met training (of uit params_manager halen)
-        feature_cols = ['open', 'high', 'low', 'close', 'volume', 'rsi', 'macd', 'macdsignal', 'macdhist'] # Exacte features
 
         if len(input_candles_df) < sequence_length:
             logger.debug(f"Niet genoeg data in input_candles_df ({len(input_candles_df)} rijen) voor sequence_length {sequence_length} voor model '{model_name}'.")
             return 0.0
 
-        if not all(col in input_candles_df.columns for col in feature_cols):
-            missing_cols = [col for col in feature_cols if col not in input_candles_df.columns]
+        # Ensure all required features are present
+        if not all(col in input_candles_df.columns for col in self.scaler_feature_columns):
+            missing_cols = [col for col in self.scaler_feature_columns if col not in input_candles_df.columns]
             logger.warning(f"Ontbrekende feature kolommen in input_candles_df voor model '{model_name}': {missing_cols}. Kan geen voorspelling doen.")
             return 0.0
 
-        # Neem de laatste 'sequence_length' candles
-        df_sequence = input_candles_df.iloc[-sequence_length:].copy() # Werk op een kopie
+        # Neem de laatste 'sequence_length' candles en selecteer/order features
+        df_sequence = input_candles_df.iloc[-sequence_length:].copy()
+        sequence_data_pd = df_sequence[self.scaler_feature_columns] # Select and order features
 
-        # Feature extractie
-        sequence_data_pd = df_sequence[feature_cols]
+        # Normalisatie met geladen scaler parameters
+        # Ensure sequence_data_pd columns are in the same order as self.scaler_min_vals/max_vals
+        # This is implicitly handled if self.scaler_feature_columns was used for selection and ordering
 
-        # Normalisatie (feature-wise min-max scaling to [0,1] for the sequence)
-        # Dit bootst de normalisatie na zoals die in pre_trainer.py is gedefinieerd voor de trainingsdata.
-        # In een ideale situatie zou de scaler (min/max waarden per feature) van de trainingdata worden opgeslagen
-        # en hier worden toegepast. Voor nu, normaliseren we de sequence zelf.
-        min_vals = sequence_data_pd.min(axis=0)
-        max_vals = sequence_data_pd.max(axis=0)
-        range_vals = max_vals - min_vals
-        # Voorkom deling door nul als een feature constant is in de sequence
-        range_vals[range_vals == 0] = 1e-9 # kleine waarde ipv 1 om schaal te behouden als alles 0 is.
+        # Convert to numpy array for scaling, if not already
+        # sequence_data_np = sequence_data_pd.values # This is already done by accessing .values later
 
-        normalized_sequence_pd = (sequence_data_pd - min_vals) / range_vals
-        sequence_array = normalized_sequence_pd.values.astype(np.float32)
+        range_vals = self.scaler_max_vals - self.scaler_min_vals
+        range_vals[range_vals == 0] = 1 # Replicate training logic for constant features
+
+        # Apply scaling: (data - min) / range
+        # Ensure scaler_min_vals and range_vals are broadcastable to sequence_data_pd
+        # sequence_data_pd is (sequence_length, num_features)
+        # self.scaler_min_vals is (num_features,)
+        normalized_sequence_np = (sequence_data_pd.values - self.scaler_min_vals) / range_vals
 
         # Tensor Conversion: (batch_size=1, num_features/input_channels, sequence_length)
-        input_tensor = torch.tensor(sequence_array, dtype=torch.float32).permute(1, 0).unsqueeze(0)
+        # input_tensor expects (num_input_channels, sequence_length) before unsqueeze
+        # num_input_channels is num_features
+        input_tensor = torch.tensor(normalized_sequence_np, dtype=torch.float32).permute(1, 0).unsqueeze(0)
+
+        if input_tensor.shape[1] != len(self.scaler_feature_columns):
+            logger.error(f"Mismatch in tensor input channels ({input_tensor.shape[1]}) and expected from scaler ({len(self.scaler_feature_columns)}).")
+            return 0.0
 
         logger.debug(f"Tensor voor model '{model_name}' shape: {input_tensor.shape}")
 
@@ -113,13 +171,20 @@ class CNNPatterns:
             # Pas softmax toe om waarschijnlijkheden te krijgen
             probabilities = torch.softmax(output_logits, dim=1)
 
-            # Waarschijnlijkheid van de positieve klasse (index 1, aangenomen dat 0 = geen bullFlag, 1 = bullFlag)
-            positive_class_probability = probabilities[0, 1].item()
-            logger.debug(f"Model '{model_name}' voorspelde logits: {output_logits.numpy()}, probabilities: {probabilities.numpy()}, score (pos class): {positive_class_probability:.4f}")
-            return positive_class_probability
+            # Waarschijnlijkheid van de positieve klasse (index 1) en negatieve klasse (index 0)
+            positive_class_probability = probabilities[0, 1].item() # bullFlag_score
+            negative_class_probability = probabilities[0, 0].item() # no_bullFlag_score (or other interpretation)
+
+            logger.debug(f"Model '{model_name}' voorspelde logits: {output_logits.numpy()}")
+            logger.info(f"Model '{model_name}' probabilities: bullFlag_score={positive_class_probability:.4f}, no_bullFlag_score={negative_class_probability:.4f}")
+
+            return {
+                'bullFlag_score': positive_class_probability,
+                'no_bullFlag_score': negative_class_probability
+            }
         except Exception as e:
             logger.error(f"Fout tijdens inferentie met model '{model_name}': {e}")
-            return 0.0
+            return {'bullFlag_score': 0.0, 'no_bullFlag_score': 0.0} # Return dict even on error
 
     # --- Helperfuncties voor dataverwerking (uitbreiding van Freqtrade DF naar 'candles' dicts) ---
     def _dataframe_to_candles(self, dataframe: pd.DataFrame) -> List[Dict[str, Any]]:
@@ -233,6 +298,11 @@ class CNNPatterns:
         return False
 
     def detect_head_and_shoulders(self, candles: List[Dict[str, Any]]) -> bool:
+        """
+        Detecteert een Head and Shoulders patroon.
+        Placeholder: Deze functie is nog niet volledig geïmplementeerd.
+        """
+        logger.warning(f"{self.__class__.__name__}.detect_head_and_shoulders is a placeholder and not fully implemented.")
         if len(candles) < 30: return False
         # Zeer complexe detectie die geavanceerdere piek-dal analyse vereist.
         # Voor nu een placeholder.
@@ -276,17 +346,32 @@ class CNNPatterns:
         return False
 
     def detect_cup_and_handle(self, candles: List[Dict[str, Any]]) -> bool:
+        """
+        Detecteert een Cup and Handle patroon.
+        Placeholder: Deze functie is nog niet volledig geïmplementeerd.
+        """
+        logger.warning(f"{self.__class__.__name__}.detect_cup_and_handle is a placeholder and not fully implemented.")
         if len(candles) < 50: return False
         # Zeer complexe detectie, vereist geavanceerde vormherkenning. Placeholder.
         return False
 
     def detect_wedge_patterns(self, candles: List[Dict[str, Any]]) -> bool:
+        """
+        Detecteert Wedge (wig) patronen.
+        Placeholder: Deze functie is nog niet volledig geïmplementeerd.
+        """
+        logger.warning(f"{self.__class__.__name__}.detect_wedge_patterns is a placeholder and not fully implemented.")
         if len(candles) < 20: return False
         # Vereenvoudigde logica voor dalende/stijgende wiggen (convergerende trendlijnen)
         # Vereist het fitten van trendlijnen. Placeholder.
         return False
 
     def detect_triple_top_bottom(self, candles: List[Dict[str, Any]]) -> bool:
+        """
+        Detecteert Triple Top of Triple Bottom patronen.
+        Placeholder: Deze functie is nog niet volledig geïmplementeerd.
+        """
+        logger.warning(f"{self.__class__.__name__}.detect_triple_top_bottom is a placeholder and not fully implemented.")
         if len(candles) < 30: return False
         # Zeer complexe detectie. Placeholder.
         return False
@@ -624,7 +709,11 @@ class CNNPatterns:
 
 
     def detect_macd_divergence(self, candles: List[Dict[str, Any]]) -> bool:
-        # Vereist MACD en prijsactie analyse. Complexe logica. Placeholder.
+        """
+        Detecteert MACD divergentie.
+        Let op: Huidige implementatie is een vereenvoudiging en mogelijk niet volledig robuust.
+        """
+        # logger.warning(f"{self.__class__.__name__}.detect_macd_divergence is a simplified implementation.") # Optional: if you want to warn on every call
         if len(candles) < 50: return False
 
         closes = np.array([c.get('close', np.nan) for c in candles if c is not None])
@@ -652,6 +741,11 @@ class CNNPatterns:
         return False
 
     def detect_ichimoku_twist(self, candles: List[Dict[str, Any]]) -> bool:
+        """
+        Detecteert een Ichimoku Kumo (cloud) twist.
+        Placeholder: Deze functie is nog niet volledig geïmplementeerd.
+        """
+        logger.warning(f"{self.__class__.__name__}.detect_ichimoku_twist is a placeholder and not fully implemented.")
         # Vereist uitgebreide Ichimoku berekeningen en analyse van Kumo (cloud) kruisingen.
         # Complexe logica, placeholder.
         return False
@@ -680,6 +774,11 @@ class CNNPatterns:
         return False
 
     def detect_vwap_cross(self, candles: List[Dict[str, Any]]) -> str or bool:
+        """
+        Detecteert een kruising met de Volume Weighted Average Price (VWAP).
+        Placeholder: Deze functie is nog niet volledig geïmplementeerd (vereist VWAP data).
+        """
+        logger.warning(f"{self.__class__.__name__}.detect_vwap_cross is a placeholder and not fully implemented (requires VWAP data).")
         # VWAP berekening is complexer dan simpele gemiddelden. Vereist cumulatieve Price * Volume.
         # Freqtrade kan VWAP berekenen via custom indicators, dan kan je hier op checken.
         # Placeholder.
@@ -797,7 +896,8 @@ class CNNPatterns:
         all_patterns = {
             "zoomPatterns": {},
             "contextPatterns": {},
-            "patterns": {},
+            "patterns": {}, # For rule-based patterns
+            "cnn_predictions": {}, # For CNN model predictions
             "context": {"trend": "unknown", "volume_spike": False}
         }
 
@@ -814,15 +914,20 @@ class CNNPatterns:
             df_for_prediction = candles_by_timeframe.get('15m')
 
             if df_for_prediction is not None and not df_for_prediction.empty:
-                logger.info(f"Uitvoeren van ML voorspelling met '{ml_model_name}' op {symbol} (15m data).")
-                # De _predict_pattern_score methode verwacht nu een DataFrame
-                score = self._predict_pattern_score(ml_model_name, df_for_prediction)
+                prediction_timeframe = '15m' # Explicitly define the TF used for this prediction
+                logger.info(f"Uitvoeren van ML voorspelling met '{ml_model_name}' op {symbol} ({prediction_timeframe} data).")
 
-                # Sla de score op. De key "ml_cnn_bullFlag_score" suggereert dat dit model
-                # specifiek een bullFlag voorspelt.
-                pattern_key = "ml_cnn_bullFlag_score"
-                all_patterns["patterns"][pattern_key] = score
-                logger.info(f"ML Model '{ml_model_name}' voorspelde score voor '{pattern_key}': {score:.4f}")
+                cnn_scores_dict = self._predict_pattern_score(ml_model_name, df_for_prediction)
+
+                if cnn_scores_dict:
+                    for score_key, score_value in cnn_scores_dict.items():
+                        # Prefix with timeframe, e.g., "15m_bullFlag_score"
+                        prefixed_key = f"{prediction_timeframe}_{score_key}"
+                        all_patterns["cnn_predictions"][prefixed_key] = score_value
+                        logger.info(f"ML Model '{ml_model_name}' ({prediction_timeframe}) voorspelde score voor '{prefixed_key}': {score_value:.4f}")
+                else:
+                    logger.warning(f"ML model '{ml_model_name}' gaf geen scores terug voor {symbol} ({prediction_timeframe}).")
+
             else:
                 logger.info(f"Geen geschikte data (15m) gevonden voor ML voorspelling ({ml_model_name}) voor {symbol}. Overslaan.")
         else:
@@ -944,8 +1049,10 @@ if __name__ == "__main__":
     # import os # os is already imported at the top level
     import json # Toegevoegd voor json.dumps in test
     import dotenv
+    from pathlib import Path # Import Path
     # Corrected path for .env when running this script directly
-    dotenv_path = os.path.join(os.path.dirname(__file__), '..', '.env')
+    # dotenv_path = os.path.join(os.path.dirname(__file__), '..', '.env')
+    dotenv_path = Path(__file__).resolve().parent.parent / '.env'
     dotenv.load_dotenv(dotenv_path)
 
 
@@ -1017,12 +1124,42 @@ if __name__ == "__main__":
         return df
 
     async def run_test_cnn_patterns():
-        cnn_detector = CNNPatterns()
+        # Create a dummy cnn_scaler_params.json for testing
+        dummy_scaler_params = {
+            "feature_columns": ['open', 'high', 'low', 'close', 'volume', 'rsi', 'macd', 'macdsignal', 'macdhist'],
+            "min_vals": [90, 95, 85, 90, 1000, 20, -0.5, -0.4, -0.1],
+            "max_vals": [110, 115, 105, 110, 5000, 80, 0.5, 0.4, 0.1]
+        }
+        # Ensure MODELS_DIR exists for the dummy file
+        os.makedirs(CNNPatterns.MODELS_DIR, exist_ok=True)
+        with open(CNNPatterns.SCALER_PARAMS_PATH, 'w') as f:
+            json.dump(dummy_scaler_params, f, indent=4)
+        logger.info(f"Dummy scaler params created at {CNNPatterns.SCALER_PARAMS_PATH} for testing.")
+
+        # Create a dummy model state_dict for testing _load_ml_models
+        # This needs a valid SimpleCNN state_dict. For simplicity, we'll skip creating a full dummy model state_dict.
+        # Instead, we'll rely on the logs from _load_ml_models to indicate if scaler loading works.
+        # If CNN_MODEL_PATH does not exist, the model won't load, but scaler loading should still be testable.
+        # To test model instantiation with scaler, a dummy model file would be needed.
+        # For now, let's assume it's okay if the model itself doesn't load, but scaler params do.
+
+        cnn_detector = CNNPatterns() # This will call _load_ml_models
+
+        if cnn_detector.scaler_feature_columns:
+            logger.info(f"SUCCESS: Scaler feature columns loaded: {cnn_detector.scaler_feature_columns}")
+            logger.info(f"SUCCESS: Scaler min_vals loaded (shape): {cnn_detector.scaler_min_vals.shape}")
+            logger.info(f"SUCCESS: Scaler max_vals loaded (shape): {cnn_detector.scaler_max_vals.shape}")
+        else:
+            logger.error("FAILURE: Scaler parameters were not loaded during CNNPatterns initialization.")
+
+
         test_symbol = 'BTC/USDT'
+        num_features = len(dummy_scaler_params["feature_columns"])
 
         # Creëer mock dataframes voor multi-timeframe test
+        # Ensure mock dataframes include all columns listed in dummy_scaler_params["feature_columns"]
         candles_by_timeframe = {
-            '1m': create_mock_dataframe('1m', 60),
+            '1m': create_mock_dataframe('1m', 60), # num_features will be matched by create_mock_dataframe
             '5m': create_mock_dataframe('5m', 60),
             '15m': create_mock_dataframe('15m', 60),
             '1h': create_mock_dataframe('1h', 60),
@@ -1032,15 +1169,38 @@ if __name__ == "__main__":
 
         print(f"\n--- Test CNNPatterns voor {test_symbol} ---")
         # logger.info("Starting multi-timeframe pattern detection test...")
-        detected_patterns = await cnn_detector.detect_patterns_multi_timeframe(candles_by_timeframe, test_symbol)
+
+        # Check if the model was actually loaded before trying to use it
+        if 'cnn_pattern_recognizer' in cnn_detector.loaded_models:
+            logger.info("CNN model 'cnn_pattern_recognizer' is loaded. Proceeding with full detection.")
+            detected_patterns = await cnn_detector.detect_patterns_multi_timeframe(candles_by_timeframe, test_symbol)
+            print("\n--- Detected Patterns (including CNN predictions) ---")
+            print(json.dumps(detected_patterns, indent=2, default=str))
+
+            # Verify cnn_predictions structure
+            if "cnn_predictions" in detected_patterns:
+                logger.info("SUCCESS: 'cnn_predictions' key found in output.")
+                if "15m_bullFlag_score" in detected_patterns["cnn_predictions"] and \
+                   "15m_no_bullFlag_score" in detected_patterns["cnn_predictions"]:
+                    logger.info("SUCCESS: Timeframe-prefixed CNN scores (e.g., '15m_bullFlag_score') found.")
+                else:
+                    logger.error("FAILURE: Expected timeframe-prefixed CNN scores not found in 'cnn_predictions'.")
+            else:
+                logger.error("FAILURE: 'cnn_predictions' key NOT found in output.")
+
+        else:
+            logger.warning("CNN model 'cnn_pattern_recognizer' not loaded. Skipping detect_patterns_multi_timeframe which relies on it.")
+            # Create a dummy detected_patterns structure for the rest of the test if model isn't loaded
+            detected_patterns = {"patterns": {}, "cnn_predictions": {}, "context": {}}
+
 
     # Ensure logger is configured for __main__ to see output if using logger.debug in detect_patterns_multi_timeframe
     logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 
 
-    print(json.dumps(detected_patterns, indent=2, default=str))
+    # print(json.dumps(detected_patterns, indent=2, default=str)) # Moved up
 
-        print("\n--- Specifieke patroon tests op 5m ---")
+        print("\n--- Specifieke patroon tests op 5m (Rule-based) ---")
         mock_5m_df = candles_by_timeframe['5m']
         # Reset index to make 'date' a column for _dataframe_to_candles
         mock_5m_candles_list = cnn_detector._dataframe_to_candles(mock_5m_df.reset_index())
@@ -1061,5 +1221,9 @@ if __name__ == "__main__":
         else:
             print("5m DataFrame is leeg, overslaan TA-Lib tests.")
 
+        # Clean up dummy scaler file
+        if os.path.exists(CNNPatterns.SCALER_PARAMS_PATH):
+            os.remove(CNNPatterns.SCALER_PARAMS_PATH)
+            logger.info(f"Dummy scaler params file {CNNPatterns.SCALER_PARAMS_PATH} removed.")
 
     asyncio.run(run_test_cnn_patterns())
