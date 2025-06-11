@@ -126,35 +126,51 @@ class ExitOptimizer:
             cnn_pattern_weight = 0.5
 
         weighted_pattern_score = 0.0
-        base_tf_name = dataframe.attrs.get('timeframe', '5m') # Default to 5m if not set
+        detected_patterns_summary = [] # For collecting pattern summaries
+        base_tf_name = dataframe.attrs.get('timeframe', '5m')
 
         if pattern_data and pattern_data.get('cnn_predictions'):
-            # Example: using bearishEngulfing_score. Add other relevant bearish scores.
             bear_engulf_score = pattern_data['cnn_predictions'].get(f"{base_tf_name}_bearishEngulfing_score", 0.0)
-            if isinstance(bear_engulf_score, (int, float)):
-                weighted_pattern_score += bear_engulf_score * cnn_pattern_weight
-                logger.debug(f"CNN BearishEngulfing score for {base_tf_name}: {bear_engulf_score:.4f}, Contributed to weighted score: {bear_engulf_score * cnn_pattern_weight:.4f}")
-            # Add other specific bearish CNN score contributions here if defined, e.g. bearFlag_score
+            if isinstance(bear_engulf_score, (int, float)) and bear_engulf_score > 0: # Only add if score is positive
+                contribution = bear_engulf_score * cnn_pattern_weight
+                weighted_pattern_score += contribution
+                logger.debug(f"CNN BearishEngulfing score for {base_tf_name}: {bear_engulf_score:.4f}, Contributed to weighted score: {contribution:.4f}")
+                detected_patterns_summary.append(f"bearishEngulfing({bear_engulf_score:.2f})")
+            # Add other numerical scores here, e.g., bear_flag_score
             # bear_flag_score = pattern_data['cnn_predictions'].get(f"{base_tf_name}_bearFlag_score", 0.0)
-            # if isinstance(bear_flag_score, (int, float)):
-            #     weighted_pattern_score += bear_flag_score * cnn_pattern_weight # Assuming bear flags also contribute positively to a "bearish score"
-            #     logger.debug(f"CNN BearFlag score for {base_tf_name}: {bear_flag_score:.4f}, Contributed to weighted score: {bear_flag_score * cnn_pattern_weight:.4f}")
-
+            # if isinstance(bear_flag_score, (int, float)) and bear_flag_score > 0:
+            #     contribution = bear_flag_score * cnn_pattern_weight
+            #     weighted_pattern_score += contribution
+            #     logger.debug(f"CNN BearFlag score for {base_tf_name}: {bear_flag_score:.4f}, Contributed to weighted score: {contribution:.4f}")
+            #     detected_patterns_summary.append(f"bearFlag({bear_flag_score:.2f})")
 
         rule_based_bearish_patterns = ['bearishEngulfing', 'CDLENGULFING', 'eveningStar', 'CDLEVENINGSTAR',
                                    'threeBlackCrows', 'CDL3BLACKCROWS', 'darkCloudCover', 'CDLDARKCLOUDCOVER',
                                    'bearishRSIDivergence', 'CDLHANGINGMAN', 'doubleTop', 'descendingTriangle', 'parabolicCurveDown']
+        detected_rule_patterns_log = []
         if pattern_data and pattern_data.get('patterns'):
             for pattern_name in rule_based_bearish_patterns:
                 if pattern_data['patterns'].get(pattern_name, False):
-                    rule_based_contribution = 0.7 * cnn_pattern_weight # As per target code example
-                    weighted_pattern_score += rule_based_contribution
-                    logger.debug(f"Regelgebaseerd bearish patroon {pattern_name} gedetecteerd. Contributed to weighted score: {rule_based_contribution:.4f}")
-                    break # Add contribution once
+                    detected_rule_patterns_log.append(pattern_name)
 
-        strong_bearish_pattern_threshold = 0.5 # As per target code example
+            if detected_rule_patterns_log:
+                rule_based_contribution_value = 0.7 # Fixed contribution for any rule-based pattern
+                contribution = rule_based_contribution_value * cnn_pattern_weight
+                weighted_pattern_score += contribution
+                logger.info(f"Symbol: {symbol} (Exit), Detected rule-based bearish patterns: {', '.join(detected_rule_patterns_log)}. Added contribution: {contribution:.2f}")
+                detected_patterns_summary.append(f"rules({','.join(detected_rule_patterns_log)})")
+            else:
+                logger.info(f"Symbol: {symbol} (Exit), No strong rule-based bearish patterns detected from the predefined list.")
+        else:
+            logger.info(f"Symbol: {symbol} (Exit), No rule-based pattern data found in pattern_data.")
+
+        logger.info(f"Symbol: {symbol} (Exit), Final Calculated Weighted Bearish Pattern Score: {weighted_pattern_score:.2f} from patterns: [{'; '.join(detected_patterns_summary)}]")
+
+        strong_bearish_pattern_threshold = 0.5
         is_strong_bearish_pattern = weighted_pattern_score >= strong_bearish_pattern_threshold
-        logger.info(f"Evaluatie bearish patroonsterkte voor {symbol}: Gewogen score = {weighted_pattern_score:.4f}, Drempelwaarde = {strong_bearish_pattern_threshold:.2f}. Is sterk bearish patroon: {is_strong_bearish_pattern}.")
+
+        log_msg_pattern_strength = f"Strong bearish pattern {'DETECTED' if is_strong_bearish_pattern else 'NOT detected'}. Score {weighted_pattern_score:.2f} {' >=' if is_strong_bearish_pattern else ' <'} Threshold {strong_bearish_pattern_threshold:.2f}"
+        logger.info(f"Symbol: {symbol} (Exit), {log_msg_pattern_strength}")
 
         # AI-besluitvormingslogica voor exit
         current_profit_pct = trade.get('profit_pct', 0.0)
@@ -167,20 +183,20 @@ class ExitOptimizer:
         # Scenario 1: AI is onzeker en trade is in winst (take profit)
         if combined_confidence < exit_conviction_drop_trigger and current_profit_pct > 0.005:
             logger.info(f"[ExitOptimizer] ✅ Exit door lage AI confidence ({combined_confidence:.2f} < {exit_conviction_drop_trigger}) en trade in winst ({current_profit_pct:.2%}) voor {symbol}.")
-            return {"exit": True, "reason": "low_ai_confidence_profit_taking", "confidence": combined_confidence, "pattern_details": pattern_data.get('patterns', {})}
+            return {"exit": True, "reason": "low_ai_confidence_profit_taking", "confidence": combined_confidence, "pattern_details": pattern_data.get('patterns', {}), "weighted_bearish_score": weighted_pattern_score}
 
         # Scenario 2: Sterk bearish patroon met AI-bevestiging (zelfs als confidence niet extreem laag is)
         if is_strong_bearish_pattern and combined_confidence > 0.5: # Example threshold for AI confirmation
-             logger.info(f"[ExitOptimizer] ✅ Exit door sterk bearish patroon (Gewogen score: {weighted_pattern_score:.4f}) en AI confidence {combined_confidence:.2f} voor {symbol}.")
-             return {"exit": True, "reason": "bearish_pattern_with_ai_confirmation", "confidence": combined_confidence, "pattern_details": pattern_data.get('patterns', {})}
+             logger.info(f"[ExitOptimizer] ✅ Exit door {log_msg_pattern_strength} en AI confidence {combined_confidence:.2f} voor {symbol}.")
+             return {"exit": True, "reason": "bearish_pattern_with_ai_confirmation", "confidence": combined_confidence, "pattern_details": pattern_data.get('patterns', {}), "weighted_bearish_score": weighted_pattern_score}
 
         # Scenario 3: AI wil verkopen met voldoende confidence
         if ai_exit_intent and combined_confidence > 0.6: # Example threshold for AI sell intent
             logger.info(f"[ExitOptimizer] ✅ Exit door AI verkoop intentie (GPT: {gpt_intentie}, Grok: {grok_intentie}) met confidence {combined_confidence:.2f} voor {symbol}.")
-            return {"exit": True, "reason": "ai_sell_intent_confident", "confidence": combined_confidence, "pattern_details": pattern_data.get('patterns', {})}
+            return {"exit": True, "reason": "ai_sell_intent_confident", "confidence": combined_confidence, "pattern_details": pattern_data.get('patterns', {}), "weighted_bearish_score": weighted_pattern_score}
 
-        logger.debug(f"[ExitOptimizer] Geen AI-gedreven exit trigger voor {symbol}. AI Conf: {combined_confidence:.2f}, AI Intent GPT: {gpt_intentie}, Grok: {grok_intentie}.")
-        return {"exit": False, "reason": "no_ai_exit_signal", "confidence": combined_confidence, "pattern_details": pattern_data.get('patterns', {})}
+        logger.debug(f"[ExitOptimizer] Geen AI-gedreven exit trigger voor {symbol}. AI Conf: {combined_confidence:.2f}, AI Intent GPT: {gpt_intentie}, Grok: {grok_intentie}, Weighted Bearish Score: {weighted_pattern_score:.2f}.")
+        return {"exit": False, "reason": "no_ai_exit_signal", "confidence": combined_confidence, "pattern_details": pattern_data.get('patterns', {}), "weighted_bearish_score": weighted_pattern_score}
 
     async def optimize_trailing_stop_loss(
         self,
@@ -328,172 +344,142 @@ if __name__ == "__main__":
         mock_trade_profitable = {"id": "test_trade_1", "pair": test_symbol, "is_open": True, "profit_pct": 0.03, "stake_amount": 100, "open_date": datetime.utcnow() - timedelta(hours=2)}
         mock_trade_losing = {"id": "test_trade_2", "pair": test_symbol, "is_open": True, "profit_pct": -0.02, "stake_amount": 100, "open_date": datetime.utcnow() - timedelta(hours=1)}
 
-
         mock_df = create_mock_dataframe_for_exit_optimizer(timeframe='5m', num_candles=60)
-        # Mock bearish patroon voor exit test
-        last_idx = mock_df.index[-1]
-        # Make last candle more bearish for pattern detection test
-        mock_df.loc[last_idx, 'open'] = mock_df.loc[last_idx, 'high'] - 0.1
-        mock_df.loc[last_idx, 'close'] = mock_df.loc[last_idx, 'low'] + 0.1
-        mock_df.loc[last_idx, 'volume'] = mock_df['volume'].mean() * 4
-
-        mock_candles_by_timeframe = { # Renamed from mock_candles_by_timeframe_for_ai
+        mock_candles_by_timeframe = {
             '5m': mock_df,
             '1h': create_mock_dataframe_for_exit_optimizer('1h', 60)
         }
 
-        # Store original methods
+        # Store original methods to restore later
         original_prompt_builder_generate = optimizer.prompt_builder.generate_prompt_with_data if optimizer.prompt_builder else None
         original_gpt_ask = optimizer.gpt_reflector.ask_ai
         original_grok_ask = optimizer.grok_reflector.ask_grok
         original_cnn_detect = optimizer.cnn_patterns_detector.detect_patterns_multi_timeframe
-        original_bias_get = optimizer.bias_reflector.get_bias_score
-        original_conf_get = optimizer.confidence_engine.get_confidence_score if optimizer.confidence_engine else None
         original_params_get = optimizer.params_manager.get_param
+        # original_bias_get and original_conf_get are not used in should_exit directly, so not strictly needed here for should_exit tests.
 
-
-        # Mock dependencies
+        # --- Mock Setup ---
         if optimizer.prompt_builder:
-            # Ensure mock returns awaitable if original is async
-            async def mock_generate_prompt_with_data(*args, **kwargs):
-                # Simulate async behavior; the original function might not actually sleep.
-                # If generate_prompt_with_data isn't truly async, this await is not needed.
-                # await asyncio.sleep(0.01)
+            async def mock_generate_prompt_default(*args, **kwargs):
                 return f"Mock prompt for {kwargs.get('symbol','N/A')} ({kwargs.get('prompt_type','N/A')})"
-            optimizer.prompt_builder.generate_prompt_with_data = mock_generate_prompt_with_data
+            optimizer.prompt_builder.generate_prompt_with_data = mock_generate_prompt_default
 
-        async def mock_ask_ai(*args, **kwargs): # For gpt_reflector.ask_ai
-            # await asyncio.sleep(0.01) # Not needed if the original isn't sleeping
-            # Default mock response, can be overridden per test case
-            return {"reflectie": "Default AI reflectie.", "confidence": 0.5, "intentie": "HOLD", "emotie": "neutraal"}
-        optimizer.gpt_reflector.ask_ai = mock_ask_ai
-        optimizer.grok_reflector.ask_grok = mock_ask_ai # Use same mock for grok for simplicity
-
-        async def mock_detect_patterns(*args, **kwargs): # For cnn_patterns_detector
-            # await asyncio.sleep(0.01) # Not needed if the original isn't sleeping
-            return {"patterns": {}} # Default no patterns
-        optimizer.cnn_patterns_detector.detect_patterns_multi_timeframe = mock_detect_patterns
-
-        optimizer.bias_reflector.get_bias_score = lambda t, s: 0.4
-        if optimizer.confidence_engine:
-            optimizer.confidence_engine.get_confidence_score = lambda t, s: 0.6
-
-        # Mock params_manager.get_param to return specific values for keys
-        def mock_get_param(key, strategy_id=None, default_value=None): # Added default_value for robustness
+        # Default ParamsManager mock
+        def mock_get_param_default(key, strategy_id=None, default_value=None):
             params = {
                 "exitConvictionDropTrigger": 0.4,
-                "cnnPatternWeight": 0.8 # Using 0.8 as per issue's example for exit_optimizer tests
+                "cnnPatternWeight": 0.8
             }
             return params.get(key, default_value)
-        optimizer.params_manager.get_param = mock_get_param
+        optimizer.params_manager.get_param = mock_get_param_default
 
-        # Define updated CNN mock functions
-        async def mock_detect_strong_bearish_cnn(*args, **kwargs):
-            # weighted_score = (0.9 * 0.8) + (0.7 * 0.8) = 0.72 + 0.56 = 1.28. Threshold is 0.5. Strong.
-            return {"patterns": {"bearishEngulfing": True}, "cnn_predictions": {"5m_bearishEngulfing_score": 0.9}}
-
-        async def mock_detect_weak_bearish_cnn(*args, **kwargs):
-            # weighted_score = (0.1 * 0.8) = 0.08. Threshold is 0.5. Weak.
-            return {"patterns": {}, "cnn_predictions": {"5m_bearishEngulfing_score": 0.1}}
-
-        # --- Test should_exit ---
-        print("\n--- Test ExitOptimizer (should_exit) ---")
-
-        # Base AI mocks
+        # AI response mocks
         async def mock_ask_ai_sell_intent(*args, **kwargs):
-            return {"reflectie": "Markt keert. Verkoop nu.", "confidence": 0.75, "intentie": "SELL", "emotie": "bezorgd"}
-
+            return {"reflectie": "Markt keert. Verkoop nu.", "confidence": 0.75, "intentie": "SELL"}
         async def mock_ask_ai_hold_intent_confident(*args, **kwargs):
-            return {"reflectie": "Markt stabiel, AI houdt.", "confidence": 0.6, "intentie": "HOLD", "emotie": "neutraal"}
-
+            return {"reflectie": "Markt stabiel, AI houdt.", "confidence": 0.6, "intentie": "HOLD"}
         async def mock_ask_ai_low_conf(*args, **kwargs):
-            return {"reflectie": "Onzeker beeld.", "confidence": 0.3, "intentie": "HOLD", "emotie": "neutraal"}
+            return {"reflectie": "Onzeker beeld.", "confidence": 0.3, "intentie": "HOLD"}
 
-        # Scenario 1: AI suggests SELL, and strong bearish pattern is present
+        # CNN pattern mocks
+        async def mock_detect_strong_bearish_cnn(*args, **kwargs): # Score: 1.28
+            return {"patterns": {"bearishEngulfing": True}, "cnn_predictions": {"5m_bearishEngulfing_score": 0.9}}
+        async def mock_detect_weak_bearish_cnn(*args, **kwargs): # Score: 0.08
+            return {"patterns": {}, "cnn_predictions": {"5m_bearishEngulfing_score": 0.1}}
+        async def mock_detect_patterns_no_rules_strong_cnn(*args, **kwargs): # Score: 0.72
+            return {"patterns": {}, "cnn_predictions": {"5m_bearishEngulfing_score": 0.9}}
+        async def mock_detect_patterns_rules_only_no_cnn(*args, **kwargs): # Score: 0.56
+            return {"patterns": {"eveningStar": True}, "cnn_predictions": {}}
+        async def mock_detect_no_patterns(*args, **kwargs): # Score: 0.0
+            return {"patterns": {}, "cnn_predictions": {}}
+
+        common_args = {
+            "dataframe": mock_df, "symbol": test_symbol, "current_strategy_id": test_strategy_id,
+            "learned_bias": 0.4, "learned_confidence": 0.6, "exit_conviction_drop_trigger": 0.4, # exit_conviction_drop_trigger will be mocked by params_manager
+            "candles_by_timeframe": mock_candles_by_timeframe
+        }
+
+        # --- Test Scenarios for should_exit ---
+        print("\n--- Test ExitOptimizer (should_exit Scenarios) ---")
+
+        # Scenario 1: AI SELL intent + Strong Bearish Pattern
         print("\n--- Scenario 1: AI SELL intent + Strong Bearish Pattern ---")
         optimizer.gpt_reflector.ask_ai = mock_ask_ai_sell_intent
         optimizer.grok_reflector.ask_grok = mock_ask_ai_sell_intent
         optimizer.cnn_patterns_detector.detect_patterns_multi_timeframe = mock_detect_strong_bearish_cnn
+        result = await optimizer.should_exit(trade=mock_trade_profitable, **common_args)
+        print("Result:", json.dumps(result, indent=2, default=str))
+        assert result['exit'] is True
+        assert result['reason'] in ["bearish_pattern_with_ai_confirmation", "ai_sell_intent_confident"]
+        assert result['weighted_bearish_score'] == 1.28
 
-        exit_decision_ai_sell_strong_pattern = await optimizer.should_exit(
-            dataframe=mock_df, trade=mock_trade_profitable, symbol=test_symbol, current_strategy_id=test_strategy_id,
-            learned_bias=0.4, learned_confidence=0.6, exit_conviction_drop_trigger=0.4, candles_by_timeframe=mock_candles_by_timeframe
-        )
-        print("Exit Besluit (AI SELL + Strong Pattern):", json.dumps(exit_decision_ai_sell_strong_pattern, indent=2, default=str))
-        assert exit_decision_ai_sell_strong_pattern['exit'] is True
-        # With strong pattern score 1.28 (>=0.5) and AI confidence 0.75 (>0.5), reason should be 'bearish_pattern_with_ai_confirmation'
-        # OR if AI intent 'SELL' with conf > 0.6 takes precedence, it's 'ai_sell_intent_confident'
-        assert exit_decision_ai_sell_strong_pattern['reason'] in ["bearish_pattern_with_ai_confirmation", "ai_sell_intent_confident"]
-
-
-        # Scenario 2: Strong Bearish Pattern (score-based) with AI HOLD (but sufficient confidence)
+        # Scenario 2: Strong Bearish Pattern (Score-based) + AI HOLD (but sufficient confidence)
         print("\n--- Scenario 2: Strong Bearish Pattern + AI HOLD (sufficient confidence) ---")
-        optimizer.gpt_reflector.ask_ai = mock_ask_ai_hold_intent_confident # AI says HOLD, but confidence is 0.6
-        optimizer.grok_reflector.ask_grok = mock_ask_ai_hold_intent_confident
-        optimizer.cnn_patterns_detector.detect_patterns_multi_timeframe = mock_detect_strong_bearish_cnn # Pattern is strong (score 1.28)
-
-        exit_decision_strong_pattern_ai_hold = await optimizer.should_exit(
-            dataframe=mock_df, trade=mock_trade_profitable, symbol=test_symbol, current_strategy_id=test_strategy_id,
-            learned_bias=0.4, learned_confidence=0.6, exit_conviction_drop_trigger=0.4, candles_by_timeframe=mock_candles_by_timeframe
-        )
-        print("Exit Besluit (Strong Pattern + AI HOLD):", json.dumps(exit_decision_strong_pattern_ai_hold, indent=2, default=str))
-        assert exit_decision_strong_pattern_ai_hold['exit'] is True
-        assert exit_decision_strong_pattern_ai_hold['reason'] == "bearish_pattern_with_ai_confirmation"
-
-
-        # Scenario 3: AI low confidence while in profit (pattern is weak)
-        print("\n--- Scenario 3: AI Low Confidence in Profit (Weak Pattern) ---")
-        optimizer.gpt_reflector.ask_ai = mock_ask_ai_low_conf # Confidence 0.3 < exit_conviction_drop_trigger (0.4)
-        optimizer.grok_reflector.ask_grok = mock_ask_ai_low_conf
-        optimizer.cnn_patterns_detector.detect_patterns_multi_timeframe = mock_detect_weak_bearish_cnn # Pattern is weak (score 0.08)
-
-        exit_decision_low_conf_profit = await optimizer.should_exit(
-            dataframe=mock_df, trade=mock_trade_profitable, symbol=test_symbol, current_strategy_id=test_strategy_id,
-            learned_bias=0.4, learned_confidence=0.6, exit_conviction_drop_trigger=0.4, candles_by_timeframe=mock_candles_by_timeframe
-        )
-        print("Exit Besluit (Low AI Conf in Profit):", json.dumps(exit_decision_low_conf_profit, indent=2, default=str))
-        assert exit_decision_low_conf_profit['exit'] is True
-        assert "low_ai_confidence_profit_taking" in exit_decision_low_conf_profit['reason']
-
-
-        # Scenario 4: Weak Bearish Pattern (score-based) does not trigger exit (AI HOLD)
-        print("\n--- Scenario 4: Weak Bearish Pattern + AI HOLD ---")
-        optimizer.gpt_reflector.ask_ai = mock_ask_ai_hold_intent_confident # AI says HOLD, confidence 0.6
-        optimizer.grok_reflector.ask_grok = mock_ask_ai_hold_intent_confident
-        optimizer.cnn_patterns_detector.detect_patterns_multi_timeframe = mock_detect_weak_bearish_cnn # Pattern is weak (score 0.08)
-
-        exit_decision_weak_pattern_ai_hold = await optimizer.should_exit(
-            dataframe=mock_df, trade=mock_trade_losing, symbol=test_symbol, current_strategy_id=test_strategy_id, # Losing trade to not trigger profit taking
-            learned_bias=0.4, learned_confidence=0.6, exit_conviction_drop_trigger=0.4, candles_by_timeframe=mock_candles_by_timeframe
-        )
-        print("Exit Besluit (Weak Pattern + AI HOLD):", json.dumps(exit_decision_weak_pattern_ai_hold, indent=2, default=str))
-        assert exit_decision_weak_pattern_ai_hold['exit'] is False
-        assert "no_ai_exit_signal" in exit_decision_weak_pattern_ai_hold['reason']
-
-
-        # Scenario 5: No strong signal to exit (AI HOLD, no pattern, losing trade)
-        print("\n--- Scenario 5: No AI Exit Signal (AI HOLD, No Pattern) ---")
         optimizer.gpt_reflector.ask_ai = mock_ask_ai_hold_intent_confident
         optimizer.grok_reflector.ask_grok = mock_ask_ai_hold_intent_confident
-        optimizer.cnn_patterns_detector.detect_patterns_multi_timeframe = mock_detect_patterns # Default mock (no patterns, so score 0)
+        optimizer.cnn_patterns_detector.detect_patterns_multi_timeframe = mock_detect_strong_bearish_cnn
+        result = await optimizer.should_exit(trade=mock_trade_profitable, **common_args)
+        print("Result:", json.dumps(result, indent=2, default=str))
+        assert result['exit'] is True
+        assert result['reason'] == "bearish_pattern_with_ai_confirmation"
+        assert result['weighted_bearish_score'] == 1.28
 
-        exit_decision_no_signal = await optimizer.should_exit(
-            dataframe=mock_df, trade=mock_trade_losing, symbol=test_symbol, current_strategy_id=test_strategy_id,
-            learned_bias=0.4, learned_confidence=0.6, exit_conviction_drop_trigger=0.4, candles_by_timeframe=mock_candles_by_timeframe
-        )
-        print("Exit Besluit (No AI Exit Signal):", json.dumps(exit_decision_no_signal, indent=2, default=str))
-        assert exit_decision_no_signal['exit'] is False
-        assert "no_ai_exit_signal" in exit_decision_no_signal['reason']
+        # Scenario 3: Strong Bearish Pattern (Numerical CNN only) + AI HOLD (sufficient confidence)
+        print("\n--- Scenario 3: Strong Bearish Pattern (Numerical CNN only) + AI HOLD (sufficient confidence) ---")
+        optimizer.cnn_patterns_detector.detect_patterns_multi_timeframe = mock_detect_patterns_no_rules_strong_cnn
+        result = await optimizer.should_exit(trade=mock_trade_profitable, **common_args)
+        print("Result:", json.dumps(result, indent=2, default=str))
+        assert result['exit'] is True
+        assert result['reason'] == "bearish_pattern_with_ai_confirmation"
+        assert result['weighted_bearish_score'] == 0.72 # 0.9 * 0.8
 
+        # Scenario 4: Strong Bearish Pattern (Rule-based only) + AI HOLD (sufficient confidence)
+        print("\n--- Scenario 4: Strong Bearish Pattern (Rule-based only) + AI HOLD (sufficient confidence) ---")
+        optimizer.cnn_patterns_detector.detect_patterns_multi_timeframe = mock_detect_patterns_rules_only_no_cnn
+        result = await optimizer.should_exit(trade=mock_trade_profitable, **common_args)
+        print("Result:", json.dumps(result, indent=2, default=str))
+        assert result['exit'] is True
+        assert result['reason'] == "bearish_pattern_with_ai_confirmation"
+        assert result['weighted_bearish_score'] == 0.56 # 0.7 * 0.8
 
-        # --- Test optimize_trailing_stop_loss ---
+        # Scenario 5: AI Low Confidence in Profit (Pattern is Weak)
+        print("\n--- Scenario 5: AI Low Confidence in Profit (Weak Pattern) ---")
+        optimizer.gpt_reflector.ask_ai = mock_ask_ai_low_conf
+        optimizer.grok_reflector.ask_grok = mock_ask_ai_low_conf
+        optimizer.cnn_patterns_detector.detect_patterns_multi_timeframe = mock_detect_weak_bearish_cnn
+        result = await optimizer.should_exit(trade=mock_trade_profitable, **common_args)
+        print("Result:", json.dumps(result, indent=2, default=str))
+        assert result['exit'] is True
+        assert result['reason'] == "low_ai_confidence_profit_taking"
+        assert result['weighted_bearish_score'] == 0.08
+
+        # Scenario 6: Weak Bearish Pattern + AI HOLD (Losing Trade)
+        print("\n--- Scenario 6: Weak Bearish Pattern + AI HOLD (Losing Trade) ---")
+        optimizer.gpt_reflector.ask_ai = mock_ask_ai_hold_intent_confident
+        optimizer.grok_reflector.ask_grok = mock_ask_ai_hold_intent_confident
+        optimizer.cnn_patterns_detector.detect_patterns_multi_timeframe = mock_detect_weak_bearish_cnn
+        result = await optimizer.should_exit(trade=mock_trade_losing, **common_args)
+        print("Result:", json.dumps(result, indent=2, default=str))
+        assert result['exit'] is False
+        assert result['reason'] == "no_ai_exit_signal"
+        assert result['weighted_bearish_score'] == 0.08
+
+        # Scenario 7: No AI Exit Signal (No Pattern, AI Hold, Losing Trade)
+        print("\n--- Scenario 7: No AI Exit Signal (No Pattern, AI Hold, Losing Trade) ---")
+        optimizer.cnn_patterns_detector.detect_patterns_multi_timeframe = mock_detect_no_patterns
+        result = await optimizer.should_exit(trade=mock_trade_losing, **common_args)
+        print("Result:", json.dumps(result, indent=2, default=str))
+        assert result['exit'] is False
+        assert result['reason'] == "no_ai_exit_signal"
+        assert result['weighted_bearish_score'] == 0.0
+
+        # --- Test optimize_trailing_stop_loss (Preserving this section) ---
         print("\n--- Test ExitOptimizer (optimize_trailing_stop_loss) ---")
         # Scenario: AI recommends a specific SL percentage
         async def mock_ask_ai_sl_recommendation(*args, **kwargs):
-            # await asyncio.sleep(0.01)
-            return {"reflectie": "Adviseer stop loss op 2.5% voor deze trade. Trailing stop trigger at 0.5%, offset 1%.", "confidence": 0.8, "intentie": "HOLD", "emotie": "voorzichtig"}
+            return {"reflectie": "Adviseer stop loss op 2.5% voor deze trade.", "confidence": 0.8, "intentie": "HOLD"}
         optimizer.gpt_reflector.ask_ai = mock_ask_ai_sl_recommendation
-        optimizer.grok_reflector.ask_grok = mock_ask_ai_sl_recommendation # Use same mock for Grok
+        optimizer.grok_reflector.ask_grok = mock_ask_ai_sl_recommendation
 
         sl_optimization_result = await optimizer.optimize_trailing_stop_loss(
             dataframe=mock_df, trade=mock_trade_profitable, symbol=test_symbol, current_strategy_id=test_strategy_id,
@@ -511,10 +497,9 @@ if __name__ == "__main__":
         optimizer.gpt_reflector.ask_ai = original_gpt_ask
         optimizer.grok_reflector.ask_grok = original_grok_ask
         optimizer.cnn_patterns_detector.detect_patterns_multi_timeframe = original_cnn_detect
-        optimizer.bias_reflector.get_bias_score = original_bias_get
-        if optimizer.confidence_engine:
-            optimizer.confidence_engine.get_confidence_score = original_conf_get
+        # optimizer.bias_reflector.get_bias_score = original_bias_get # Not used in should_exit
+        # if optimizer.confidence_engine: # Not used in should_exit
+        #    optimizer.confidence_engine.get_confidence_score = original_conf_get
         optimizer.params_manager.get_param = original_params_get
-
 
     asyncio.run(run_test_exit_optimizer())
