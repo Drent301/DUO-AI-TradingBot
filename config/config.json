@@ -1,69 +1,76 @@
 {
-    "max_open_trades": 3,
-    "stake_currency": "USDT",
-    "stake_amount": 100,
-    "dry_run": true,
-    "dry_run_wallet": 1000,
-    "strategy": "DUOAI_Strategy",
-    "original_config_file": "config/config.json",
-    "pairlists": [
-        { "method": "StaticPairList" }
+  "dry_run": true,
+  "dry_run_wallet": 1000,
+  "exchange": {
+    "name": "bitvavo",
+    "key": "ENV_BITVAVO_API_KEY",
+    "secret": "ENV_BITVAVO_SECRET_KEY",
+    "password": null,
+    "ccxt_config": {
+      "enableRateLimit": true
+    },
+    "ccxt_sync_params": {
+      "recvWindow": 10000
+    },
+    "pair_whitelist": [
+      "ETH/EUR",
+      "BTC/EUR",
+      "ZEN/EUR",
+      "WETH/USDT",
+      "USDC/USDT",
+      "WBTC/USDT",
+      "LINK/USDT",
+      "UNI/USDT",
+      "ZEN/BTC",
+      "LSK/BTC",
+      "ETH/BTC"
     ],
-    "edge": {
-        "enabled": false
-    },
-    "telegram": {
-        "enabled": false,
-        "token": "YOUR_TELEGRAM_TOKEN",
-        "chat_id": "YOUR_TELEGRAM_CHAT_ID"
-    },
-    "api_server": {
-        "enabled": false,
-        "listen_ip_address": "0.0.0.0",
-        "listen_port": 8080,
-        "verbosity": "info"
-    },
-    "logging": {
-        "loglevel": "INFO",
-        "logfile": "logs/freqtrade.log",
-        "logfilename": "logs/freqtrade.log"
-    },
-    "exchange": {
-        "name": "binance",
-        "key": "YOUR_EXCHANGE_KEY",
-        "secret": "YOUR_EXCHANGE_SECRET",
-        "ccxt_config": {"enableRateLimit": true},
-        "ccxt_async_config": {
-            "aiohttp_trust_env": true,
-            "enableRateLimit": true
-        },
-        "pair_whitelist": [
-            "ETH/USDT", "BTC/USDT", "ZEN/USDT", "BNB/USDT", "ADA/USDT", "XRP/USDT",
-            "SOL/USDT", "DOT/USDT", "DOGE/USDT", "AVAX/USDT", "MATIC/USDT",
-            "LTC/USDT", "LINK/USDT", "TRX/USDT", "ATOM/USDT", "ETC/USDT",
-            "ALGO/USDT", "XLM/USDT", "MANA/USDT", "SAND/USDT", "AXS/USDT",
-            "AAVE/USDT", "UNI/USDT", "MKR/USDT", "COMP/USDT", "SNX/USDT"
-        ],
-        "pair_blacklist": [
-            "BNB/BTC", "*ETH", "USDT/*"
-        ]
-    },
-    "experimental": {
-        "block_bad_exchanges": false
-    },
-    "internals": {
-        "process_throttle_secs": 5
-    },
-    "initial_state": "running",
-    "force_entry_enable": false,
-    "disabledataframeanalysis": false,
-    "ignore_buying_expired_candle_after": 0,
-    "position_stacking": false,
-    "recursive_strategy_update": false,
-    "freqai": {
-        "enabled": false,
-        "purge_old_models": true,
-        "train_period_days": 30,
-        "identifier_prefix": "freqaimodel"
+    "pair_blacklist": [],
+    "markets": {
+      "BTC/EUR": {
+        "precision": {
+          "price": 2,
+          "amount": 6
+        }
+      }
     }
+  },
+  "stake_currency": "EUR",
+  "stake_amount": "unlimited",
+  "max_open_trades": 1,
+  "tradable_modes": {
+    "backtest": true,
+    "live": false,
+    "dry_run": true
+  },
+  "timeframe": "5m",
+  "startup_candle_count": 100,
+  "runmode": "backtest",
+  "strategy": "DUOAI_Strategy",
+  "protections": [
+    {
+      "method": "CooldownPeriod",
+      "stop_duration_candles": 5
+    },
+    {
+      "method": "MaxDrawdown",
+      "lookback_period_candles": 48,
+      "max_drawdown_pct": 0.05
+    }
+  ],
+  "telegram": {
+    "enabled": false
+  },
+  "api_server": {
+    "enabled": false
+  },
+  "webhook": {
+    "enabled": false
+  },
+  "log_level": "info",
+  "log_fileName": "freqtrade.log",
+  "db_url": "sqlite:///freqtrade.sqlite",
+  "internals": {
+    "process_throttle_secs": 5
+  }
 }
