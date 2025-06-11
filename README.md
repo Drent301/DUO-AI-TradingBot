@@ -1,76 +1,136 @@
-# DUO-AI Freqtrade Integration
+# DUO-AI Trading Bot
 
-## Overview
+## Doel
+Een zelflerende, AI-gestuurde crypto trading bot, gebouwd bovenop Freqtrade, die gebruik maakt van GPT- en Grok-reflecties, technische indicatoren, patroonherkenning, en live Bitvavo-executie. Het doel is om ETH-stacks te vergroten via slimme entries en exits.
 
-DUO-AI Freqtrade Integration is an advanced system designed to augment Freqtrade with AI-driven decision-making capabilities. It leverages reflective AI, machine learning pattern recognition, and dynamic strategy adjustments to optimize cryptocurrency trading performance. The system is built to learn from its operations, adapt to market changes, and continuously refine its trading strategies.
+## Projectstructuur
+-   `/core/`: Bevat alle eigen AI-modules (reflectie, bias, confidence, besluitvorming, patroonherkenning, etc.).
+-   `/strategies/`: Bevat de Freqtrade strategie-scripts, zoals `DUOAI_Strategy.py`.
+-   `/data/`: Voor trainingsdata en cachebestanden (bijv. Grok Live Search cache). Bevat nu ook `/data/models/` voor getrainde CNN-modellen.
+-   `/memory/`: Opslag voor de geleerde parameters van de AI-modules (bias, confidence, strategie-parameters, reflectielogs).
+-   `/notebooks/`: Bestemd voor AI-modelontwikkeling, training, prompt-experimenten en diepere data-analyse.
+-   `/tests/`: Voor unit tests en integratietests (nog op te zetten).
+-   `/config/`: Bevat de Freqtrade configuratie (`config.json`).
+-   `main.py`: Het hoofdentriepunt voor de AI-coördinatie.
+-   `requirements.txt`: Specificeert alle benodigde Python-pakketten.
+-   `.env`: Bevat gevoelige API-sleutels. Wordt niet gecommit naar Git.
 
-## Key Features & Components
+## Installatie
 
-*   **AI-Powered Strategy Optimization**: Utilizes AI analysis (potentially from models like GPT/Grok, though specific model integration details are part of ongoing development) to reflect on trade performance and propose mutations to Freqtrade strategies.
-*   **Dynamic Configuration**: While not hot-swapping Freqtrade's core configuration during live runs, the system can dynamically adjust strategy parameters and potentially advise on filter adjustments based on AI analysis.
-*   **Pattern Recognition (`cnn_patterns.py`)**: Identifies potential market patterns. Currently, `cnn_patterns.py` operates on a rule-based system for pattern detection. Future development aims to integrate trained Machine Learning (ML) models for more sophisticated pattern analysis.
-*   **Trade Data Analysis**: Primary trade logging and analysis for AI learning now rely on Freqtrade's internal SQLite database (`freqtrade.sqlite`). This database is the source of truth for performance metrics used by the AI components.
-*   **Trade Export (`trade_logger.py`)**: The `trade_logger.py` component has been repurposed. Instead of being the primary logger, it will serve as a utility for exporting trade data in various formats for external analysis or backup, complementing the main Freqtrade database.
-*   **AI-Specific Cooldowns (`cooldown_tracker.py`)**: Implements a cooldown mechanism for AI-driven actions (like strategy mutations or new advice generation) to prevent rapid, potentially unstable changes and allow strategies to operate for a period before re-evaluation.
-*   **Strategy Management (`strategy_manager.py`)**: Manages the parameters and performance tracking of Freqtrade strategies, interfacing with the Freqtrade database and parameter files.
-*   **AI Optimization Loop (`ai_optimizer.py`)**: Orchestrates the periodic optimization process, including performance analysis, reflection, and strategy mutation.
-
-## Configuration
-
-### Pair Whitelist
-
-The `pair_whitelist` in your Freqtrade configuration should be carefully selected. The AI system will operate on these pairs. Example:
-
-```json
-"exchange": {
-    "pair_whitelist": [
-        "ETH/USDT",
-        "BTC/USDT",
-        "ADA/USDT",
-        "SOL/USDT",
-        "XRP/USDT",
-        // Add more pairs as needed, ensure they are valid on your exchange
-    ]
-    // ... other exchange settings
-},
-```
-
-### Dynamic Adjustments
-
-The system's approach to dynamic Freqtrade configuration adjustments involves the AI providing advice or suggesting modifications to strategy parameters or filter lists. These are not "hot-swaps" of the main Freqtrade `config.json` during live operations but rather updates to strategy-specific parameters or through controlled mechanisms that Freqtrade supports for dynamic loading (e.g., strategy parameters).
-
-## Critical Testing Advisory
-
-**IMPORTANT**: Before considering any live deployment, this system requires **extensive backtesting and prolonged dry-run testing** on a compatible Freqtrade setup. AI-driven trading strategies can be complex and may introduce unforeseen risks.
-
-*   **Backtesting**: Use Freqtrade's backtesting capabilities to evaluate strategy performance over historical data.
-*   **Dry-Run**: Run the bot in a simulated environment (dry-run mode) on a live market to observe its behavior without risking real capital.
-*   **Gradual Exposure**: If moving to live trading, start with minimal capital and closely monitor performance and behavior.
-
-## Setup & Installation (Conceptual)
-
-1.  **Freqtrade**: Ensure you have a working Freqtrade installation.
-2.  **Python Environment**: Set up a Python environment (e.g., venv) with dependencies from `requirements.txt`.
+1.  **Kloon de repository:**
     ```bash
-    python -m venv .venv
-    source .venv/bin/activate # or .venv\Scripts\activate for Windows
+    git clone [https://github.com/](https://github.com/)<jouw-github-gebruikersnaam>/DUO-AI-TradingBot.git
+    cd DUO-AI-TradingBot
+    ```
+
+2.  **Maak een virtuele omgeving aan (aanbevolen):**
+    ```bash
+    python -m venv venv
+    source venv/bin/activate  # Op Linux/macOS
+    # of `.\venv\Scripts\activate` op Windows
+    ```
+
+3.  **Installeer Freqtrade en alle Python-afhankelijkheden:**
+    ```bash
     pip install -r requirements.txt
     ```
-3.  **Configuration**:
-    *   Configure Freqtrade (`config.json`) with your exchange details, strategy (e.g., `DUOAI_Strategy`), and whitelisted pairs.
-    *   Set up any necessary API keys or environment variables (e.g., in a `.env` file).
-4.  **Database**: Ensure Freqtrade is configured to use an SQLite database, as this is used by the AI components for performance analysis.
+    Freqtrade wordt nu geïnstalleerd als een Python-pakket. De eerder handmatig aangemaakte `/freqtrade/` map is verwijderd, aangezien deze niet nodig is voor de Freqtrade core code.
 
-## Usage (Conceptual)
+## Configuratie
 
-The primary entry point for the AI optimization logic is `main.py`.
+1.  **API-sleutels (`.env`):**
+    Creëer een bestand genaamd `.env` in de hoofdmap van het project. Vul dit bestand met je API-sleutels voor OpenAI, Grok en Bitvavo. **Dit bestand mag NOOIT naar GitHub worden gecommit.**
+    ```
+    OPENAI_API_KEY="sk-YOUR_OPENAI_API_KEY"
+    OPENAI_MODEL="gpt-4o"
+    GROK_API_KEY="grok-YOUR_GROK_API_KEY"
+    GROK_MODEL="grok-1"
+    GROK_LIVE_SEARCH_API_URL="[https://api.x.ai/v1/live-search](https://api.x.ai/v1/live-search)" # Pas dit aan naar het officiële Grok Live Search API endpoint zodra bekend
+    BITVAVO_API_KEY="YOUR_BITVAVO_API_KEY"
+    BITVAVO_SECRET_KEY="YOUR_BITVAVO_SECRET_KEY"
+    ```
 
-```bash
-python main.py
-```
+2.  **Freqtrade Configuratie (`config/config.json`):**
+    De basisconfiguratie is aanwezig. De `pair_whitelist` is bijgewerkt met de gevraagde handelsparen.
+    De API-sleutels in `config.json` zijn placeholders en zullen door Freqtrade via de omgevingsvariabelen (geladen via `.env`) worden overschreven in live-modus.
+    De momenteel opgenomen paren zijn: `"ETH/EUR", "BTC/EUR", "ZEN/EUR", "WETH/USDT", "USDC/USDT", "WBTC/USDT", "LINK/USDT", "UNI/USDT", "ZEN/BTC", "LSK/BTC", "ETH/BTC"`.
+    **Belangrijk:** Controleer de beschikbaarheid van paren zoals `LSK/BTC` op Bitvavo, aangezien niet alle exchanges alle cross-paren ondersteunen.
 
-This would typically initialize the `AIOptimizer` and start its periodic optimization cycles, interacting with a running Freqtrade instance or its data.
+## Gebruik
 
-## Disclaimer
+1.  **Start de bot (backtest of dry-run):**
+    Activeer eerst je virtuele omgeving.
 
-Trading cryptocurrencies involves significant risk. This software is provided "as is" without warranty of any kind. The developers are not responsible for any financial losses incurred through the use of this software. Always do your own research and exercise caution.
+    * **Backtesting (aanbevolen voor testen en leren):**
+        ```bash
+        freqtrade backtesting --strategy DUOAI_Strategy -c config/config.json --timerange=20240101-20250101 --export-filename user_data/backtest_results/DUOAI_Strategy_backtest.json
+        ```
+        De AI-reflectie- en leermechanismen zullen actief zijn tijdens backtesting en de interne AI-parameters bijwerken.
+
+    * **Dry Run (simulatie van live trading):**
+        ```bash
+        freqtrade trade --config config/config.json --strategy DUOAI_Strategy --dry-run
+        ```
+        Dit simuleert live trading, inclusief AI-besluitvorming en -reflectie, zonder echt kapitaal te riskeren.
+
+    * **Live Trading (UITERST VOORZICHTIG):**
+        ```bash
+        freqtrade trade --config config/config.json --strategy DUOAI_Strategy
+        ```
+        **WAARSCHUWING:** Zet `dry_run: false` in `config.json` en begrijp de risico's van live trading voordat je deze modus gebruikt.
+
+## Modules Overzicht
+
+De bot is opgebouwd uit de volgende kern-AI-modules in de `/core/` map:
+
+-   `gpt_reflector.py`: Communiceert met de OpenAI GPT API voor reflectie.
+-   `grok_reflector.py`: Communiceert met de Grok API voor reflectie.
+-   `grok_sentiment_fetcher.py`: Haalt live nieuws- en sentimentdata op via Grok Live Search (hypothetisch API).
+-   `cnn_patterns.py`: Bevat algoritmische patroonherkenning (candlestick, chart). **Deze module is voorbereid op integratie met getrainde CNN Deep Learning-modellen en kan nu getrainde modellen laden en gebruiken voor numerieke voorspellingen.** Momenteel gebruikt het echter nog primaire regelgebaseerde detectie zolang er geen getraind model beschikbaar is.
+-   `prompt_builder.py`: Genereert gedetailleerde AI-prompts met marktgegevens, patronen en sentiment.
+-   `reflectie_lus.py`: De centrale AI-reflectiecyclus, coördineert promptgeneratie, AI-aanroepen en het loggen van reflecties.
+-   `reflectie_analyser.py`: Analyseert reflectielogs en haalt prestatiegegevens direct uit Freqtrade's database om bias-scores en mutatievoorstellen te genereren.
+-   `bias_reflector.py`: Beheert de leerbare voorkeur/bias van de strategie per token/strategie.
+-   `confidence_engine.py`: Beheert de leerbare confidence score en past `maxTradeRiskPct` dynamisch aan.
+-   `cooldown_tracker.py`: Beheert AI-specifieke cooldown-periodes per token/strategie, aanvullend op Freqtrade's ingebouwde cooldowns.
+-   `entry_decider.py`: Neemt AI-gestuurde entry-besluiten op basis van consensus, confidence, bias en patronen, inclusief AI-specifieke cooldowns en `timeOfDayEffectiveness`.
+-   `exit_optimizer.py`: Neemt AI-gestuurde exit-besluiten en optimaliseert dynamisch de trailing stop loss.
+-   `pre_trainer.py`: Module voor pre-learning en data-voorbereiding. Haalt historische data en trade-outcomes direct uit Freqtrade's database. Kan ook een basis CNN-model trainen en opslaan.
+-   `strategy_manager.py`: Beheert strategieparameters, prestaties (haalt uit Freqtrade DB) en mutatievoorstellen.
+-   `ai_activation_engine.py`: Trigger-engine voor AI-reflectie bij specifieke gebeurtenissen.
+-   `interval_selector.py`: Detecteert en beheert de beste timeframe/interval voor AI-analyse.
+-   `params_manager.py`: Centrale manager voor alle dynamisch lerende variabelen.
+-   `trade_logger.py`: **Deze module functioneert nu als een placeholder voor geavanceerde export en specifieke debugging-behoeften.** De primaire trade-historie wordt beheerd door Freqtrade's interne database.
+
+## Status & Ontbrekende Functionaliteit (Kritieke Punten)
+
+De workflow is grotendeels geïmplementeerd op algoritmisch niveau en de AI-modules communiceren effectief. Echter, om een volledig operationele en geavanceerd zelflerende bot te realiseren zoals in de manifesten beschreven, zijn de volgende punten cruciaal:
+
+-   **CNN Modellen - Training en Volledige Integratie:**
+    * **Ontbrekend:** Hoewel `pre_trainer.py` nu een basis CNN kan trainen en `cnn_patterns.py` een model kan laden en voorspellingen kan doen, moet de **volledige pijplijn van modelontwikkeling, uitgebreide training en validatie** nog plaatsvinden. De huidige CNN in `cnn_patterns.py` is een proof-of-concept; deze moet geoptimaliseerd worden voor nauwkeurige patroonherkenning in een Deep Learning-context.
+    * **Prioriteit:** **Hoog**. Dit is de belangrijkste "AI" ontwikkelingsfase.
+
+-   **`cnnPatternWeight`:**
+    * **Ontbrekend:** De `cnn_patterns.py` retourneert nu numerieke scores (wanneer het CNN-model geladen is), maar de **actieve toepassing van `cnnPatternWeight` als een leerbare multiplier** in `entry_decider.py` en `exit_optimizer.py` om de CNN-voorspellingen te wegen in het besluitvormingsalgoritme is nog een TODO. Momenteel wordt alleen de boolean check op `cnn_patterns.get_patterns` gebruikt.
+
+-   **Dynamische Freqtrade Configuratie-aanpassing (Beperking):**
+    * **Status:** De AI kan advies geven en opslaan in `params.json` voor variabelen zoals `slippageTolerancePct`. `cooldown_tracker.py` biedt een AI-specifieke cooldown.
+    * **Beperking:** Freqtrade's architectuur staat **geen hot-swapping** toe van cruciale parameters in `config.json` tijdens runtime. AI-advies voor *deze specifieke Freqtrade-instellingen* zal **niet automatisch** worden toegepast zonder een bot-herstart.
+    * **Aanpak:** De huidige aanpak (AI-specifieke cooldown als aanvulling, slippage als advies) is de meest praktische zonder diepe Freqtrade-core modificaties.
+
+-   **`preferredPairs` (Actieve Koppeling met Freqtrade):**
+    * **Status:** De leerlogica om dynamisch de "favoriete paren" te bepalen in `ai_optimizer.py` is geïmplementeerd.
+    * **Ontbrekend/Beperking:** De **automatische koppeling van deze geleerde `preferredPairs` met Freqtrade's `pair_whitelist`** in `config.json` vereist een **herstart** van de bot.
+    * **Optimalisatie:** Documenteer de beperking en adviseer periodieke handmatige synchronisatie of onderzoek geavanceerde Freqtrade extensies voor dynamisch pairlist management.
+
+-   **Teststructuur (Formele Unit Tests):**
+    * **Ontbrekend:** Hoewel de `if __name__ == "__main__":` blokken zijn toegevoegd voor elk Python-bestand, is een **formele, geautomatiseerde testsuite met `pytest` cruciaal** voor robuustheid en kwaliteitsborging.
+    * **Prioriteit:** **Hoog**.
+
+## Toekomstige Ontwikkeling
+
+-   **Fase 1: CNN Model Training & Verfijning:** Dit omvat uitgebreide training, evaluatie en optimalisatie van de Deep Learning CNN-modellen.
+-   **Fase 2: Verfijning van AI-Besluitvorming:** Actieve integratie van `cnnPatternWeight` met numerieke scores in `entry_decider.py` en `exit_optimizer.py`.
+-   **Fase 3: Geavanceerd Pairlist Management:** Onderzoek en implementeer geavanceerde methoden voor het dynamisch beïnvloeden van Freqtrade's pairlist.
+-   **Fase 4: Formele Testsuite:** Ontwikkel uitgebreide unit tests met `pytest` in de `/tests/` map.
+-   **Fase 5: Monitoring & Visualisatie:** Overweeg een AI-GUI via een Socket.IO dashboard.
