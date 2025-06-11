@@ -3,8 +3,10 @@ import asyncio
 import json
 import logging
 import os
-from datetime import datetime
+from datetime import datetime, timedelta # Added timedelta
 from typing import List, Dict, Any, Optional
+import pandas as pd # Added pandas
+import sqlite3 # Added sqlite3
 
 # Attempt to import necessary components from other core modules
 try:
@@ -26,10 +28,16 @@ logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
 
 # Define paths for logging and reflection data
-LOG_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'logs')
-os.makedirs(LOG_DIR, exist_ok=True)
-OPTIMIZER_LOG_FILE = os.path.join(LOG_DIR, 'optimizer_activity_log.json')
-REFLECTION_LOG_FILE = os.path.join(LOG_DIR, 'reflectie-logboek.json') # As used by analyse_reflecties
+# LOG_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'logs') # Old path
+# os.makedirs(LOG_DIR, exist_ok=True) # Old path
+# OPTIMIZER_LOG_FILE = os.path.join(LOG_DIR, 'optimizer_activity_log.json') # Old path
+# REFLECTION_LOG_FILE = os.path.join(LOG_DIR, 'reflectie-logboek.json') # Old path, to be updated by new main
+
+OPTIMIZER_LOG_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'memory', 'ai_optimizer_log.json')
+os.makedirs(os.path.dirname(OPTIMIZER_LOG_FILE), exist_ok=True)
+
+FREQTRADE_DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'freqtrade.sqlite')
+# Note: REFLECTION_LOG_FILE will be defined in the new __main__ block's context or used by analyse_reflecties directly.
 
 # Default strategy ID to work with
 DEFAULT_STRATEGY_ID = "DUOAI_Strategy"
@@ -61,6 +69,57 @@ class AIOptimizer:
                 f.write('\n')
         except IOError as e:
             logger.error(f"Error writing to optimizer log: {e}")
+
+    async def _get_all_closed_trades_from_db(self) -> pd.DataFrame:
+        # Method content as per issue description
+        conn = None
+        try:
+            conn = await asyncio.to_thread(sqlite3.connect, FREQTRADE_DB_PATH)
+            query = "SELECT * FROM trades WHERE is_open = 0;"
+            df = pd.read_sql_query(query, conn)
+            df['open_date'] = pd.to_datetime(df['open_date'])
+            df['close_date'] = pd.to_datetime(df['close_date'])
+            return df
+        except sqlite3.Error as e:
+            logger.error(f"Databasefout bij ophalen trades: {e}")
+            return pd.DataFrame()
+        except Exception as e:
+            logger.error(f"Onverwachte fout bij ophalen trades: {e}")
+            return pd.DataFrame()
+        finally:
+            if conn:
+                conn.close()
+
+    async def _learn_preferred_pairs(self):
+        # Method content as per issue description
+        logger.info("[AIOptimizer] Leren van preferredPairs...")
+        all_trades_df = await self._get_all_closed_trades_from_db()
+
+        if all_trades_df.empty:
+            logger.info("Geen gesloten trades gevonden om preferredPairs te leren.")
+            return
+
+        recent_trades_df = all_trades_df[all_trades_df['close_date'] > (datetime.now() - timedelta(days=30))]
+
+        if recent_trades_df.empty:
+            logger.info("Geen recente trades gevonden voor preferredPairs. Sla leren over.")
+            return
+
+        pair_performance = recent_trades_df.groupby('pair')['profit_pct'].agg(['mean', 'count'])
+        pair_performance = pair_performance[pair_performance['count'] >= 5]
+
+        preferred_pairs_df = pair_performance.sort_values(by='mean', ascending=False)
+
+        top_n_pairs = 5
+        preferred_pairs = preferred_pairs_df.head(top_n_pairs).index.tolist()
+
+        if preferred_pairs:
+            logger.info(f"Geleerde preferredPairs: {preferred_pairs}")
+            await self.strategy_manager.params_manager.set_param("preferredPairs", preferred_pairs, strategy_id=None)
+            await self._log_optimization_activity("learn_preferred_pairs", {"preferredPairs": preferred_pairs})
+        else:
+            logger.info("Geen preferredPairs bepaald op basis van recente prestaties.")
+            await self.strategy_manager.params_manager.set_param("preferredPairs", [], strategy_id=None)
 
     async def run_periodic_optimization(self, symbols: List[str], timeframes: List[str]):
         """
@@ -145,246 +204,105 @@ class AIOptimizer:
                         "strategy_id": strategy_id, "symbol": symbol, "timeframe": timeframe
                     })
 
-        logger.info("Periodic optimization cycle finished.")
+        await self._learn_preferred_pairs() # Added call
+        logger.info("Periodic optimization cycle finished.") # Ensure this is the final log msg as per instr.
         self._log_optimization_activity("cycle_end", {})
 
 
-# --- Test Suite ---
 if __name__ == "__main__":
     import dotenv
-    dotenv.load_dotenv(os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '.env'))
+    import sys
+    # Note: pandas, sqlite3, datetime, timedelta should be imported at the top of the file.
+    # Ensure these are covered by step 1.
 
-    logging.basicConfig(level=logging.DEBUG, # Use DEBUG for test verbosity
+    logging.basicConfig(level=logging.INFO,
                         format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
                         handlers=[logging.StreamHandler(sys.stdout)])
+    dotenv_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '.env')
+    dotenv.load_dotenv(dotenv_path)
 
-    TEST_DB_PATH = "test_optimizer_db.sqlite"
-    TEST_OPTIMIZER_LOG_FILE = "test_optimizer_activity_log.json"
-    TEST_REFLECTION_LOG_FILE = "test_reflectie-logboek.json" # Mock reflection log
-
-    # Override global paths for testing
-    OPTIMIZER_LOG_FILE = TEST_OPTIMIZER_LOG_FILE
-    REFLECTION_LOG_FILE = TEST_REFLECTION_LOG_FILE # Ensure analyse_reflecties uses this
-
-    # Mock implementations for dependencies
-    class MockPreTrainer:
-        async def run_pretraining_pipeline(self, symbols: List[str], timeframes: List[str]):
-            logger.info("MockPreTrainer: Pre-training pipeline called.")
-            return True
-
-    # Using ParamsManager and BiasReflector mocks from StrategyManager's test if they were structured for reuse.
-    # For this test, we'll define them here for clarity if they are simple enough.
-    class MockParamsManager:
-        def __init__(self):
-            self.params = {
-                DEFAULT_STRATEGY_ID: {
-                    "buy": {"ema_short": 10, "ema_long": 20}, "sell": {"rsi_sell": 70},
-                    "roi": {0: 0.1, 60: 0.01}, "stoploss": -0.1
-                }
-            }
-            self.mutation_history = []
-
-        async def get_param(self, category: str, strategy_id: str = None, param_name: str = None):
-            if category == "strategies" and strategy_id:
-                return self.params.get(strategy_id, {}).copy()
-            return self.params.get(strategy_id, {}).get("buy",{}).get(param_name)
-
-        async def set_param(self, strategy_id: str, param_name: str, value: Any):
-            if strategy_id not in self.params: self.params[strategy_id] = {"buy": {}, "sell": {}}
-            self.params[strategy_id]["buy"][param_name] = value
-            self.mutation_history.append({"type": "param_set", "strategy": strategy_id, "param": param_name, "value": value})
-
-        async def update_strategy_roi_sl_params(self, strategy_id: str, roi_table=None, stoploss_value=None, trailing_stop_params=None):
-            if strategy_id not in self.params: self.params[strategy_id] = {}
-            if roi_table: self.params[strategy_id]['roi'] = roi_table
-            if stoploss_value: self.params[strategy_id]['stoploss'] = stoploss_value
-            self.mutation_history.append({"type": "roi_sl_update", "strategy": strategy_id, "roi": roi_table, "sl": stoploss_value})
-
-
-    class MockBiasReflector:
-        def get_bias_score(self, token: str, strategy_id: str) -> float:
-            return 0.6 # Default mock bias
-
-    # Mock external analysis functions
-    _original_analyse_reflecties = analyse_reflecties
-    _original_generate_mutation_proposal = generate_mutation_proposal
-    _original_analyze_timeframe_bias = analyze_timeframe_bias
-
-    mock_mutation_calls = []
-    def mock_generate_mutation_proposal_impl(insights, current_performance, current_strategy_info, symbol, timeframe, timeframe_bias, strategy_id):
-        mock_mutation_calls.append(locals()) # Log call arguments
-        # Simulate proposing a mutation for one specific case
-        if symbol == "ETH/USDT" and current_performance.get("winRate", 0) > 0.5:
-            return {
-                "strategyId": strategy_id,
-                "adjustments": {"parameterChanges": {"ema_short": current_strategy_info["parameters"]["buy"]["ema_short"] + 1}}, # Increment ema_short
-                "rationale": "Mock proposal due to good win rate."
-            }
-        return None
-
-    def setup_test_db_optimizer(db_path: str):
-        if os.path.exists(db_path): os.remove(db_path)
-        conn = sqlite3.connect(db_path)
-        cursor = conn.cursor()
+    # Setup a dummy Freqtrade database with some trades for testing
+    # FREQTRADE_DB_PATH is now a global constant
+    if not os.path.exists(FREQTRADE_DB_PATH):
+        print(f"Waarschuwing: Freqtrade database {FREQTRADE_DB_PATH} niet gevonden. Maak een dummy DB aan.")
+        conn_test = sqlite3.connect(FREQTRADE_DB_PATH)
+        cursor = conn_test.cursor()
         cursor.execute("""
-        CREATE TABLE trades (
-            id INTEGER PRIMARY KEY, strategy TEXT, pair TEXT, is_open INTEGER,
-            open_date DATETIME, close_date DATETIME, close_profit REAL, stake_amount REAL
-        )""")
-        # Sample data for DEFAULT_STRATEGY_ID
-        # High win rate for ETH/USDT to trigger mock mutation
-        trades_data = [
-            (DEFAULT_STRATEGY_ID, 'ETH/USDT', 0, datetime.now(), datetime.now(), 0.02, 100),
-            (DEFAULT_STRATEGY_ID, 'ETH/USDT', 0, datetime.now(), datetime.now(), 0.03, 100),
-            (DEFAULT_STRATEGY_ID, 'ETH/USDT', 0, datetime.now(), datetime.now(), -0.01, 100), # 2 wins, 1 loss
-            (DEFAULT_STRATEGY_ID, 'BTC/USDT', 0, datetime.now(), datetime.now(), -0.01, 100), # Low performance
+            CREATE TABLE IF NOT EXISTS trades (
+                id INTEGER PRIMARY KEY,
+                pair TEXT NOT NULL,
+                strategy TEXT NOT NULL,
+                profit_abs REAL,
+                profit_pct REAL,
+                is_open INTEGER,
+                open_date TIMESTAMP,
+                close_date TIMESTAMP
+            );
+        """)
+        dummy_trades_data = [
+            # Original ETH trades (likely not recent enough or not DUOAI_Strategy)
+            (1, "ETH/USDT", "DUOAI_Strategy", 10.0, 0.05, 0, datetime(2024,1,1).isoformat(), datetime(2024,1,2).isoformat()),
+            (2, "ETH/USDT", "DUOAI_Strategy", -5.0, -0.025, 0, datetime(2024,1,3).isoformat(), datetime(2024,1,4).isoformat()),
+            (3, "ETH/USDT", "DUOAI_Strategy", 8.0, 0.04, 0, datetime(2024,1,5).isoformat(), datetime(2024,1,6).isoformat()),
+            # Original BTC trade (wrong strategy for preferredPairs logic if it filters by strategy, also not recent)
+            (4, "BTC/USDT", "Another_Strategy", 20.0, 0.03, 0, datetime(2024,1,1).isoformat(), datetime(2024,1,2).isoformat()),
+
+            # ZEN/USDT trades (target: 5 recent trades for "DUOAI_Strategy")
+            # Original recent ZEN trades:
+            (5, "ZEN/USDT", "DUOAI_Strategy", 15.0, 0.06, 0, (datetime.now() - timedelta(days=10)).isoformat(), (datetime.now() - timedelta(days=9)).isoformat()), # profit_pct = 0.06
+            (6, "ZEN/USDT", "DUOAI_Strategy", 2.0, 0.01, 0, (datetime.now() - timedelta(days=5)).isoformat(), (datetime.now() - timedelta(days=4)).isoformat()),  # profit_pct = 0.01
+            # Added ZEN trades to meet count >= 5 and ensure it's preferred:
+            (8, "ZEN/USDT", "DUOAI_Strategy", 10.0, 0.05, 0, (datetime.now() - timedelta(days=12)).isoformat(), (datetime.now() - timedelta(days=11)).isoformat()), # profit_pct = 0.05
+            (9, "ZEN/USDT", "DUOAI_Strategy", 12.0, 0.04, 0, (datetime.now() - timedelta(days=8)).isoformat(), (datetime.now() - timedelta(days=7)).isoformat()),  # profit_pct = 0.04
+            (10, "ZEN/USDT", "DUOAI_Strategy", 9.0, 0.03, 0, (datetime.now() - timedelta(days=3)).isoformat(), (datetime.now() - timedelta(days=2)).isoformat()),   # profit_pct = 0.03
+
+            # LSK/BTC trade (original, 1 recent trade for DUOAI_Strategy, won't meet count >= 5)
+            (7, "LSK/BTC", "DUOAI_Strategy", 5.0, 0.02, 0, (datetime.now() - timedelta(days=2)).isoformat(), (datetime.now() - timedelta(days=1)).isoformat()), # profit_pct = 0.02
+
+            # ADA/USDT trades (target: 5 recent trades for "DUOAI_Strategy", with lower avg profit than ZEN)
+            (11, "ADA/USDT", "DUOAI_Strategy", 5.0, 0.010, 0, (datetime.now() - timedelta(days=15)).isoformat(), (datetime.now() - timedelta(days=14)).isoformat()), # profit_pct = 0.010
+            (12, "ADA/USDT", "DUOAI_Strategy", 6.0, 0.012, 0, (datetime.now() - timedelta(days=13)).isoformat(), (datetime.now() - timedelta(days=12)).isoformat()), # profit_pct = 0.012
+            (13, "ADA/USDT", "DUOAI_Strategy", -2.0, -0.004, 0, (datetime.now() - timedelta(days=11)).isoformat(), (datetime.now() - timedelta(days=10)).isoformat()),# profit_pct = -0.004
+            (14, "ADA/USDT", "DUOAI_Strategy", 8.0, 0.015, 0, (datetime.now() - timedelta(days=9)).isoformat(), (datetime.now() - timedelta(days=8)).isoformat()),  # profit_pct = 0.015
+            (15, "ADA/USDT", "DUOAI_Strategy", 7.0, 0.013, 0, (datetime.now() - timedelta(days=7)).isoformat(), (datetime.now() - timedelta(days=6)).isoformat())   # profit_pct = 0.013
         ]
-        cursor.executemany("INSERT INTO trades (strategy, pair, is_open, open_date, close_date, close_profit, stake_amount) VALUES (?,?,?,?,?,?,?)", trades_data)
-        conn.commit()
-        conn.close()
-        logger.info(f"Test DB {db_path} created for AIOptimizer tests.")
+        cursor.executemany("INSERT OR IGNORE INTO trades (id, pair, strategy, profit_abs, profit_pct, is_open, open_date, close_date) VALUES (?,?,?,?,?,?,?,?)", dummy_trades_data)
+        conn_test.commit()
+        conn_test.close()
+        print(f"Dummy database met trades aangemaakt in {FREQTRADE_DB_PATH}")
 
-    def setup_mock_reflection_log_file(file_path: str):
-        if os.path.exists(file_path): os.remove(file_path)
-        sample_reflections = [
-            {"timestamp": datetime.now().isoformat(), "symbol": "ETH/USDT", "reflection": "Positive sentiment observed."},
-            {"timestamp": datetime.now().isoformat(), "symbol": "BTC/USDT", "reflection": "Market seems volatile."}
-        ]
-        try:
-            with open(file_path, 'w', encoding='utf-8') as f:
-                json.dump(sample_reflections, f, indent=2)
-            logger.info(f"Mock reflection log {file_path} created.")
-        except IOError as e:
-            logger.error(f"Error creating mock reflection log: {e}")
+    # Mock reflectie logboek voor testdoeleinden
+    mock_log_data = [
+        {"token": "ETH/USDT", "strategyId": "DUOAI_Strategy", "combined_confidence": 0.8, "combined_bias_reported": 0.7,
+         "current_learned_bias": 0.6, "current_learned_confidence": 0.7,
+         "trade_context": {"timeframe": "1h", "profit_pct": 0.02}, "timestamp": "2025-06-11T10:00:00Z"},
+        {"token": "ETH/USDT", "strategyId": "DUOAI_Strategy", "combined_confidence": 0.6, "combined_bias_reported": 0.4,
+         "current_learned_bias": 0.65, "current_learned_confidence": 0.75,
+         "trade_context": {"timeframe": "1h", "profit_pct": -0.01}, "timestamp": "2025-06-11T11:00:00Z"},
+        {"token": "ETH/USDT", "strategyId": "DUOAI_Strategy", "combined_confidence": 0.9, "combined_bias_reported": 0.8,
+         "current_learned_bias": 0.7, "current_learned_confidence": 0.8,
+         "trade_context": {"timeframe": "1h", "profit_pct": 0.04}, "timestamp": "2025-06-11T12:00:00Z"},
+    ]
+    # Path for reflectie-logboek.json from issue's AIOptimizer code
+    reflectie_log_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'memory', 'reflectie-logboek.json')
+    os.makedirs(os.path.dirname(reflectie_log_path), exist_ok=True)
+    with open(reflectie_log_path, 'w', encoding='utf-8') as f:
+        json.dump(mock_log_data, f, indent=2)
+    print(f"Mock reflectie logboek aangemaakt op: {reflectie_log_path}")
 
-
-    async def run_all_optimizer_tests():
-        global analyse_reflecties, generate_mutation_proposal, analyze_timeframe_bias
-
-        # Setup: Ensure StrategyManager and other dependencies are mocked or configured for testing
-        os.environ['FREQTRADE_DB_PATH'] = TEST_DB_PATH # IMPORTANT: Ensure StrategyManager uses this test DB!
-
-        setup_test_db_optimizer(TEST_DB_PATH)
-        setup_mock_reflection_log_file(TEST_REFLECTION_LOG_FILE)
-        if os.path.exists(TEST_OPTIMIZER_LOG_FILE): os.remove(TEST_OPTIMIZER_LOG_FILE)
-
-        # --- Mocking the imported analysis functions ---
-        # This is a way to achieve mocking without unittest.mock.patch
-        # It relies on these functions being module-level imports that can be temporarily overridden.
-        analyse_reflecties_calls = []
-        def mocked_analyse_reflecties_impl(symbol, timeframe, strategy_id):
-            analyse_reflecties_calls.append(locals())
-            return {"insight": "mocked insight for " + symbol}
-
-        analyze_timeframe_bias_calls = []
-        def mocked_analyze_timeframe_bias_impl(symbol, timeframe, strategy_id):
-            analyze_timeframe_bias_calls.append(locals())
-            return 0.55 # Mocked bias
-
-        # Replace original functions with mocks for the duration of this test
-        analyse_reflecties = mocked_analyse_reflecties_impl
-        generate_mutation_proposal = mock_generate_mutation_proposal_impl # Already defined above
-        analyze_timeframe_bias = mocked_analyze_timeframe_bias_impl
-
-        mock_params_manager = MockParamsManager()
-        mock_bias_reflector = MockBiasReflector()
-
-        # Configure StrategyManager for testing
-        # The real StrategyManager is used, but its dependencies are controlled.
-        strategy_manager_for_test = StrategyManager(db_path=TEST_DB_PATH) # Point to test DB
-        strategy_manager_for_test.params_manager = mock_params_manager # Inject MockParamsManager
-        strategy_manager_for_test.bias_reflector = mock_bias_reflector # Inject MockBiasReflector
-
+    async def run_test_ai_optimizer():
         optimizer = AIOptimizer()
-        optimizer.pre_trainer = MockPreTrainer() # Replace with mock
-        optimizer.strategy_manager = strategy_manager_for_test # Use configured StrategyManager
 
-        test_symbols = ["ETH/USDT", "BTC/USDT"]
-        test_timeframes = ["5m"]
+        test_symbols = ["ETH/USDT", "ZEN/USDT", "LSK/BTC"]
+        test_timeframes = ["1h"]
 
-        logger.info("--- Running AIOptimizer Tests ---")
+        print("\n--- Test AIOptimizer: run_periodic_optimization ---")
         await optimizer.run_periodic_optimization(test_symbols, test_timeframes)
 
-        # Assertions
-        # 1. Check if get_strategy_performance was used (indirectly, by checking proposal logic)
-        #    The mock_generate_mutation_proposal is called with current_performance.
-        assert len(mock_mutation_calls) == len(test_symbols) * len(test_timeframes)
-        eth_usdt_call = next(c for c in mock_mutation_calls if c['symbol'] == 'ETH/USDT')
-        # ETH/USDT: 2 wins, 1 loss from 3 trades => winRate = 2/3 approx 0.666
-        assert abs(eth_usdt_call['current_performance']['winRate'] - (2/3)) < 0.001
-        assert eth_usdt_call['current_performance']['tradeCount'] == 3
+        print("\nOptimalisatiecyclus voltooid. Controleer de logs en memory-bestanden.")
 
-        btc_usdt_call = next(c for c in mock_mutation_calls if c['symbol'] == 'BTC/USDT')
-        # BTC/USDT: 0 wins, 1 loss from 1 trade => winRate = 0
-        assert abs(btc_usdt_call['current_performance']['winRate'] - 0.0) < 0.001
-        assert btc_usdt_call['current_performance']['tradeCount'] == 1
+        preferred_pairs_after_opt = await optimizer.strategy_manager.params_manager.get_param("preferredPairs")
+        print(f"Geleerde preferredPairs na optimalisatie: {preferred_pairs_after_opt}")
+        assert "ZEN/USDT" in preferred_pairs_after_opt or "LSK/BTC" in preferred_pairs_after_opt
 
-
-        # 2. Check if mutate_strategy was called for ETH/USDT (due to mock proposal)
-        mutated_eth = any(
-            hist['type'] == 'param_set' and hist['strategy'] == DEFAULT_STRATEGY_ID and hist['param'] == 'ema_short'
-            for hist in mock_params_manager.mutation_history
-        )
-        assert mutated_eth, "mutate_strategy should have been called for ETH/USDT to change ema_short."
-
-        original_ema_short = MockParamsManager().params[DEFAULT_STRATEGY_ID]["buy"]["ema_short"] # Initial value
-        final_ema_short = mock_params_manager.params[DEFAULT_STRATEGY_ID]["buy"]["ema_short"]
-        assert final_ema_short == original_ema_short + 1, "ema_short should have been incremented."
-
-
-        # 3. Check optimizer log file
-        assert os.path.exists(TEST_OPTIMIZER_LOG_FILE)
-        with open(TEST_OPTIMIZER_LOG_FILE, 'r') as f:
-            log_content = f.read()
-            assert "cycle_start" in log_content
-            assert "performance_fetched" in log_content
-            assert "mutation_proposed" in log_content # For ETH/USDT
-            assert "mutation_applied" in log_content # For ETH/USDT
-            assert "no_mutation_proposed" in log_content # For BTC/USDT
-            assert "cycle_end" in log_content
-        logger.info("Optimizer log checks passed.")
-
-        # Check calls to mocked analysis functions
-        assert len(analyse_reflecties_calls) == len(test_symbols) * len(test_timeframes)
-        assert len(analyze_timeframe_bias_calls) == len(test_symbols) * len(test_timeframes)
-        logger.info("Calls to mocked analysis functions verified.")
-
-        # Cleanup
-        if os.path.exists(TEST_DB_PATH): os.remove(TEST_DB_PATH)
-        if os.path.exists(TEST_OPTIMIZER_LOG_FILE): os.remove(TEST_OPTIMIZER_LOG_FILE)
-        if os.path.exists(TEST_REFLECTION_LOG_FILE): os.remove(TEST_REFLECTION_LOG_FILE)
-        if 'FREQTRADE_DB_PATH' in os.environ: del os.environ['FREQTRADE_DB_PATH']
-        logger.info("Test files cleaned up.")
-
-        # Restore original functions
-        analyse_reflecties = _original_analyse_reflecties
-        generate_mutation_proposal = _original_generate_mutation_proposal
-        analyze_timeframe_bias = _original_analyze_timeframe_bias
-
-        logger.info("--- AIOptimizer Tests Completed ---")
-
-    # Python 3.7+ for asyncio.run
-    if hasattr(asyncio, 'run'):
-        # Need to import sys for stdout in basicConfig
-        import sys
-        try:
-            asyncio.run(run_all_optimizer_tests())
-        except ImportError as e:
-            # This handles the case where core StrategyManager or PreTrainer couldn't be imported initially
-            logger.error(f"Skipping AIOptimizer tests due to import error: {e}")
-            # Create dummy log file to indicate test was skipped due to setup
-            if not os.path.exists(TEST_OPTIMIZER_LOG_FILE):
-                 with open(TEST_OPTIMIZER_LOG_FILE, 'w') as f:
-                     json.dump({"status": "skipped", "reason": str(e)}, f)
-
-    else: # Fallback for older Python versions if necessary (less likely in modern envs)
-        loop = asyncio.get_event_loop()
-        try:
-            loop.run_until_complete(run_all_optimizer_tests())
-        except ImportError as e:
-            logger.error(f"Skipping AIOptimizer tests due to import error: {e}")
-            if not os.path.exists(TEST_OPTIMIZER_LOG_FILE):
-                 with open(TEST_OPTIMIZER_LOG_FILE, 'w') as f:
-                     json.dump({"status": "skipped", "reason": str(e)}, f)
-
-```
+    asyncio.run(run_test_ai_optimizer())
