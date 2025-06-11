@@ -26,6 +26,7 @@ class EntryDecider:
     """
     Neemt AI-gestuurde entry-besluiten op basis van consensus, confidence, bias en patronen.
     """
+    RULE_BASED_BULLISH_CONTRIBUTION_FACTOR = 0.7
 
     def __init__(self):
         self.gpt_reflector = GPTReflector()
@@ -217,7 +218,7 @@ class EntryDecider:
                                        'ascendingTriangle', 'pennant']
             for pattern_name in bullish_rule_based_patterns:
                 if pattern_data['patterns'].get(pattern_name, False):
-                    rule_based_contribution = 0.7 * cnn_pattern_weight # As per target code example
+                    rule_based_contribution = self.RULE_BASED_BULLISH_CONTRIBUTION_FACTOR * cnn_pattern_weight
                     weighted_pattern_score += rule_based_contribution
                     logger.debug(f"Regelgebaseerd patroon {pattern_name} gedetecteerd. Contributed to weighted score: {rule_based_contribution:.4f}")
                     break # Add contribution once for any rule-based pattern

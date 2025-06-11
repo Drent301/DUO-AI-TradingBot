@@ -27,6 +27,8 @@ class ExitOptimizer:
     Biedt AI-gestuurde logica voor exitbesluiten, inclusief dynamische aanpassing
     van Freqtrade's trailing stop en dynamic stop loss.
     """
+    RULE_BASED_BEARISH_CONTRIBUTION_FACTOR = 0.7
+    DEFAULT_STRONG_BEARISH_THRESHOLD = 0.5
 
     def __init__(self):
         self.gpt_reflector = GPTReflector()
@@ -136,13 +138,6 @@ class ExitOptimizer:
                 weighted_pattern_score += contribution
                 logger.debug(f"CNN BearishEngulfing score for {base_tf_name}: {bear_engulf_score:.4f}, Contributed to weighted score: {contribution:.4f}")
                 detected_patterns_summary.append(f"bearishEngulfing({bear_engulf_score:.2f})")
-            # Add other numerical scores here, e.g., bear_flag_score
-            # bear_flag_score = pattern_data['cnn_predictions'].get(f"{base_tf_name}_bearFlag_score", 0.0)
-            # if isinstance(bear_flag_score, (int, float)) and bear_flag_score > 0:
-            #     contribution = bear_flag_score * cnn_pattern_weight
-            #     weighted_pattern_score += contribution
-            #     logger.debug(f"CNN BearFlag score for {base_tf_name}: {bear_flag_score:.4f}, Contributed to weighted score: {contribution:.4f}")
-            #     detected_patterns_summary.append(f"bearFlag({bear_flag_score:.2f})")
 
         rule_based_bearish_patterns = ['bearishEngulfing', 'CDLENGULFING', 'eveningStar', 'CDLEVENINGSTAR',
                                    'threeBlackCrows', 'CDL3BLACKCROWS', 'darkCloudCover', 'CDLDARKCLOUDCOVER',
@@ -154,8 +149,7 @@ class ExitOptimizer:
                     detected_rule_patterns_log.append(pattern_name)
 
             if detected_rule_patterns_log:
-                rule_based_contribution_value = 0.7 # Fixed contribution for any rule-based pattern
-                contribution = rule_based_contribution_value * cnn_pattern_weight
+                contribution = self.RULE_BASED_BEARISH_CONTRIBUTION_FACTOR * cnn_pattern_weight
                 weighted_pattern_score += contribution
                 logger.info(f"Symbol: {symbol} (Exit), Detected rule-based bearish patterns: {', '.join(detected_rule_patterns_log)}. Added contribution: {contribution:.2f}")
                 detected_patterns_summary.append(f"rules({','.join(detected_rule_patterns_log)})")
@@ -166,7 +160,18 @@ class ExitOptimizer:
 
         logger.info(f"Symbol: {symbol} (Exit), Final Calculated Weighted Bearish Pattern Score: {weighted_pattern_score:.2f} from patterns: [{'; '.join(detected_patterns_summary)}]")
 
-        strong_bearish_pattern_threshold = 0.5
+        strong_bearish_pattern_threshold_param = self.params_manager.get_param(
+            "strongBearishPatternThreshold",
+            strategy_id=current_strategy_id
+        )
+        if strong_bearish_pattern_threshold_param is None:
+            strong_bearish_pattern_threshold = self.DEFAULT_STRONG_BEARISH_THRESHOLD
+        elif not isinstance(strong_bearish_pattern_threshold_param, (float, int)):
+            logger.warning(f"strongBearishPatternThreshold from params_manager is not a number ({type(strong_bearish_pattern_threshold_param)}). Using default: {self.DEFAULT_STRONG_BEARISH_THRESHOLD}")
+            strong_bearish_pattern_threshold = self.DEFAULT_STRONG_BEARISH_THRESHOLD
+        else:
+            strong_bearish_pattern_threshold = float(strong_bearish_pattern_threshold_param)
+
         is_strong_bearish_pattern = weighted_pattern_score >= strong_bearish_pattern_threshold
 
         log_msg_pattern_strength = f"Strong bearish pattern {'DETECTED' if is_strong_bearish_pattern else 'NOT detected'}. Score {weighted_pattern_score:.2f} {' >=' if is_strong_bearish_pattern else ' <'} Threshold {strong_bearish_pattern_threshold:.2f}"
@@ -368,9 +373,14 @@ if __name__ == "__main__":
         def mock_get_param_default(key, strategy_id=None, default_value=None):
             params = {
                 "exitConvictionDropTrigger": 0.4,
-                "cnnPatternWeight": 0.8
+                "cnnPatternWeight": 0.8,
+                "strongBearishPatternThreshold": ExitOptimizer.DEFAULT_STRONG_BEARISH_THRESHOLD # Explicitly mock the default
             }
-            return params.get(key, default_value)
+            # Allow default_value to be used if the key is not in our explicit mocks
+            # This is important if other params are fetched and rely on the default_value mechanism of get_param
+            if key in params:
+                return params[key]
+            return default_value
         optimizer.params_manager.get_param = mock_get_param_default
 
         # AI response mocks
