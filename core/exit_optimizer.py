@@ -21,6 +21,7 @@ from core.cnn_patterns import CNNPatterns
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
+from core.params_manager import ParamsManager # Import ParamsManager
 
 class ExitOptimizer:
     """
@@ -29,7 +30,7 @@ class ExitOptimizer:
     Vertaald van logica in exitManager.js en exitReflector.js, en manifesten.
     """
 
-    def __init__(self):
+    def __init__(self, params_manager: Optional[ParamsManager] = None): # Add ParamsManager
         self.gpt_reflector = GPTReflector()
         self.grok_reflector = GrokReflector()
         try:
@@ -45,6 +46,7 @@ class ExitOptimizer:
             self.confidence_engine = None
 
         self.cnn_patterns_detector = CNNPatterns()
+        self.params_manager = params_manager if params_manager else ParamsManager() # Store/create ParamsManager
         logger.info("ExitOptimizer geïnitialiseerd.")
 
     async def should_exit(
