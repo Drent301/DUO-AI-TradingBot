@@ -16,7 +16,7 @@ from core.prompt_builder import PromptBuilder
 from core.bias_reflector import BiasReflector
 from core.confidence_engine import ConfidenceEngine
 from core.cnn_patterns import CNNPatterns
-from core.params_manager import ParamsManager
+from core.params_manager import ParamsManager # Restored
 from core.cooldown_tracker import CooldownTracker
 
 logger = logging.getLogger(__name__)
@@ -42,7 +42,7 @@ class EntryDecider:
             logger.error(f"Failed to initialize ConfidenceEngine: {e}")
             self.confidence_engine = None
         self.cnn_patterns_detector = CNNPatterns()
-        self.params_manager = ParamsManager()
+        self.params_manager = ParamsManager() # Restored
         self.cooldown_tracker = CooldownTracker() # Added CooldownTracker
         logger.info("EntryDecider geïnitialiseerd.")
 
@@ -110,6 +110,7 @@ class EntryDecider:
         learned_bias: float = 0.5, # Current learned bias for the symbol/strategy
         learned_confidence: float = 0.5, # Current learned confidence for the symbol/strategy
         entry_conviction_threshold: float = 0.7 # Minimum AI confidence to consider entry
+        # cnnPatternWeight is now fetched from ParamsManager
     ) -> Dict[str, Any]:
         """
         Bepaalt of een entry moet worden geplaatst op basis van AI-consensus en drempelwaarden.
@@ -131,8 +132,12 @@ class EntryDecider:
 
         # --- Time-of-Day Effectiveness Check ---
         current_hour = datetime.now().hour # Use current time for this check
-        # Fetch timeOfDayEffectiveness from params_manager (expected to be a dict like {"0": 0.2, "1": -0.1, ...})
-        time_effectiveness_data = self.params_manager.get_param("timeOfDayEffectiveness", strategy_id=None) # Global parameter
+        # Fetch timeOfDayEffectiveness from params_manager
+        time_effectiveness_data = self.params_manager.get_param("timeOfDayEffectiveness", strategy_id=None)
+        if time_effectiveness_data is None:
+            time_effectiveness_data = {} # Default to empty dict if not found
+            logger.warning("timeOfDayEffectiveness not found in ParamsManager, using default empty {}.")
+
 
         hour_effectiveness = 0.0 # Default to neutral if not found or data is malformed
         if isinstance(time_effectiveness_data, dict):
@@ -189,27 +194,63 @@ class EntryDecider:
 
         # CNN patroon check
         pattern_data = await self.cnn_patterns_detector.detect_patterns_multi_timeframe(candles_by_timeframe, symbol)
-        has_strong_cnn_pattern = False
-        # cnnPatternWeight = self.params_manager.get_param("cnnPatternWeight", strategy_id=current_strategy_id) # Fetched but not used yet
 
-        if pattern_data and pattern_data.get('patterns'):
-            bullish_patterns = ['bullishEngulfing', 'CDLENGULFING', 'morningStar', 'CDLMORNINGSTAR',
-                                'threeWhiteSoldiers', 'CDL3WHITESOLDIERS', 'bullFlag', 'bullishFractal',
-                                'bullishRSIDivergence', 'CDLHAMMER', 'CDLINVERTEDHAMMER', 'CDLPIERCING', 'ascendingTriangle', 'pennant']
-            # Check if any of the detected patterns (keys in pattern_data['patterns']) are in our bullish_patterns list
-            if any(p.upper() in (key.upper() for key in pattern_data['patterns'].keys()) for p in bullish_patterns):
-                has_strong_cnn_pattern = True
-                logger.info(f"Sterk bullish CNN patroon gedetecteerd voor {symbol}: {pattern_data['patterns']}")
+        # Fetch cnnPatternWeight from ParamsManager
+        cnn_pattern_weight = self.params_manager.get_param("cnnPatternWeight", strategy_id=current_strategy_id)
+        if cnn_pattern_weight is None:
+            cnn_pattern_weight = 1.0 # Default value if not found
+            logger.warning(f"cnnPatternWeight not found for strategy {current_strategy_id}, using default 1.0.")
+
+        weighted_pattern_score = 0.0
+        detected_patterns_summary = [] # For logging
+
+        # 1. Add numerical CNN prediction scores (if available)
+        #    Looking for 'ml_cnn_bullFlag_score' as produced by cnn_patterns.py
+        #    The subtask mentions pattern_data['cnn_predictions'] but cnn_patterns.py puts this in pattern_data['patterns']
+        if pattern_data and isinstance(pattern_data.get('patterns'), dict):
+            ml_bullflag_score = pattern_data['patterns'].get('ml_cnn_bullFlag_score', 0.0)
+            if isinstance(ml_bullflag_score, (float, int)) and ml_bullflag_score > 0:
+                contribution = ml_bullflag_score * cnn_pattern_weight
+                weighted_pattern_score += contribution
+                logger.info(f"Symbol: {symbol}, Added ML bullFlag score contribution: {ml_bullflag_score:.2f} (score) * {cnn_pattern_weight:.2f} (weight) = {contribution:.2f}. Current weighted_pattern_score: {weighted_pattern_score:.2f}")
+                detected_patterns_summary.append(f"ml_bullFlag({ml_bullflag_score:.2f})")
+
+        # 2. Add score for rule-based bullish patterns
+        #    Using a fixed contribution (e.g., 0.7) if any strong rule-based pattern is detected.
+        rule_based_bullish_patterns = [
+            'bullishEngulfing', 'CDLENGULFING', 'morningStar', 'CDLMORNINGSTAR',
+            'threeWhiteSoldiers', 'CDL3WHITESOLDIERS', 'bullFlag', 'bullishRSIDivergence',
+            'CDLHAMMER', 'CDLINVERTEDHAMMER', 'CDLPIERCING', 'ascendingTriangle', 'pennant'
+        ]
+
+        rule_pattern_detected_flag = False
+        detected_rule_patterns_log = []
+        if pattern_data and isinstance(pattern_data.get('patterns'), dict):
+            for p_name in rule_based_bullish_patterns:
+                if pattern_data['patterns'].get(p_name): # Checks for existence and truthiness (boolean True or status string)
+                    rule_pattern_detected_flag = True
+                    detected_rule_patterns_log.append(p_name)
+
+        if rule_pattern_detected_flag:
+            rule_based_contribution_value = 0.7
+            contribution = rule_based_contribution_value * cnn_pattern_weight
+            weighted_pattern_score += contribution
+            logger.info(f"Symbol: {symbol}, Detected rule-based patterns: {detected_rule_patterns_log}. Added contribution: {rule_based_contribution_value:.2f} * {cnn_pattern_weight:.2f} = {contribution:.2f}. Current weighted_pattern_score: {weighted_pattern_score:.2f}")
+            detected_patterns_summary.append(f"rules({', '.join(detected_rule_patterns_log)})")
+        else:
+            logger.info(f"Symbol: {symbol}, No strong rule-based bullish patterns detected from the predefined list.")
+
+        logger.info(f"Symbol: {symbol}, Final Calculated Weighted Pattern Score: {weighted_pattern_score:.2f} from patterns: [{'; '.join(detected_patterns_summary)}]")
 
         # AI-besluitvormingslogica
         # Entry conditions: AI intent is LONG, final (time-adjusted) confidence meets threshold,
-        # learned bias is sufficiently bullish, and a strong CNN pattern is present.
+        # learned bias is sufficiently bullish, and weighted pattern score meets AI conviction threshold.
         if consensus_intentie == "LONG" and \
            final_ai_confidence >= entry_conviction_threshold and \
            learned_bias >= 0.55 and \
-           has_strong_cnn_pattern:
+           weighted_pattern_score >= entry_conviction_threshold: # Using entry_conviction_threshold for pattern score as per instruction
 
-            logger.info(f"[EntryDecider] ✅ Entry GOEDKEURING voor {symbol}. Consensus: {consensus_intentie}, Final AI Conf: {final_ai_confidence:.2f} (Threshold: {entry_conviction_threshold:.2f}), Geleerde Bias: {learned_bias:.2f} (Threshold: >=0.55), Patroon: {has_strong_cnn_pattern}.")
+            logger.info(f"[EntryDecider] ✅ Entry GOEDKEURING voor {symbol}. Consensus: {consensus_intentie}, Final AI Conf: {final_ai_confidence:.2f} (Threshold: {entry_conviction_threshold:.2f}), Geleerde Bias: {learned_bias:.2f} (Threshold: >=0.55), Weighted Pattern Score: {weighted_pattern_score:.2f} (Threshold: {entry_conviction_threshold:.2f}).")
             return {
                 "enter": True,
                 "reason": "AI_CONSENSUS_LONG_CONDITIONS_MET",
@@ -223,16 +264,16 @@ class EntryDecider:
             # Construct detailed reason for rejection
             reason_parts = []
             if consensus_intentie != "LONG": reason_parts.append(f"ai_intent_not_long ({consensus_intentie})")
-            if final_ai_confidence < entry_conviction_threshold: reason_parts.append(f"final_ai_conf_low ({final_ai_confidence:.2f} < {entry_conviction_threshold:.2f})")
-            if learned_bias < 0.55: reason_parts.append(f"learned_bias_low ({learned_bias:.2f} < 0.55)")
-            if not has_strong_cnn_pattern: reason_parts.append("no_strong_bullish_cnn_pattern")
+            if final_ai_confidence < entry_conviction_threshold: reason_parts.append(f"final_ai_conf_low ({final_ai_confidence:.2f}_vs_{entry_conviction_threshold:.2f})")
+            if learned_bias < 0.55: reason_parts.append(f"learned_bias_low ({learned_bias:.2f}_vs_0.55)")
+            if weighted_pattern_score < entry_conviction_threshold: reason_parts.append(f"pattern_score_low ({weighted_pattern_score:.2f}_vs_{entry_conviction_threshold:.2f})")
 
             full_reason_str = "_".join(reason_parts) if reason_parts else "entry_conditions_not_met"
             if not reason_parts and consensus_intentie == "LONG": # If intent was long but other conditions failed
-                 full_reason_str = f"intent_long_other_conditions_failed_conf{final_ai_confidence:.2f}_bias{learned_bias:.2f}_pattern{has_strong_cnn_pattern}"
+                 full_reason_str = f"intent_long_other_conditions_failed_conf{final_ai_confidence:.2f}_bias{learned_bias:.2f}_pattern_score{weighted_pattern_score:.2f}_vs_{entry_conviction_threshold:.2f}"
 
 
-            logger.info(f"[EntryDecider] ❌ Entry GEWEIGERD voor {symbol}. Reden: {full_reason_str}. AI Intentie: {consensus_intentie}, Final AI Conf: {final_ai_confidence:.2f}, Geleerde Bias: {learned_bias:.2f}, Patroon: {has_strong_cnn_pattern}.")
+            logger.info(f"[EntryDecider] ❌ Entry GEWEIGERD voor {symbol}. Reden: {full_reason_str}. AI Intentie: {consensus_intentie}, Final AI Conf: {final_ai_confidence:.2f}, Geleerde Bias: {learned_bias:.2f}, Weighted Pattern Score: {weighted_pattern_score:.2f} (Threshold: {entry_conviction_threshold:.2f}).")
             return {
                 "enter": False,
                 "reason": full_reason_str,
@@ -335,78 +376,103 @@ if __name__ == "__main__":
         original_cnn_detect = decider.cnn_patterns_detector.detect_patterns_multi_timeframe
         original_bias_get = decider.bias_reflector.get_bias_score
         original_conf_get = decider.confidence_engine.get_confidence_score if decider.confidence_engine else None
-        original_params_get = decider.params_manager.get_param
+        original_params_get = decider.params_manager.get_param # Store original get_param
         original_cooldown_active = decider.cooldown_tracker.is_cooldown_active
 
 
-        # --- Test Scenario 1: Positive Entry (Good Time of Day) ---
-        print("\n--- Test EntryDecider (Positief Scenario, Goed Uur) ---")
-        # Mock dependencies for a positive entry
+        # --- Test Scenario 1: Positive Entry (Good Time of Day & Sufficient Pattern Weight) ---
+        print("\n--- Test Scenario 1: Positive Entry (ML Score + Rule-based) ---")
         if decider.prompt_builder:
             async def mock_generate_prompt_positive(*args, **kwargs): return "Mock prompt for positive entry."
             decider.prompt_builder.generate_prompt_with_data = mock_generate_prompt_positive
         async def mock_ask_ai_positive(*args, **kwargs): return {"reflectie": "AI: Markt veelbelovend.", "confidence": 0.85, "intentie": "LONG", "emotie": "optimistisch", "bias": 0.7}
         decider.gpt_reflector.ask_ai = mock_ask_ai_positive
-        decider.grok_reflector.ask_ai = mock_ask_ai_positive # Simplified: Grok agrees
-        async def mock_cnn_bullish(*args, **kwargs): return {"patterns": {"bullishEngulfing": True, "CDLENGULFING": True}, "context": {"trend": "uptrend"}}
-        decider.cnn_patterns_detector.detect_patterns_multi_timeframe = mock_cnn_bullish
-
-        # Mock params_manager for positive time-of-day effectiveness
-        def mock_params_get_positive_time(key, strategy_id=None):
-            if key == "timeOfDayEffectiveness": return {str(datetime.now().hour): 0.5} # Positive effectiveness
-            if key == "entryConvictionThreshold": return 0.7
-            if key == "cnnPatternWeight": return 1.0 # Example value
-            return 0.0 # Default
-        decider.params_manager.get_param = mock_params_get_positive_time
-        decider.cooldown_tracker.is_cooldown_active = lambda t, s: False # Ensure no cooldown
-
-        entry_decision_positive = await decider.should_enter(
-            dataframe=mock_df_5m, symbol=test_symbol, current_strategy_id=test_strategy_id,
-            trade_context=mock_trade_context,
-            learned_bias=0.7, learned_confidence=0.8, entry_conviction_threshold=0.7
-        )
-        print("Resultaat (Positief Scenario):", json.dumps(entry_decision_positive, indent=2, default=str))
-        assert entry_decision_positive['enter'] is True
-        assert "AI_CONSENSUS_LONG_CONDITIONS_MET" in entry_decision_positive['reason']
-        assert entry_decision_positive['confidence'] > 0.8 # Expected to be boosted by time effectiveness
-
-        # --- Test Scenario 2: Negative Time-of-Day Effectiveness Blocks Entry ---
-        print("\n--- Test EntryDecider (Negatief Uur Blokkeert Entry) ---")
-        # Keep AI positive, but time of day is bad
-        decider.gpt_reflector.ask_ai = mock_ask_ai_positive # Re-assign as it might have been changed by other tests if run in parallel
         decider.grok_reflector.ask_ai = mock_ask_ai_positive
-        decider.cnn_patterns_detector.detect_patterns_multi_timeframe = mock_cnn_bullish
+        # Mock CNN to provide both ML score and a rule-based pattern
+        async def mock_cnn_ml_and_rule(*args, **kwargs):
+            return {
+                "patterns": {
+                    "ml_cnn_bullFlag_score": 0.6, # Numerical ML score
+                    "bullishEngulfing": True      # Rule-based pattern
+                },
+                "context": {"trend": "uptrend"}
+            }
+        decider.cnn_patterns_detector.detect_patterns_multi_timeframe = mock_cnn_ml_and_rule
+        decider.cooldown_tracker.is_cooldown_active = lambda t, s: False
 
-        def mock_params_get_negative_time(key, strategy_id=None):
-            if key == "timeOfDayEffectiveness": return {str(datetime.now().hour): -0.8} # Strong negative effectiveness
-            if key == "entryConvictionThreshold": return 0.7
+        def mock_get_param_s1(key, strategy_id=None):
+            if key == "timeOfDayEffectiveness": return {str(datetime.now().hour): 0.0} # Neutral time effectiveness
+            if key == "cnnPatternWeight": return 1.0 # cnn_pattern_weight = 1.0
+            return None
+        decider.params_manager.get_param = mock_get_param_s1
+
+        # Expected weighted_pattern_score = (0.6 * 1.0) + (0.7 * 1.0) = 0.6 + 0.7 = 1.3
+        # entry_conviction_threshold = 0.7. AI conf = 0.85. Bias = 0.7 (>=0.55)
+        # All conditions met.
+        entry_decision_s1 = await decider.should_enter(
+            dataframe=mock_df_5m, symbol=test_symbol, current_strategy_id=test_strategy_id,
+            trade_context=mock_trade_context,
+            learned_bias=0.7, learned_confidence=0.8, entry_conviction_threshold=0.7
+        )
+        print(f"Resultaat (Scenario 1 - ML + Rule): {json.dumps(entry_decision_s1, indent=2, default=str)}")
+        assert entry_decision_s1['enter'] is True
+        assert "AI_CONSENSUS_LONG_CONDITIONS_MET" in entry_decision_s1['reason']
+        # final_ai_confidence = 0.85 * (1 + 0.0*0.5) = 0.85.
+        assert entry_decision_s1['confidence'] == 0.85
+
+        # --- Test Scenario 2: Low Weighted Pattern Score (ML only, low score) ---
+        print("\n--- Test Scenario 2: Low Weighted Pattern Score (ML only, low score) ---")
+        async def mock_cnn_ml_low_score_only(*args, **kwargs):
+            return {"patterns": {"ml_cnn_bullFlag_score": 0.2}, "context": {"trend": "uptrend"}}
+        decider.cnn_patterns_detector.detect_patterns_multi_timeframe = mock_cnn_ml_low_score_only
+        # params_manager mock (mock_get_param_s1) gives cnnPatternWeight = 1.0, neutral time effect
+
+        # Expected weighted_pattern_score = 0.2 * 1.0 = 0.2. This is < entry_conviction_threshold (0.7)
+        entry_decision_s2 = await decider.should_enter(
+            dataframe=mock_df_5m, symbol=test_symbol, current_strategy_id=test_strategy_id,
+            trade_context=mock_trade_context,
+            learned_bias=0.7, learned_confidence=0.8, entry_conviction_threshold=0.7
+        )
+        print(f"Resultaat (Scenario 2 - Low ML Score): {json.dumps(entry_decision_s2, indent=2, default=str)}")
+        assert entry_decision_s2['enter'] is False
+        assert "pattern_score_low" in entry_decision_s2['reason']
+
+        # --- Test Scenario 3: Negative Time-of-Day Effectiveness Blocks Entry ---
+        print("\n--- Test Scenario 3: Negative Time-of-Day Effectiveness Blocks Entry ---")
+        decider.cnn_patterns_detector.detect_patterns_multi_timeframe = mock_cnn_ml_and_rule # Reset to strong pattern
+        def mock_get_param_s3(key, strategy_id=None):
+            if key == "timeOfDayEffectiveness": return {str(datetime.now().hour): -0.8} # Strong negative
             if key == "cnnPatternWeight": return 1.0
-            return 0.0
-        decider.params_manager.get_param = mock_params_get_negative_time
+            return None
+        decider.params_manager.get_param = mock_get_param_s3
 
-        entry_decision_neg_time = await decider.should_enter(
+        # Expected weighted_pattern_score = 1.3 (still high)
+        # AI conf 0.85. Time mult = 1 + (-0.8*0.5) = 0.6. final_ai_conf = 0.85 * 0.6 = 0.51
+        # This 0.51 is < entry_conviction_threshold (0.7)
+        entry_decision_s3 = await decider.should_enter(
             dataframe=mock_df_5m, symbol=test_symbol, current_strategy_id=test_strategy_id,
             trade_context=mock_trade_context,
             learned_bias=0.7, learned_confidence=0.8, entry_conviction_threshold=0.7
         )
-        print("Resultaat (Negatief Uur):", json.dumps(entry_decision_neg_time, indent=2, default=str))
-        assert entry_decision_neg_time['enter'] is False
-        assert "final_ai_conf_low" in entry_decision_neg_time['reason'] # Confidence should be reduced below threshold
+        print(f"Resultaat (Scenario 3 - Negative Time): {json.dumps(entry_decision_s3, indent=2, default=str)}")
+        assert entry_decision_s3['enter'] is False
+        assert "final_ai_conf_low" in entry_decision_s3['reason']
 
-        # --- Test Scenario 3: Cooldown Active Blocks Entry ---
-        print("\n--- Test EntryDecider (Cooldown Actief Blokkeert Entry) ---")
-        decider.cooldown_tracker.is_cooldown_active = lambda t, s: True # Mock cooldown as active
-        # Ensure params_manager is reset to a state that would otherwise allow entry
-        decider.params_manager.get_param = mock_params_get_positive_time
+        # --- Test Scenario 4: Cooldown Active Blocks Entry ---
+        print("\n--- Test Scenario 4: Cooldown Active Blocks Entry ---")
+        decider.cooldown_tracker.is_cooldown_active = lambda t, s: True # Cooldown active
+        # Reset other mocks to generally positive conditions
+        decider.cnn_patterns_detector.detect_patterns_multi_timeframe = mock_cnn_ml_and_rule
+        decider.params_manager.get_param = mock_get_param_s1 # cnnPatternWeight=1.0, neutral time
 
-        entry_decision_cooldown = await decider.should_enter(
+        entry_decision_s4 = await decider.should_enter(
             dataframe=mock_df_5m, symbol=test_symbol, current_strategy_id=test_strategy_id,
             trade_context=mock_trade_context,
             learned_bias=0.7, learned_confidence=0.8, entry_conviction_threshold=0.7
         )
-        print("Resultaat (Cooldown Actief):", json.dumps(entry_decision_cooldown, indent=2, default=str))
-        assert entry_decision_cooldown['enter'] is False
-        assert "ai_cooldown_active" in entry_decision_cooldown['reason']
+        print(f"Resultaat (Scenario 4 - Cooldown): {json.dumps(entry_decision_s4, indent=2, default=str)}")
+        assert entry_decision_s4['enter'] is False
+        assert "ai_cooldown_active" in entry_decision_s4['reason']
 
 
         # Restore original methods
@@ -418,7 +484,7 @@ if __name__ == "__main__":
         decider.bias_reflector.get_bias_score = original_bias_get
         if decider.confidence_engine:
             decider.confidence_engine.get_confidence_score = original_conf_get
-        decider.params_manager.get_param = original_params_get
+        decider.params_manager.get_param = original_params_get # Restore original get_param
         decider.cooldown_tracker.is_cooldown_active = original_cooldown_active
 
 
