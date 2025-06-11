@@ -1,5 +1,7 @@
 # core/cnn_patterns.py
 import logging
+import os # Added for MODELS_DIR
+import json # Added for json.dumps
 from typing import List, Dict, Any, Tuple, Optional
 import pandas as pd
 import numpy as np
@@ -16,8 +18,39 @@ class CNNPatterns:
     voor complexere CNN-patroonherkenning.
     """
 
+    # Pad voor het opslaan/laden van getrainde modellen
+    # Gebruik 'data/models' zoals gespecificeerd in de prompt, niet 'models' zoals in pre_trainer
+    MODELS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'data', 'models')
+    os.makedirs(MODELS_DIR, exist_ok=True)
+
+
     def __init__(self):
+        self.loaded_models: Dict[str, Any] = {} # Om geladen ML-modellen op te slaan
+        self._load_ml_models() # Poging om ML-modellen te laden bij initialisatie
         logger.info("CNNPatterns geïnitialiseerd.")
+
+    def _load_ml_models(self):
+        """
+        Laadt getrainde Deep Learning-modellen voor patroonherkenning.
+        Dit is een **placeholder** voor de daadwerkelijke modellading.
+        """
+        logger.info(f"Poging om ML-modellen te laden vanuit {CNNPatterns.MODELS_DIR}...")
+
+        # Placeholder: Geen modellen worden daadwerkelijk geladen.
+        # Verwijder of commentarieer alle voorbeeld Keras/PyTorch laadlogica.
+
+        if not self.loaded_models: # Dit zal altijd waar zijn voor de placeholder
+            logger.info("Geen Deep Learning-modellen geladen. CNNPatterns zal regelgebaseerd functioneren.")
+
+    def _predict_pattern_score(self, model_name: str, input_data: np.ndarray) -> float:
+        """
+        Voert inferentie uit met een geladen ML-model om een patroonscore te voorspellen.
+        Dit is een **placeholder** voor de daadwerkelijke inferentie.
+        """
+        # Verwijder of commentarieer alle voorbeeld Keras/PyTorch voorspellingslogica.
+
+        logger.debug(f"Simuleren voorspelling voor model {model_name} met input shape {input_data.shape if input_data is not None else 'N/A'}.")
+        return np.random.rand() # Return a random score (0-1) as a placeholder simulation
 
     # --- Helperfuncties voor dataverwerking (uitbreiding van Freqtrade DF naar 'candles' dicts) ---
     def _dataframe_to_candles(self, dataframe: pd.DataFrame) -> List[Dict[str, Any]]:
@@ -704,8 +737,25 @@ class CNNPatterns:
             "context": ['1h', '4h', '12h', '1d', '1w']
         }
 
-        # Zorg dat alle timeframes beschikbaar zijn in de input
-        available_timeframes = candles_by_timeframe.keys()
+        # --- ML Model Inference (Placeholder Integration) ---
+        if not self.loaded_models:
+            logger.info("Geen ML modellen geladen, overgeslagen ML-gebaseerde patroon detectie.")
+        else:
+            logger.info(f"Starten van ML-gebaseerde patroon detectie voor {len(self.loaded_models)} modellen...")
+            for model_name, ml_model_instance in self.loaded_models.items(): # ml_model_instance is not used yet
+                # In a real scenario, prepare specific input_data for each model
+                # For this placeholder, we'll use a dummy array.
+                logger.info(f"Voorbereiden van dummy input data voor ML model: {model_name}")
+                dummy_input_data = np.array([]) # Placeholder for actual data preparation
+
+                # Call the placeholder prediction method
+                score = self._predict_pattern_score(model_name, dummy_input_data)
+                pattern_key = f"ml_{model_name}_score"
+                all_patterns["patterns"][pattern_key] = score
+                logger.info(f"ML Model '{model_name}' gesimuleerde score: {score:.4f} (opgeslagen als {pattern_key})")
+
+        # --- Regelgebaseerde detectie (bestaande logica) ---
+        available_timeframes = candles_by_timeframe.keys() # Ensure this is defined before use
         for tf_group in TIME_FRAME_CONFIG.values():
             for tf_val in tf_group:
                  if tf_val not in available_timeframes:
@@ -809,7 +859,7 @@ class CNNPatterns:
             all_patterns["context"]["volume_spike"] = False
 
 
-        logger.debug(f"Patroondetectie resultaat voor {symbol}: {json.dumps(all_patterns, indent=2)}")
+        logger.debug(f"Patroondetectie resultaat voor {symbol}: {json.dumps(all_patterns, indent=2, default=str)}") # Added default=str
         return all_patterns
 
 # Voorbeeld van hoe je het zou kunnen gebruiken (voor testen)
@@ -817,7 +867,7 @@ if __name__ == "__main__":
     import asyncio
     import pandas as pd
     from datetime import datetime, timedelta
-    import os # Toegevoegd voor os.path.join
+    # import os # os is already imported at the top level
     import json # Toegevoegd voor json.dumps in test
     import dotenv
     # Corrected path for .env when running this script directly
@@ -910,7 +960,11 @@ if __name__ == "__main__":
         # logger.info("Starting multi-timeframe pattern detection test...")
         detected_patterns = await cnn_detector.detect_patterns_multi_timeframe(candles_by_timeframe, test_symbol)
 
-        print(json.dumps(detected_patterns, indent=2, default=str)) # Added default=str for datetime if any
+    # Ensure logger is configured for __main__ to see output if using logger.debug in detect_patterns_multi_timeframe
+    logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+
+
+    print(json.dumps(detected_patterns, indent=2, default=str))
 
         print("\n--- Specifieke patroon tests op 5m ---")
         mock_5m_df = candles_by_timeframe['5m']

@@ -16,8 +16,10 @@ logger.setLevel(logging.INFO)
 MEMORY_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'memory')
 PRETRAIN_LOG_FILE = os.path.join(MEMORY_DIR, 'pre_train_log.json')
 TIME_EFFECTIVENESS_FILE = os.path.join(MEMORY_DIR, 'time_effectiveness.json')
+MODELS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'models') # For mock model paths
 
 os.makedirs(MEMORY_DIR, exist_ok=True)
+os.makedirs(MODELS_DIR, exist_ok=True) # Ensure MODELS_DIR is created
 
 class PreTrainer:
     """
@@ -140,38 +142,39 @@ class PreTrainer:
 
     async def train_ai_models(self, training_data: pd.DataFrame, model_type: str = 'cnn_pattern_recognizer'):
         """
-        Traingt AI-modellen (bijv. CNN's) op de voorbereide data.
+        Simuleert het trainen van AI-modellen. Verwijdert daadwerkelijke ML-bibliotheekaanroepen.
         """
-        if training_data.empty:
-            logger.warning(f"Geen trainingsdata beschikbaar voor model '{model_type}'. Training overgeslagen.")
-            return
-
         logger.info(f"Simuleren training van AI-model '{model_type}' met {len(training_data)} samples...")
 
-        # Placeholder voor daadwerkelijke ML training
-        # Voorbeeld:
-        # if model_type == 'cnn_pattern_recognizer':
-        #     # features = training_data[['open', 'high', 'low', 'close', 'volume', 'rsi', ...]]
-        #     # labels = training_data['cnn_bull_flag_label']
-        #     # Train model...
-        # elif model_type == 'trade_outcome_predictor':
-        #     # features = ...
-        #     # labels = training_data['trade_outcome_label']
-        #     # Train model...
+        if training_data.empty:
+            logger.warning(f"Geen trainingsdata voor model '{model_type}'. Training overgeslagen.")
+            return
 
-        await asyncio.sleep(1) # Simuleer trainingstijd
+        # --- REMOVE ACTUAL DEEP LEARNING TRAINING LOGIC ---
+        # Keras/TensorFlow related code should be removed from here.
+
+        # For current placeholder, just log the simulation.
+        mock_model_save_path = os.path.join(MODELS_DIR, f"{model_type}_model_simulated.h5")
+        logger.info(f"Simulatie: AI-model '{model_type}' zou getraind en opgeslagen worden op {mock_model_save_path}.")
+
+        # Log pretrain activity
+        # Ensure this call remains and uses a simulated path
+        await asyncio.to_thread(self._log_pretrain_activity, model_type, len(training_data), model_path=mock_model_save_path)
+
         logger.info(f"AI-model '{model_type}' succesvol gesimuleerd getraind.")
-        await asyncio.to_thread(self._log_pretrain_activity, model_type, len(training_data))
 
 
-    def _log_pretrain_activity(self, model_type: str, data_size: int):
+    def _log_pretrain_activity(self, model_type: str, data_size: int, model_path: str = None):
         """ Logt de pre-trainingsactiviteit. """
         entry = {
             "timestamp": datetime.now().isoformat(),
             "model_type": model_type,
             "data_size": data_size,
-            "status": "completed_simulation" # Duidelijker maken dat het simulatie is
+            "status": "completed_simulation"
         }
+        if model_path:
+            entry["model_path"] = model_path
+
         logs = []
         try:
             if os.path.exists(PRETRAIN_LOG_FILE) and os.path.getsize(PRETRAIN_LOG_FILE) > 0:
