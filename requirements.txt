@@ -1,0 +1,13 @@
+freqtrade
+ccxt
+ta
+pandas-ta
+openai
+groq
+numpy
+pandas
+scikit-learn
+matplotlib
+seaborn
+python-dotenv
+requests

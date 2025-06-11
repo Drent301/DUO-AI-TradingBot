@@ -1,0 +1,12 @@
+/data/
+/memory/
+/freqtrade/user_data/
+*.log
+*.sqlite
+.env
+__pycache__/
+*.pyc
+venv/
+.pytest_cache/
+*.DS_Store
+output/
