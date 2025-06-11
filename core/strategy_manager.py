@@ -6,142 +6,192 @@ from typing import Dict, Any, List, Optional
 import asyncio
 from datetime import datetime
 import dotenv # Added for __main__
+import sqlite3 # Added
+import pandas as pd # Added
+
+# Assuming ParamsManager and BiasReflector will be in these locations
+from core.params_manager import ParamsManager # Added
+from core.bias_reflector import BiasReflector # Added (already imported in __main__ before)
+
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
 
-MEMORY_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'memory')
-STRATEGY_MEMORY_FILE = os.path.join(MEMORY_DIR, 'strategy_memory.json')
+# MEMORY_DIR and STRATEGY_MEMORY_FILE are no longer needed for performance
+# os.makedirs(MEMORY_DIR, exist_ok=True) # Not needed if MEMORY_DIR is not used
 
-os.makedirs(MEMORY_DIR, exist_ok=True)
+# FREQTRADE_DB_PATH will be used for the database connection
+# It's good practice to allow override via environment variable
+FREQTRADE_DB_PATH_DEFAULT = 'freqtrade.sqlite'
+
 
 class StrategyManager:
     """
-    Beheert strategieselectie, mutatie en geheugen.
-    Vertaald van strategyManager.js en strategyMutator.js concepten.
+    Manages strategy selection, mutation, and performance tracking using Freqtrade's database.
     """
 
-    def __init__(self):
-        self.strategy_memory = self._load_strategy_memory()
-        # BiasReflector needs to be an instance if get_best_strategy uses it.
-        # This creates a dependency. For now, we'll assume it's set up externally
-        # or mock it in tests if not passed in.
-        self.bias_reflector: Optional[Any] = None # Placeholder for BiasReflector instance
-        logger.info(f"StrategyManager geïnitialiseerd. Geheugen: {STRATEGY_MEMORY_FILE}")
+    def __init__(self, db_path: Optional[str] = None):
+        # Allow db_path to be overridden, e.g., for testing
+        self.db_path = db_path or os.getenv('FREQTRADE_DB_PATH', FREQTRADE_DB_PATH_DEFAULT)
+        self.params_manager = ParamsManager() # Initialize ParamsManager
+        self.bias_reflector: Optional[BiasReflector] = None # Placeholder, will be set up
+        logger.info(f"StrategyManager initialized. DB path: {self.db_path}")
 
-    def _load_strategy_memory(self) -> Dict[str, Any]:
-        try:
-            if os.path.exists(STRATEGY_MEMORY_FILE) and os.path.getsize(STRATEGY_MEMORY_FILE) > 0:
-                with open(STRATEGY_MEMORY_FILE, 'r', encoding='utf-8') as f:
-                    return json.load(f)
-            return {} # Return empty if file doesn't exist or is empty
-        except (FileNotFoundError, json.JSONDecodeError):
-            logger.warning(f"Strategie geheugenbestand {STRATEGY_MEMORY_FILE} niet gevonden of corrupt. Start met leeg geheugen.")
-            return {}
-
-    def _save_strategy_memory(self):
-        try:
-            with open(STRATEGY_MEMORY_FILE, 'w', encoding='utf-8') as f:
-                json.dump(self.strategy_memory, f, indent=2)
-        except IOError as e:
-            logger.error(f"Fout bij opslaan strategie geheugen: {e}")
+    # _load_strategy_memory and _save_strategy_memory are removed as we use the DB.
 
     def get_strategy_performance(self, strategy_id: str) -> Dict[str, Any]:
         """
-        Haalt de laatst bekende prestatie van een strategie op.
+        Fetches aggregated performance from Freqtrade's database for a given strategy.
+        Returns winRate, avgProfit, and tradeCount.
         """
-        return self.strategy_memory.get(strategy_id, {}).get('performance', {"winRate": 0.0, "avgProfit": 0.0, "tradeCount": 0})
+        default_performance = {"winRate": 0.0, "avgProfit": 0.0, "tradeCount": 0}
+        conn = None
+        try:
+            conn = sqlite3.connect(self.db_path)
+            # Note: Column names like 'close_profit_abs' for profit percentage might vary.
+            # Assuming 'close_profit' is a ratio (e.g., 0.05 for 5%).
+            # Freqtrade stores profit as ratio (e.g. 0.01 = 1%) in close_profit column.
+            # is_open = 0 filters for closed trades.
+            query = """
+                SELECT
+                    SUM(CASE WHEN close_profit > 0 THEN 1 ELSE 0 END) * 1.0 / COUNT(id) as winRate,
+                    AVG(close_profit) as avgProfit,
+                    COUNT(id) as tradeCount
+                FROM trades
+                WHERE strategy = ? AND is_open = 0
+            """
+            df = pd.read_sql_query(query, conn, params=(strategy_id,))
+
+            if df.empty or df.iloc[0]['tradeCount'] is None or df.iloc[0]['tradeCount'] == 0:
+                logger.info(f"No closed trades found for strategy {strategy_id} in {self.db_path}. Returning default performance.")
+                return default_performance
+
+            performance = df.iloc[0].to_dict()
+            # Ensure types are correct, especially for winRate which can be NaN if tradeCount is 0
+            performance['winRate'] = float(performance.get('winRate', 0.0) or 0.0) # Handle potential NaN
+            performance['avgProfit'] = float(performance.get('avgProfit', 0.0) or 0.0) # Handle potential NaN
+            performance['tradeCount'] = int(performance.get('tradeCount', 0) or 0)
+
+            logger.info(f"Performance for {strategy_id}: {performance}")
+            return performance
+
+        except sqlite3.Error as e:
+            logger.error(f"Database error while fetching performance for {strategy_id}: {e}")
+            return default_performance
+        except Exception as e:
+            logger.error(f"Unexpected error fetching performance for {strategy_id}: {e}")
+            return default_performance
+        finally:
+            if conn:
+                conn.close()
 
     async def update_strategy_performance(self, strategy_id: str, new_performance: Dict[str, Any]):
         """
-        Werkt de prestatie van een strategie bij.
+        This method's role is adjusted. The database is the primary source of truth for trade performance.
+        This could be used to update an internal cache or log external updates if needed,
+        but it does not write directly to the main performance store (the DB).
         """
-        if strategy_id not in self.strategy_memory:
-            self.strategy_memory[strategy_id] = {"parameters": {}, "performance": {}} # Ensure structure exists
+        # For now, this method logs the intention but doesn't alter primary performance data.
+        # It could be used for caching or other auxiliary tasks in a more complex system.
+        logger.info(f"Attempt to update performance for strategy {strategy_id} with {new_performance}. "
+                    f"Performance is primarily derived from the database.")
+        # If an in-memory cache or secondary store were used, this is where it would be updated.
+        # For example:
+        # self.strategy_memory_cache[strategy_id]['performance'] = new_performance
+        # self.strategy_memory_cache[strategy_id]['last_updated'] = datetime.now().isoformat()
+        # No direct save to a JSON file or DB write operation here for performance metrics.
+        pass # Explicitly doing nothing further for now.
 
-        # Merge new performance with existing, new values overwrite old
-        current_performance = self.strategy_memory[strategy_id].get('performance', {})
-        current_performance.update(new_performance)
-        current_performance["last_updated"] = datetime.now().isoformat()
-
-        self.strategy_memory[strategy_id]['performance'] = current_performance
-
-        await asyncio.to_thread(self._save_strategy_memory)
-        logger.info(f"Prestatie voor strategie {strategy_id} bijgewerkt: {new_performance}")
 
     async def mutate_strategy(self, strategy_id: str, proposal: Dict[str, Any]):
         """
         Muteert een strategie op basis van een mutatievoorstel van de AI.
-        Dit zou in de praktijk de Freqtrade strategie code zelf aanpassen of nieuwe parameters laden.
+        Updates strategy parameters, ROI, Stoploss, and Trailing Stop using ParamsManager.
         """
         if not proposal or proposal.get('strategyId') != strategy_id:
-            logger.warning(f"Ongeldig mutatievoorstel voor strategie {strategy_id}.")
+            logger.warning(f"Invalid mutation proposal for strategy {strategy_id}.")
             return False
 
-        logger.info(f"Muteer strategie {strategy_id} met voorstel: {proposal.get('adjustments')}")
+        logger.info(f"Mutating strategy {strategy_id} with proposal: {proposal.get('adjustments')}")
 
-        if strategy_id not in self.strategy_memory:
-            self.strategy_memory[strategy_id] = {"parameters": {}, "performance": {}}
+        adjustments = proposal.get('adjustments', {})
+        parameter_changes = adjustments.get('parameterChanges')
+        roi_changes = adjustments.get('roi') # Assuming format like {0: 0.1, 60: 0.05}
+        stoploss_change = adjustments.get('stoploss') # Assuming float value
+        trailing_stop_changes = adjustments.get('trailingStop') # Assuming dict like {"enabled": True, "value": 0.01}
 
-        current_strategy_info = self.strategy_memory[strategy_id]
-        # Ensure 'parameters' key exists
-        current_params = current_strategy_info.get("parameters", {})
+        changes_made = False
 
-        parameter_changes = proposal.get('adjustments', {}).get('parameterChanges', {})
-        if parameter_changes: # Only update if there are changes
+        # Update standard parameters
+        if parameter_changes:
             for param, value in parameter_changes.items():
-                current_params[param] = value
-                logger.debug(f"Parameter '{param}' van strategie {strategy_id} aangepast naar {value}.")
-            current_strategy_info['parameters'] = current_params
-            current_strategy_info['last_mutated'] = datetime.now().isoformat()
-            current_strategy_info['mutation_rationale'] = proposal.get('rationale')
-            current_strategy_info['last_mutation_proposal'] = proposal # Store the full proposal
+                # self.params_manager.set_param should handle saving these to the strategy file or its own store
+                await self.params_manager.set_param(strategy_id, param, value) # Assuming async
+                logger.debug(f"Parameter '{param}' of strategy {strategy_id} set to {value}.")
+            changes_made = True
 
-            self.strategy_memory[strategy_id] = current_strategy_info
-            await asyncio.to_thread(self._save_strategy_memory)
-            logger.info(f"Strategie {strategy_id} succesvol gemuteerd met parameters: {current_params}.")
+        # Update ROI, Stoploss, Trailing Stop using a dedicated method in ParamsManager
+        if roi_changes or stoploss_change or trailing_stop_changes:
+            # update_strategy_roi_sl_params should handle the specifics of how these are stored/updated
+            await self.params_manager.update_strategy_roi_sl_params(
+                strategy_id=strategy_id,
+                roi_table=roi_changes,
+                stoploss_value=stoploss_change,
+                trailing_stop_params=trailing_stop_changes
+            ) # Assuming async
+            logger.info(f"ROI/SL/TS for strategy {strategy_id} updated.")
+            changes_made = True
+
+        if changes_made:
+            # Logging or status update related to mutation can happen here.
+            # The actual parameters are now managed by ParamsManager, so no local strategy_memory to update for params.
+            # We might want to store mutation metadata (rationale, proposal) if needed,
+            # potentially in a separate log or DB table, or also managed by ParamsManager.
+            # For now, just log success.
+            logger.info(f"Strategy {strategy_id} successfully mutated based on proposal.")
             return True
         else:
-            logger.info(f"Geen parameter wijzigingen in voorstel voor strategie {strategy_id}. Mutatie niet uitgevoerd.")
+            logger.info(f"No actionable changes in proposal for strategy {strategy_id}. Mutation not performed.")
             return False
 
 
     async def get_best_strategy(self, token: str, interval: str) -> Optional[Dict[str, Any]]:
         """
-        Selecteert de best presterende strategie voor een gegeven token en interval.
-        Vertaald van getBestStrategy [DUO].
-        Dit zou meerdere strategieën in het geheugen moeten vergelijken.
-        Voor nu, retourneert het een mock of de "DUOAI_Strategy" met basisinfo.
+        Selects the best performing strategy for a given token and interval,
+        considering performance from DB and parameters from ParamsManager.
         """
-        # Als er meerdere strategieën zijn, kies de beste op basis van performance en bias
-        # For this example, we assume "DUOAI_Strategy" is the one we manage.
-        # In a multi-strategy system, you'd iterate through self.strategy_memory.keys()
+        # In a multi-strategy system, you'd iterate or query available strategies.
+        # For this example, we assume "DUOAI_Strategy" is a key strategy.
+        # This method might need to list available strategies from ParamsManager or a config.
+        strategy_id = "DUOAI_Strategy" # Example strategy
 
-        strategy_id = "DUOAI_Strategy" # De naam van je Freqtrade strategie
+        performance = self.get_strategy_performance(strategy_id) # Fetches from DB
 
-        if strategy_id not in self.strategy_memory:
-            logger.warning(f"Strategie {strategy_id} niet gevonden in geheugen voor get_best_strategy.")
-            # Initialize with default if not found, so it can be used
-            self.strategy_memory[strategy_id] = {
-                "parameters": {"emaPeriod": 20, "rsiThreshold": 70}, # Default parameters
-                "performance": {"winRate": 0.0, "avgProfit": 0.0, "tradeCount": 0}
-            }
+        # Retrieve current parameters from ParamsManager
+        # Assuming get_param can fetch the entire parameter set for a strategy
+        # The structure of what get_param returns will depend on ParamsManager's design.
+        # It might return buy/sell params, ROI, SL, etc.
+        strategy_params = await self.params_manager.get_param("strategies", strategy_id=strategy_id) # Assuming async
+        if not strategy_params:
+            logger.warning(f"Parameters for strategy {strategy_id} not found via ParamsManager.")
+            # Fallback or default parameters might be loaded here if appropriate
+            # For now, returning None or minimal info if params are crucial and missing.
+            # Or, ensure params_manager always returns a dict, possibly empty.
+            strategy_params = {}
 
-
-        performance = self.get_strategy_performance(strategy_id)
 
         bias = 0.5 # Default bias
-        if self.bias_reflector: # Check if bias_reflector instance is available
+        if self.bias_reflector:
+            # BiasReflector might need strategy_id and potentially current params or performance
             bias = self.bias_reflector.get_bias_score(token, strategy_id)
         else:
-            logger.warning("BiasReflector niet beschikbaar in StrategyManager. Gebruik default bias 0.5.")
-
+            logger.warning("BiasReflector not available in StrategyManager. Using default bias 0.5.")
 
         return {
             "id": strategy_id,
-            "performance": performance,
-            "bias": bias, # Learned bias for this token/strategy combo
-            "parameters": self.strategy_memory.get(strategy_id, {}).get("parameters", {})
+            "performance": performance, # From DB
+            "bias": bias,
+            "parameters": strategy_params # From ParamsManager
         }
 
 # Voorbeeld van hoe je het zou kunnen gebruiken (voor testen)
@@ -156,53 +206,213 @@ if __name__ == "__main__":
                         format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
                         handlers=[logging.StreamHandler(sys.stdout)])
 
+    # Define a test DB path and ensure it's used by StrategyManager
+    TEST_DB_PATH = "test_freqtrade.sqlite"
+    os.environ['FREQTRADE_DB_PATH'] = TEST_DB_PATH
+
+
+    # --- Mock ParamsManager and BiasReflector for testing ---
+    class MockParamsManager:
+        def __init__(self):
+            self.params = {
+                "DUOAI_Strategy": {
+                    "buy": {"emaPeriod": 20, "rsiThresholdBuy": 65},
+                    "sell": {"rsiThresholdSell": 75},
+                    "roi": {0: 0.1, 30: 0.05, 60: 0.01},
+                    "stoploss": -0.10,
+                    "trailing": {"enabled": True, "value": 0.02}
+                },
+                "OtherStrategy": {
+                    "buy": {"emaPeriod": 50, "rsiThresholdBuy": 60},
+                    "sell": {"rsiThresholdSell": 80},
+                    "roi": {0: 0.2, 30: 0.15, 60: 0.05},
+                    "stoploss": -0.15,
+                    "trailing": {"enabled": False}
+                }
+            }
+            self.files_written = {} # To track file writing attempts for ROI/SL
+
+        async def get_param(self, category: str, strategy_id: str = None, param_name: str = None):
+            if category == "strategies" and strategy_id:
+                return self.params.get(strategy_id, {}).copy() # Return a copy
+            elif strategy_id and param_name:
+                return self.params.get(strategy_id, {}).get("buy", {}).get(param_name) or \
+                       self.params.get(strategy_id, {}).get("sell", {}).get(param_name)
+            return None
+
+        async def set_param(self, strategy_id: str, param_name: str, value: Any):
+            if strategy_id not in self.params:
+                self.params[strategy_id] = {"buy": {}, "sell": {}}
+            # Simplistic: assume it's a buy param if not obviously something else
+            # A real ParamsManager would know where to put it (buy/sell/other sections)
+            if "buy" not in self.params[strategy_id]: self.params[strategy_id]["buy"] = {}
+            self.params[strategy_id]["buy"][param_name] = value
+            logger.info(f"MockParamsManager: Set {param_name} to {value} for {strategy_id}")
+
+        async def update_strategy_roi_sl_params(self, strategy_id: str, roi_table: Optional[Dict] = None,
+                                                stoploss_value: Optional[float] = None,
+                                                trailing_stop_params: Optional[Dict] = None):
+            if strategy_id not in self.params:
+                self.params[strategy_id] = {}
+            if roi_table is not None:
+                self.params[strategy_id]['roi'] = roi_table
+                logger.info(f"MockParamsManager: Updated ROI for {strategy_id} to {roi_table}")
+            if stoploss_value is not None:
+                self.params[strategy_id]['stoploss'] = stoploss_value
+                logger.info(f"MockParamsManager: Updated stoploss for {strategy_id} to {stoploss_value}")
+            if trailing_stop_params is not None:
+                self.params[strategy_id]['trailing'] = trailing_stop_params
+                logger.info(f"MockParamsManager: Updated trailing stop for {strategy_id} to {trailing_stop_params}")
+            # Simulate that ParamsManager would write these to a strategy file
+            self.files_written[strategy_id] = True
+
+
+    class MockBiasReflector:
+        def get_bias_score(self, token: str, strategy_id: str) -> float:
+            # Return a predictable bias score for testing
+            if token == "ETH/USDT" and strategy_id == "DUOAI_Strategy":
+                return 0.75
+            return 0.5
+
+    def setup_test_db(db_path: str):
+        if os.path.exists(db_path):
+            os.remove(db_path)
+        conn = sqlite3.connect(db_path)
+        cursor = conn.cursor()
+        cursor.execute("""
+        CREATE TABLE trades (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            strategy TEXT,
+            pair TEXT,
+            is_open INTEGER,
+            open_date DATETIME,
+            close_date DATETIME,
+            close_profit REAL,
+            close_profit_abs REAL, -- Assuming this is absolute profit value if needed
+            stake_amount REAL
+        )
+        """)
+        # Sample data for DUOAI_Strategy
+        trades_data_duoai = [
+            ('DUOAI_Strategy', 'ETH/USDT', 0, '2023-01-01 10:00:00', '2023-01-01 12:00:00', 0.02, 0.02*100, 100), # Win
+            ('DUOAI_Strategy', 'ETH/USDT', 0, '2023-01-02 10:00:00', '2023-01-02 12:00:00', -0.01, -0.01*100, 100), # Loss
+            ('DUOAI_Strategy', 'BTC/USDT', 0, '2023-01-03 10:00:00', '2023-01-03 12:00:00', 0.03, 0.03*100, 100), # Win
+            ('DUOAI_Strategy', 'ETH/USDT', 1, '2023-01-04 10:00:00', None, None, None, 100), # Open trade
+        ]
+        # Sample data for OtherStrategy
+        trades_data_other = [
+            ('OtherStrategy', 'LTC/USDT', 0, '2023-01-05 10:00:00', '2023-01-05 12:00:00', 0.05, 0.05*200, 200), # Win
+            ('OtherStrategy', 'LTC/USDT', 0, '2023-01-06 10:00:00', '2023-01-06 12:00:00', 0.01, 0.01*200, 200), # Win
+        ]
+        cursor.executemany("INSERT INTO trades (strategy, pair, is_open, open_date, close_date, close_profit, close_profit_abs, stake_amount) VALUES (?,?,?,?,?,?,?,?)",
+                           trades_data_duoai + trades_data_other)
+        conn.commit()
+        conn.close()
+        logger.info(f"Test database {db_path} created and populated.")
+
 
     async def run_test_strategy_manager():
+        # Setup: Create dummy DB and mock objects
+        setup_test_db(TEST_DB_PATH)
+
+        # Instantiate StrategyManager with the test DB path
+        # It will pick up FREQTRADE_DB_PATH from os.environ
         strategy_manager = StrategyManager()
+
+        # Replace actual ParamsManager and BiasReflector with mocks for testing
+        strategy_manager.params_manager = MockParamsManager()
+        strategy_manager.bias_reflector = MockBiasReflector()
+
         test_strategy_id = "DUOAI_Strategy"
+        other_strategy_id = "OtherStrategy"
         test_token = "ETH/USDT"
 
-        # Voor de test, initieer de bias_reflector die de strategy_manager aanroept
-        # This shows the dependency. In a real app, BiasReflector might be passed via __init__
-        # or accessed via a global/singleton pattern if appropriate.
-        from core.bias_reflector import BiasReflector # Import here for test setup
-        strategy_manager.bias_reflector = BiasReflector()
+        print("\n--- Test StrategyManager with DB and Mocks ---")
+
+        # 1. Test get_strategy_performance
+        print(f"\nFetching performance for {test_strategy_id} from DB...")
+        perf_duoai = strategy_manager.get_strategy_performance(test_strategy_id)
+        print(f"Performance for {test_strategy_id}: {perf_duoai}")
+        # DUOAI_Strategy: 2 wins, 1 loss out of 3 closed trades on ETH/USDT and BTC/USDT
+        # Win rate = 2/3 = 0.666...
+        # Avg profit = (0.02 - 0.01 + 0.03) / 3 = 0.04 / 3 = 0.01333...
+        assert abs(perf_duoai['winRate'] - (2/3)) < 0.001
+        assert abs(perf_duoai['avgProfit'] - (0.04/3)) < 0.001
+        assert perf_duoai['tradeCount'] == 3
+
+        print(f"\nFetching performance for {other_strategy_id} from DB...")
+        perf_other = strategy_manager.get_strategy_performance(other_strategy_id)
+        print(f"Performance for {other_strategy_id}: {perf_other}")
+        # OtherStrategy: 2 wins out of 2 closed trades
+        # Win rate = 2/2 = 1.0
+        # Avg profit = (0.05 + 0.01) / 2 = 0.06 / 2 = 0.03
+        assert abs(perf_other['winRate'] - 1.0) < 0.001
+        assert abs(perf_other['avgProfit'] - 0.03) < 0.001
+        assert perf_other['tradeCount'] == 2
+
+        print(f"\nFetching performance for UnknownStrategy from DB...")
+        perf_unknown = strategy_manager.get_strategy_performance("UnknownStrategy")
+        print(f"Performance for UnknownStrategy: {perf_unknown}")
+        assert perf_unknown['winRate'] == 0.0
+        assert perf_unknown['avgProfit'] == 0.0
+        assert perf_unknown['tradeCount'] == 0
 
 
-        print("\n--- Test StrategyManager ---")
+        # 2. Test update_strategy_performance (should just log, not change DB data)
+        print(f"\nAttempting to update performance for {test_strategy_id} (should only log)...")
+        await strategy_manager.update_strategy_performance(test_strategy_id, {"winRate": 0.99, "avgProfit": 0.5, "tradeCount": 100})
+        perf_after_update_attempt = strategy_manager.get_strategy_performance(test_strategy_id)
+        assert abs(perf_after_update_attempt['winRate'] - (2/3)) < 0.001, "Performance should not change via update_strategy_performance"
 
-        # Update prestatie
-        print(f"Update prestatie voor {test_strategy_id}...")
-        await strategy_manager.update_strategy_performance(test_strategy_id, {"winRate": 0.6, "avgProfit": 0.03, "tradeCount": 50})
-        current_perf = strategy_manager.get_strategy_performance(test_strategy_id)
-        print(f"Huidige prestatie: {current_perf}")
-        assert current_perf['winRate'] == 0.6
 
-        # Genereer een mock mutatievoorstel
+        # 3. Test mutate_strategy
+        print(f"\nMutating strategy {test_strategy_id} using MockParamsManager...")
         mock_proposal = {
             "strategyId": test_strategy_id,
             "adjustments": {
-                "action": "strengthen",
-                "parameterChanges": {"emaPeriod": 22, "rsiThreshold": 75}
+                "parameterChanges": {"emaPeriod": 25, "newParam": 123},
+                "roi": {0: 0.12, 60: 0.08},
+                "stoploss": -0.15,
+                "trailingStop": {"enabled": True, "value": 0.025}
             },
-            "confidence": 0.85,
-            "rationale": {"reason": "Goede prestaties, verhoog risico/vertrouwen."}
+            "confidence": 0.90,
+            "rationale": "Test mutation via ParamsManager"
         }
-
-        # Muteer strategie
-        print(f"\nMuteer strategie {test_strategy_id}...")
         mutation_successful = await strategy_manager.mutate_strategy(test_strategy_id, mock_proposal)
-        print(f"Mutatie succesvol: {mutation_successful}")
-        mutated_params = strategy_manager.strategy_memory.get(test_strategy_id,{}).get('parameters')
-        print(f"Nieuwe parameters na mutatie: {mutated_params}")
-        assert mutated_params and mutated_params.get('emaPeriod') == 22
+        print(f"Mutation successful: {mutation_successful}")
+        assert mutation_successful
 
-        # Get best strategy
-        print(f"\nHaal beste strategie op voor {test_token} (interval 5m)...")
+        # Verify changes through MockParamsManager's internal state
+        mutated_params_from_pm = await strategy_manager.params_manager.get_param("strategies", strategy_id=test_strategy_id)
+        print(f"Parameters from MockParamsManager after mutation: {mutated_params_from_pm}")
+        assert mutated_params_from_pm['buy']['emaPeriod'] == 25
+        assert mutated_params_from_pm['buy']['newParam'] == 123
+        assert mutated_params_from_pm['roi'] == {0: 0.12, 60: 0.08}
+        assert mutated_params_from_pm['stoploss'] == -0.15
+        assert mutated_params_from_pm['trailing'] == {"enabled": True, "value": 0.025}
+        assert strategy_manager.params_manager.files_written.get(test_strategy_id) is True
+
+
+        # 4. Test get_best_strategy
+        print(f"\nGetting best strategy for {test_token} (interval 5m)...")
         best_strat_info = await strategy_manager.get_best_strategy(test_token, "5m")
-        print(f"Beste strategie info: {best_strat_info}")
+        print(f"Best strategy info: {best_strat_info}")
         assert best_strat_info is not None
         assert best_strat_info['id'] == test_strategy_id
-        assert 'bias' in best_strat_info # Check if bias was retrieved
+        # Performance from DB
+        assert abs(best_strat_info['performance']['winRate'] - (2/3)) < 0.001
+        # Parameters from MockParamsManager (after mutation)
+        assert best_strat_info['parameters']['buy']['emaPeriod'] == 25
+        assert best_strat_info['parameters']['roi'] == {0: 0.12, 60: 0.08}
+        # Bias from MockBiasReflector
+        assert best_strat_info['bias'] == 0.75
+
+        logger.info("All StrategyManager tests passed with DB and Mocks.")
+
+        # Cleanup test DB
+        if os.path.exists(TEST_DB_PATH):
+            os.remove(TEST_DB_PATH)
+        logger.info(f"Test database {TEST_DB_PATH} removed.")
+
 
     asyncio.run(run_test_strategy_manager())
