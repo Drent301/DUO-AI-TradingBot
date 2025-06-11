@@ -35,14 +35,14 @@ class ExitOptimizer:
         try:
             self.prompt_builder = PromptBuilder()
         except Exception as e:
-            logger.error(f"Failed to initialize PromptBuilder (it might be empty or have issues): {e}")
-            self.prompt_builder = None # Fallback
+            logger.error(f"Failed to initialize PromptBuilder: {e}")
+            self.prompt_builder = None
         self.bias_reflector = BiasReflector()
         try:
             self.confidence_engine = ConfidenceEngine()
         except Exception as e:
-            logger.error(f"Failed to initialize ConfidenceEngine (it might be empty or have issues): {e}")
-            self.confidence_engine = None # Fallback
+            logger.error(f"Failed to initialize ConfidenceEngine: {e}")
+            self.confidence_engine = None
 
         self.cnn_patterns_detector = CNNPatterns()
         logger.info("ExitOptimizer geïnitialiseerd.")
@@ -61,15 +61,11 @@ class ExitOptimizer:
 
         if dataframe.empty:
             logger.warning(f"[ExitOptimizer] Geen dataframe beschikbaar voor {symbol}. Kan geen exit besluit nemen.")
-            return {"exit": False, "reason": "no_dataframe", "confidence": 0.0}
+            return {"exit": False, "reason": "no_dataframe", "confidence": 0.0, "pattern_details": {}}
 
-        # Haal huidige bias en confidence op
-        current_bias = self.bias_reflector.get_bias_score(symbol, current_strategy_id)
-        if self.confidence_engine:
-            current_confidence = self.confidence_engine.get_confidence_score(symbol, current_strategy_id)
-        else:
-            logger.warning("ConfidenceEngine not available, using default confidence 0.5 for exit decision.")
-            current_confidence = 0.5
+        # Haal huidige geleerde bias en confidence op
+        learned_bias = self.bias_reflector.get_bias_score(symbol, current_strategy_id)
+        learned_confidence = self.confidence_engine.get_confidence_score(symbol, current_strategy_id) if self.confidence_engine else 0.5
 
 
         # Genereer prompt voor AI
@@ -82,10 +78,13 @@ class ExitOptimizer:
             prompt = await self.prompt_builder.generate_prompt_with_data(
                 candles_by_timeframe=candles_by_timeframe,
                 symbol=symbol,
-                prompt_type='riskManagement', # Of 'marketAnalysis' voor exit
-                current_bias=current_bias,
-                current_confidence=current_confidence,
-                trade_context=trade # Geef trade context mee voor exit prompts
+                # [cite_start]prompt_type='riskManagement', # Or 'marketAnalysis' for exit [cite: 510]
+                prompt_type='riskManagement',
+                current_bias=learned_bias,
+                current_confidence=learned_confidence,
+                # trade_context is already passed in the call to generate_prompt_with_data
+                # so it can be used within prompt_builder if needed for context
+                trade_context=trade
             )
 
         if not prompt:
@@ -103,25 +102,23 @@ class ExitOptimizer:
         gpt_intentie = str(gpt_response.get('intentie', '')).upper()
         grok_intentie = str(grok_response.get('intentie', '')).upper()
 
-        num_valid_confidences = sum(1 for conf in [gpt_confidence, grok_confidence] if isinstance(conf, (float, int)) and conf > 0)
+        num_valid_confidences = sum(1 for conf in [gpt_confidence, grok_confidence] if isinstance(conf, (float, int)) and conf >= 0)
         if num_valid_confidences > 0:
             combined_confidence = (gpt_confidence + grok_confidence) / num_valid_confidences
         else:
             combined_confidence = 0.0
 
-        # Exit intentie: SELL (of SHORT als je short selling doet en dit een long trade is)
-        # Voor nu, focus op SELL als exit signaal voor een LONG trade.
+        # AI exit intentie: 'SELL' voor een LONG trade
         ai_exit_intent = False
-        if gpt_intentie == "SELL" and grok_intentie == "SELL":
-            ai_exit_intent = True
-        elif gpt_intentie == "SELL" and (grok_intentie == "HOLD" or not grok_intentie) and gpt_confidence > 0.6: # GPT is more confident
-            ai_exit_intent = True
-        elif grok_intentie == "SELL" and (gpt_intentie == "HOLD" or not gpt_intentie) and grok_confidence > 0.6: # Grok is more confident
+        if (gpt_intentie == "SELL" and grok_intentie == "SELL") or \
+            (gpt_intentie == "SELL" and grok_intentie in ["HOLD", ""] and gpt_confidence > 0.6) or \
+            (grok_intentie == "SELL" and gpt_intentie in ["HOLD", ""] and grok_confidence > 0.6):
             ai_exit_intent = True
 
 
-        # [cite_start]AI exit criteria: 'exitConvictionDropTrigger' [cite: 66]
-        exit_conviction_drop_threshold = 0.4 # Voorbeeld, kan geleerd worden [cite: 66]
+        # [cite_start]AI exit criteria: 'exitConvictionDropTrigger' [cite: 68, 138, 212, 280, 357, 427, 501]
+        # [cite_start]exit_conviction_drop_threshold = 0.4 # Wanneer confidence te laag wordt → exit [cite: 68, 138, 212, 280, 357, 427, 501]
+        exit_conviction_drop_threshold = 0.4
 
         # Check voor bearish patronen (uit cnn_patterns.py)
         pattern_data = await self.cnn_patterns_detector.detect_patterns_multi_timeframe(candles_by_timeframe, symbol)
@@ -129,24 +126,26 @@ class ExitOptimizer:
         if pattern_data and pattern_data.get('patterns'):
             bearish_patterns = ['bearishEngulfing', 'CDLENGULFING', 'eveningStar', 'CDLEVENINGSTAR',
                                 'threeBlackCrows', 'CDL3BLACKCROWS', 'darkCloudCover', 'CDLDARKCLOUDCOVER',
-                                'bearishRSIDivergence', 'CDLHANGINGMAN', 'doubleTop']
+                                'bearishRSIDivergence', 'CDLHANGINGMAN', 'doubleTop', 'descendingTriangle', 'parabolicCurveDown']
             if any(p.upper() in (key.upper() for key in pattern_data['patterns'].keys()) for p in bearish_patterns):
                 has_strong_bearish_pattern = True
                 logger.info(f"Sterk bearish CNN patroon gedetecteerd voor {symbol} (exit eval): {pattern_data['patterns']}")
 
 
         # AI-besluitvormingslogica voor exit
-        # Een lage AI confidence kan ook een reden zijn om te exiten, vooral als de trade in winst is.
         current_profit_pct = trade.get('profit_pct', 0.0)
 
-        if combined_confidence < exit_conviction_drop_threshold and current_profit_pct > 0.01 : # Als in winst en AI is onzeker
+        # Scenario 1: AI is onzeker en trade is in winst (take profit)
+        if combined_confidence < exit_conviction_drop_threshold and current_profit_pct > 0.005: # Minimum 0.5% winst
             logger.info(f"[ExitOptimizer] ✅ Exit door lage AI confidence ({combined_confidence:.2f} < {exit_conviction_drop_threshold}) en trade in winst ({current_profit_pct:.2%}) voor {symbol}.")
             return {"exit": True, "reason": "low_ai_confidence_profit_taking", "confidence": combined_confidence, "pattern_details": pattern_data.get('patterns', {})}
 
-        if has_strong_bearish_pattern and combined_confidence > 0.5: # Bevestiging van patroon + redelijke confidence
+        # Scenario 2: Sterk bearish patroon met AI-bevestiging (zelfs als confidence niet extreem laag is)
+        if has_strong_bearish_pattern and combined_confidence > 0.5: # Bearish patroon en AI is ten minste matig zeker
              logger.info(f"[ExitOptimizer] ✅ Exit door sterk bearish patroon en AI confidence {combined_confidence:.2f} voor {symbol}.")
              return {"exit": True, "reason": "bearish_pattern_with_ai_confirmation", "confidence": combined_confidence, "pattern_details": pattern_data.get('patterns', {})}
 
+        # Scenario 3: AI wil verkopen met voldoende confidence
         if ai_exit_intent and combined_confidence > 0.6: # AI wil verkopen met goede confidence
             logger.info(f"[ExitOptimizer] ✅ Exit door AI verkoop intentie (GPT: {gpt_intentie}, Grok: {grok_intentie}) met confidence {combined_confidence:.2f} voor {symbol}.")
             return {"exit": True, "reason": "ai_sell_intent_confident", "confidence": combined_confidence, "pattern_details": pattern_data.get('patterns', {})}
@@ -163,17 +162,14 @@ class ExitOptimizer:
     ) -> Optional[Dict[str, float]]:
         """
         Optimaliseert dynamisch de trailing stop loss op basis van AI-inzichten.
-        [cite_start]Gebruikt AI-afgeleide SL op basis van context[cite: 58].
-        [cite_start]Freqtrade heeft trailing_stop en dynamic_stop_loss[cite: 37]. We sturen deze AI-gedreven aan.
+        [cite_start]Gebruikt AI-afgeleide SL op basis van context. [cite: 59, 129, 202, 271, 348, 418, 491, 560]
+        [cite_start][cite: 38] Freqtrade heeft trailing_stop en dynamic_stop_loss. [cite_start]We sturen deze AI-gedreven aan. [cite: 372]
         Retourneert een dictionary met Freqtrade compatibele stop loss parameters of None.
         """
         logger.debug(f"[ExitOptimizer] Optimaliseren trailing stop loss voor {symbol} (trade_id: {trade.get('id', 'N/A')})...")
 
-        current_bias = self.bias_reflector.get_bias_score(symbol, current_strategy_id)
-        if self.confidence_engine:
-            current_confidence = self.confidence_engine.get_confidence_score(symbol, current_strategy_id)
-        else:
-            current_confidence = 0.5
+        learned_bias = self.bias_reflector.get_bias_score(symbol, current_strategy_id)
+        learned_confidence = self.confidence_engine.get_confidence_score(symbol, current_strategy_id) if self.confidence_engine else 0.5
 
 
         tf_attr = dataframe.attrs.get('timeframe', '5m')
@@ -186,8 +182,8 @@ class ExitOptimizer:
                 candles_by_timeframe=candles_by_timeframe,
                 symbol=symbol,
                 prompt_type='riskManagement',
-                current_bias=current_bias,
-                current_confidence=current_confidence,
+                current_bias=learned_bias,
+                current_confidence=learned_confidence,
                 trade_context=trade
             )
         if not prompt:
@@ -203,10 +199,10 @@ class ExitOptimizer:
 
         for resp in [gpt_response, grok_response]:
             resp_confidence = resp.get('confidence', 0.0) or 0.0
-            if resp_confidence > 0.55 and resp_confidence > highest_confidence_for_sl: # Only consider reasonably confident advice
+            if resp_confidence > 0.55 and resp_confidence > highest_confidence_for_sl:
                 # Example parsing: search for "stop loss at X%" or "trailing stop X%"
-                # This needs to be robust and match the expected AI output format
-                sl_match = re.search(r"(?:stop loss|stoploss|sl|trailing stop|tsl)\s*(?:at|is|to|should be|of)?\s*(\d+(?:\.\d+)?)\s*%", resp.get('reflectie', ''), re.IGNORECASE)
+                # Regex updated to be more flexible with separators like 'op' or ':'
+                sl_match = re.search(r"(?:stop loss|stoploss|sl|trailing stop|tsl)(?:\s*(?:at|is|to|should be|of|op|[:])\s*)?(\d+(?:\.\d+)?)\s*%", resp.get('reflectie', ''), re.IGNORECASE)
                 if sl_match:
                     try:
                         sl_value = float(sl_match.group(1)) / 100.0 # Convert percentage to decimal
@@ -219,43 +215,34 @@ class ExitOptimizer:
 
 
         if ai_recommended_sl_pct is not None:
-            # Freqtrade's stoploss is een negatief percentage (-0.10 voor 10% onder entry)
+            # Freqtrade's stoploss is een negatief percentage (-0.10 for 10% below entry)
             # Trailing stop trigger ('trailing_stop_positive') is een positief percentage (vanaf welke winst begint trailing)
-            # Trailing stop offset ('trailing_stop_positive_offset') is de daadwerkelijke trail (bv. 0.02 voor 2% onder de piek)
+            # Trailing stop offset ('trailing_stop_positive_offset') is de daadwerkelijke trail (bv. 0.02 for 2% onder de piek)
 
             # AI-gestuurde Dynamic SL aanpassing:
             # We passen hier 'trailing_stop_positive_offset' aan.
             # De 'trailing_stop_positive' (trigger) kan een vaste waarde zijn of ook AI-gedreven.
 
-            # Basis TSL offset van AI
             adjusted_trailing_offset = ai_recommended_sl_pct
 
             # Pas TSL offset aan op basis van huidige geleerde confidence en bias
             # Hogere confidence/positieve bias -> mogelijk een strakkere trail (kleinere offset)
             # Lagere confidence/negatieve bias -> mogelijk een ruimere trail (grotere offset)
             # Factor: 1.0 is neutraal. < 1.0 is strakker, > 1.0 is ruimer.
-            # current_confidence (0-1), current_bias (0-1, 0.5 is neutraal)
-            # Map bias from 0-1 to e.g. 0.8-1.2 for factor: (bias - 0.5) * 0.4 + 1 = (0.7-0.5)*0.4+1 = 0.08+1 = 1.08
-            #                                                  (0.3-0.5)*0.4+1 = -0.08+1 = 0.92
-            bias_factor = 1.0 - ((current_bias - 0.5) * 0.2) # e.g. bias 0.7 -> 0.96 (strakker), bias 0.3 -> 1.04 (ruimer)
-            confidence_factor = 1.0 - ((current_confidence - 0.5) * 0.2) # e.g. conf 0.8 -> 0.94 (strakker), conf 0.2 -> 1.06 (ruimer)
+            bias_factor = 1.0 - ((learned_bias - 0.5) * 0.2)
+            confidence_factor = 1.0 - ((learned_confidence - 0.5) * 0.2)
 
             final_trailing_offset = adjusted_trailing_offset * bias_factor * confidence_factor
             final_trailing_offset = max(0.005, min(final_trailing_offset, 0.10)) # Clamp between 0.5% and 10%
 
             # De harde stoploss kan ook worden aangepast, maar is vaak een fallback.
-            # Laten we zeggen dat de AI SL advies ook de harde SL beinvloedt.
-            # Een harde SL die iets ruimer is dan de trail.
-            hard_stoploss_value = -(final_trailing_offset * 1.5) # e.g., 1.5x de TSL offset
-            hard_stoploss_value = max(-0.20, min(hard_stoploss_value, -0.01)) # Clamp hard SL
+            hard_stoploss_value = -(final_trailing_offset * 1.5)
+            hard_stoploss_value = max(-0.20, min(hard_stoploss_value, -0.01))
 
-            # Trailing stop trigger (wanneer te activeren)
-            # Kan ook AI-gedreven zijn, of een vaste waarde zoals 0.005 (0.5% winst)
             trailing_stop_trigger = 0.005
-            # Als de trade al flink in de winst is, kan de trigger hoger zijn.
             current_profit_pct = trade.get('profit_pct', 0.0)
-            if current_profit_pct > 0.05: # Meer dan 5% winst
-                trailing_stop_trigger = current_profit_pct * 0.5 # e.g., start trailing at half the current profit
+            if current_profit_pct > 0.05:
+                trailing_stop_trigger = current_profit_pct * 0.5
 
             logger.info(f"[ExitOptimizer] AI SL Optimalisatie voor {symbol}: "
                         f"Hard SL: {hard_stoploss_value:.2%}, "
@@ -266,7 +253,6 @@ class ExitOptimizer:
                 "stoploss": hard_stoploss_value,
                 "trailing_stop_positive_offset": final_trailing_offset,
                 "trailing_stop_positive": trailing_stop_trigger
-                # Freqtrade gebruikt ook 'use_custom_stoploss': True om deze waarden te laten overrulen
             }
 
         logger.debug(f"[ExitOptimizer] Geen AI-advies voor SL-optimalisatie voor {symbol} of confidence te laag.")
@@ -274,19 +260,15 @@ class ExitOptimizer:
 
 # Voorbeeld van hoe je het zou kunnen gebruiken (voor testen)
 if __name__ == "__main__":
-    # Corrected path for .env when running this script directly
     dotenv_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '.env')
     dotenv.load_dotenv(dotenv_path)
 
-    # Setup basic logging for the test
     import sys
-    # import json # Already imported at the top
     logging.basicConfig(level=logging.INFO,
                         format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
                         handlers=[logging.StreamHandler(sys.stdout)])
 
 
-    # Mock Freqtrade DataFrame (zelfde als in entry_decider)
     def create_mock_dataframe_for_exit(timeframe: str = '5m', num_candles: int = 100) -> pd.DataFrame:
         data = []
         now = datetime.utcnow()
@@ -331,31 +313,42 @@ if __name__ == "__main__":
 
         mock_df = create_mock_dataframe_for_exit(timeframe='5m', num_candles=60)
 
-        # Mock dependencies that might be empty
-        if optimizer.prompt_builder is None:
-            class MockPromptBuilder:
-                async def generate_prompt_with_data(self, **kwargs): return f"Mock prompt for {kwargs.get('symbol','N/A')} ({kwargs.get('prompt_type','N/A')})"
-            optimizer.prompt_builder = MockPromptBuilder()
-        if optimizer.confidence_engine is None:
-            class MockConfidenceEngine:
-                def get_confidence_score(self, t, s): return 0.75 # Needs two args
-            optimizer.confidence_engine = MockConfidenceEngine()
+        # Store original methods
+        original_prompt_builder_generate = optimizer.prompt_builder.generate_prompt_with_data if optimizer.prompt_builder else None
+        original_gpt_ask = optimizer.gpt_reflector.ask_ai
+        original_grok_ask = optimizer.grok_reflector.ask_grok
+        original_cnn_detect = optimizer.cnn_patterns_detector.detect_patterns_multi_timeframe
+        original_bias_get = optimizer.bias_reflector.get_bias_score
+        original_conf_get = optimizer.confidence_engine.get_confidence_score if optimizer.confidence_engine else None
 
-        # Patch BiasReflector and ConfidenceEngine for predictable test values
+
+        # Mock dependencies
+        if optimizer.prompt_builder:
+            async def mock_generate_prompt_general_fixed(**kwargs): # Use **kwargs for flexibility, ensure it's async
+                await asyncio.sleep(0.01)
+                return f"Mock prompt for {kwargs.get('symbol')} ({kwargs.get('prompt_type')})"
+            optimizer.prompt_builder.generate_prompt_with_data = mock_generate_prompt_general_fixed
         optimizer.bias_reflector.get_bias_score = lambda t, s: 0.4 # Slightly bearish learned bias
-        if optimizer.confidence_engine: # Patch only if it was initialized
+        if optimizer.confidence_engine:
             optimizer.confidence_engine.get_confidence_score = lambda t, s: 0.6 # Moderate learned confidence
 
         # --- Test should_exit ---
         print("\n--- Test ExitOptimizer (should_exit) ---")
         # Scenario 1: AI suggests SELL with good confidence
-        async def mock_ask_ai_sell(prompt, context):
+        async def mock_ask_gpt_sell(prompt, context):
+            await asyncio.sleep(0.01)
             return {"reflectie": "Markt keert. Verkoop nu.", "confidence": 0.75, "intentie": "SELL", "emotie": "bezorgd"}
-        optimizer.gpt_reflector.ask_ai = mock_ask_ai_sell
-        optimizer.grok_reflector.ask_ai = mock_ask_ai_sell
-        async def mock_cnn_bearish(candles_by_tf, symbol): return {"patterns": {"bearishEngulfing": True}}
-        optimizer.cnn_patterns_detector.detect_patterns_multi_timeframe = mock_cnn_bearish
+        optimizer.gpt_reflector.ask_ai = mock_ask_gpt_sell
 
+        async def mock_ask_grok_sell(prompt, context):
+            await asyncio.sleep(0.01)
+            return {"reflectie": "Markt ziet er zwak uit. Exit.", "confidence": 0.7, "intentie": "SELL", "emotie": "bezorgd"}
+        optimizer.grok_reflector.ask_grok = mock_ask_grok_sell
+
+        async def mock_detect_cnn_no_patterns_for_sell_test(cbt, s): # Renamed for clarity
+            await asyncio.sleep(0.01)
+            return {"patterns": {}} # No patterns for this specific test case
+        optimizer.cnn_patterns_detector.detect_patterns_multi_timeframe = mock_detect_cnn_no_patterns_for_sell_test
 
         exit_decision_sell = await optimizer.should_exit(mock_df, mock_trade_profitable, test_symbol, test_strategy_id)
         print("Exit Besluit (AI SELL):", json.dumps(exit_decision_sell, indent=2, default=str))
@@ -363,25 +356,56 @@ if __name__ == "__main__":
         assert "ai_sell_intent_confident" in exit_decision_sell['reason']
 
         # Scenario 2: AI low confidence while in profit
-        async def mock_ask_ai_low_conf(prompt, context):
+        async def mock_ask_gpt_low_conf(prompt, context):
+            await asyncio.sleep(0.01)
             return {"reflectie": "Onzeker beeld.", "confidence": 0.3, "intentie": "HOLD", "emotie": "neutraal"}
-        optimizer.gpt_reflector.ask_ai = mock_ask_ai_low_conf
-        optimizer.grok_reflector.ask_ai = mock_ask_ai_low_conf
-        optimizer.cnn_patterns_detector.detect_patterns_multi_timeframe = async def mock_cnn_neutral(c,s): return {"patterns":{}} # No strong patterns
+        optimizer.gpt_reflector.ask_ai = mock_ask_gpt_low_conf
+
+        async def mock_ask_grok_low_conf(prompt, context):
+            await asyncio.sleep(0.01)
+            return {"reflectie": "Geen duidelijk signaal.", "confidence": 0.35, "intentie": "HOLD", "emotie": "onzeker"}
+        optimizer.grok_reflector.ask_grok = mock_ask_grok_low_conf
+
+        async def mock_detect_cnn_no_patterns(cbt,s):
+            await asyncio.sleep(0.01)
+            return {"patterns":{}}
+        optimizer.cnn_patterns_detector.detect_patterns_multi_timeframe = mock_detect_cnn_no_patterns
 
         exit_decision_low_conf_profit = await optimizer.should_exit(mock_df, mock_trade_profitable, test_symbol, test_strategy_id)
         print("Exit Besluit (Low AI Conf in Profit):", json.dumps(exit_decision_low_conf_profit, indent=2, default=str))
         assert exit_decision_low_conf_profit['exit'] is True
         assert "low_ai_confidence_profit_taking" in exit_decision_low_conf_profit['reason']
 
+        # Scenario 3: No strong signal to exit (should return false)
+        async def mock_ask_gpt_hold(prompt, context):
+            await asyncio.sleep(0.01)
+            return {"reflectie": "Markt stabiel.", "confidence": 0.7, "intentie": "HOLD", "emotie": "neutraal"}
+        optimizer.gpt_reflector.ask_ai = mock_ask_gpt_hold
+
+        async def mock_ask_grok_hold(prompt, context):
+            await asyncio.sleep(0.01)
+            return {"reflectie": "Geen reden tot paniek.", "confidence": 0.65, "intentie": "HOLD", "emotie": "neutraal"}
+        optimizer.grok_reflector.ask_grok = mock_ask_grok_hold
+        optimizer.cnn_patterns_detector.detect_patterns_multi_timeframe = mock_detect_cnn_no_patterns # Re-use no patterns mock
+
+        exit_decision_no_signal = await optimizer.should_exit(mock_df, mock_trade_losing, test_symbol, test_strategy_id) # Losing trade, no strong exit signal
+        print("Exit Besluit (No AI Exit Signal):", json.dumps(exit_decision_no_signal, indent=2, default=str))
+        assert exit_decision_no_signal['exit'] is False
+        assert "no_ai_exit_signal" in exit_decision_no_signal['reason']
+
 
         # --- Test optimize_trailing_stop_loss ---
         print("\n--- Test ExitOptimizer (optimize_trailing_stop_loss) ---")
         # Scenario: AI recommends a specific SL percentage
-        async def mock_ask_ai_sl_recommend(prompt, context):
-            return {"reflectie": "Adviseer stop loss op 2.5% voor deze trade.", "confidence": 0.8, "intentie": "HOLD", "emotie": "voorzichtig"}
-        optimizer.gpt_reflector.ask_ai = mock_ask_ai_sl_recommend
-        optimizer.grok_reflector.ask_ai = mock_ask_ai_sl_recommend # Both recommend for higher chance
+        async def mock_ask_gpt_sl(prompt, context):
+            await asyncio.sleep(0.01)
+            return {"reflectie": "Adviseer stop loss op 2.5% voor deze trade. Trailing stop trigger at 0.5%, offset 1%.", "confidence": 0.8, "intentie": "HOLD", "emotie": "voorzichtig"}
+        optimizer.gpt_reflector.ask_ai = mock_ask_gpt_sl
+
+        async def mock_ask_grok_sl(prompt, context):
+            await asyncio.sleep(0.01)
+            return {"reflectie": "Aanbevolen stoploss: 2.5%.", "confidence": 0.75, "intentie": "HOLD", "emotie": "neutraal"}
+        optimizer.grok_reflector.ask_grok = mock_ask_grok_sl
 
 
         sl_optimization_result = await optimizer.optimize_trailing_stop_loss(mock_df, mock_trade_profitable, test_symbol, test_strategy_id)
@@ -389,6 +413,17 @@ if __name__ == "__main__":
         assert sl_optimization_result is not None
         assert 'stoploss' in sl_optimization_result
         assert 'trailing_stop_positive_offset' in sl_optimization_result
+        assert 'trailing_stop_positive' in sl_optimization_result
+
+        # Restore original methods
+        if optimizer.prompt_builder:
+            optimizer.prompt_builder.generate_prompt_with_data = original_prompt_builder_generate
+        optimizer.gpt_reflector.ask_ai = original_gpt_ask
+        optimizer.grok_reflector.ask_ai = original_grok_ask # Corrected: was ask_ai, should be ask_grok for grok_reflector
+        optimizer.cnn_patterns_detector.detect_patterns_multi_timeframe = original_cnn_detect
+        optimizer.bias_reflector.get_bias_score = original_bias_get
+        if optimizer.confidence_engine:
+            optimizer.confidence_engine.get_confidence_score = original_conf_get
 
 
     asyncio.run(run_test_exit_optimizer())
