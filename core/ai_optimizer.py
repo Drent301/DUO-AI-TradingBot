@@ -110,11 +110,14 @@ class AIOptimizer:
 
         preferred_pairs_df = pair_performance.sort_values(by='mean', ascending=False)
 
-        top_n_pairs = 5
+        # Fetch top_n_pairs from ParamsManager
+        top_n_pairs = self.strategy_manager.params_manager.get_param("preferredPairsCount", default=5)
+        logger.info(f"[AIOptimizer] Using preferredPairsCount: {top_n_pairs} (Default: 5)")
+
         preferred_pairs = preferred_pairs_df.head(top_n_pairs).index.tolist()
 
         if preferred_pairs:
-            logger.info(f"Geleerde preferredPairs: {preferred_pairs}")
+            logger.info(f"Geleerde preferredPairs (top {top_n_pairs}): {preferred_pairs}")
             await self.strategy_manager.params_manager.set_param("preferredPairs", preferred_pairs, strategy_id=None)
             await self._log_optimization_activity("learn_preferred_pairs", {"preferredPairs": preferred_pairs})
         else:
@@ -293,16 +296,33 @@ if __name__ == "__main__":
     async def run_test_ai_optimizer():
         optimizer = AIOptimizer()
 
-        test_symbols = ["ETH/USDT", "ZEN/USDT", "LSK/BTC"]
+        test_symbols = ["ETH/USDT", "ZEN/USDT", "LSK/BTC", "ADA/USDT"] # Added ADA
         test_timeframes = ["1h"]
 
-        print("\n--- Test AIOptimizer: run_periodic_optimization ---")
+        print("\n--- Test AIOptimizer: run_periodic_optimization (Default preferredPairsCount=5) ---")
+        # Ensure default is used first if not set
+        await optimizer.strategy_manager.params_manager.set_param("preferredPairsCount", None) # Clear to ensure default is tested
         await optimizer.run_periodic_optimization(test_symbols, test_timeframes)
+
+        preferred_pairs_after_opt_default = await optimizer.strategy_manager.params_manager.get_param("preferredPairs")
+        print(f"Geleerde preferredPairs na optimalisatie (Default Count): {preferred_pairs_after_opt_default}")
+        assert len(preferred_pairs_after_opt_default) <= 5
+        # Based on dummy data: ZEN (avg profit ~0.038), ADA (avg profit ~0.0092), ETH (no recent DUOAI), LSK (1 trade)
+        # Expected default top 2: ZEN/USDT, ADA/USDT (if LSK is filtered by count)
+        assert "ZEN/USDT" in preferred_pairs_after_opt_default
+        assert "ADA/USDT" in preferred_pairs_after_opt_default
+
+
+        print("\n--- Test AIOptimizer: run_periodic_optimization (Custom preferredPairsCount=1) ---")
+        await optimizer.strategy_manager.params_manager.set_param("preferredPairsCount", 1)
+        await optimizer.run_periodic_optimization(test_symbols, test_timeframes) # Rerun learning part
+
+        preferred_pairs_after_opt_custom = await optimizer.strategy_manager.params_manager.get_param("preferredPairs")
+        print(f"Geleerde preferredPairs na optimalisatie (Custom Count=1): {preferred_pairs_after_opt_custom}")
+        assert len(preferred_pairs_after_opt_custom) == 1
+        assert "ZEN/USDT" in preferred_pairs_after_opt_custom # ZEN has highest avg profit in dummy data
 
         print("\nOptimalisatiecyclus voltooid. Controleer de logs en memory-bestanden.")
 
-        preferred_pairs_after_opt = await optimizer.strategy_manager.params_manager.get_param("preferredPairs")
-        print(f"Geleerde preferredPairs na optimalisatie: {preferred_pairs_after_opt}")
-        assert "ZEN/USDT" in preferred_pairs_after_opt or "LSK/BTC" in preferred_pairs_after_opt
 
     asyncio.run(run_test_ai_optimizer())

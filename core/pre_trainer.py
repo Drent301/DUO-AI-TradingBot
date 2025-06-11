@@ -25,6 +25,7 @@ TIME_EFFECTIVENESS_FILE = os.path.join(MEMORY_DIR, 'time_effectiveness.json')
 # Use 'data/models' as specified for PyTorch model
 MODELS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'data', 'models')
 CNN_MODEL_PATH = os.path.join(MODELS_DIR, 'cnn_patterns_model.pth')
+CNN_SCALER_PARAMS_PATH = os.path.join(MODELS_DIR, 'cnn_scaler_params.json') # Path for scaler parameters
 
 os.makedirs(MEMORY_DIR, exist_ok=True)
 os.makedirs(MODELS_DIR, exist_ok=True) # Ensure MODELS_DIR is created (especially data/models)
@@ -279,9 +280,20 @@ class PreTrainer:
         try:
             torch.save(model.state_dict(), CNN_MODEL_PATH)
             logger.info(f"PyTorch model '{model_type}' succesvol getraind en opgeslagen op {CNN_MODEL_PATH}")
+
+            # Save scaler parameters
+            scaler_params = {
+                'feature_columns': feature_columns,
+                'min_vals': min_vals.tolist(),
+                'max_vals': max_vals.tolist()
+            }
+            with open(CNN_SCALER_PARAMS_PATH, 'w') as f:
+                json.dump(scaler_params, f, indent=4)
+            logger.info(f"CNN scaler parameters opgeslagen op {CNN_SCALER_PARAMS_PATH}")
+
         except Exception as e:
-            logger.error(f"Fout bij opslaan PyTorch model: {e}")
-            return # Stop if model cannot be saved
+            logger.error(f"Fout bij opslaan PyTorch model of scaler parameters: {e}")
+            return # Stop if model or scaler cannot be saved
 
         # Log pretrain activity
         # Pass len(X) as data_size, representing number of sequences
@@ -295,7 +307,8 @@ class PreTrainer:
             "model_type": model_type,
             "data_size": data_size, # This now represents number of sequences used for training
             "status": "completed_pytorch_training",
-            "model_path_saved": CNN_MODEL_PATH # Log the fixed path
+            "model_path_saved": CNN_MODEL_PATH, # Log the fixed path
+            "scaler_params_path_saved": CNN_SCALER_PARAMS_PATH # Log scaler params path
         }
         logs = []
         try:
@@ -452,5 +465,15 @@ if __name__ == "__main__":
             print(f"Modelgrootte: {os.path.getsize(CNN_MODEL_PATH)} bytes")
         else:
             print(f"FOUT: PyTorch CNN model NIET opgeslagen op: {CNN_MODEL_PATH}")
+
+        if os.path.exists(CNN_SCALER_PARAMS_PATH):
+            print(f"SUCCES: CNN scaler parameters opgeslagen op: {CNN_SCALER_PARAMS_PATH}")
+            with open(CNN_SCALER_PARAMS_PATH, 'r') as f:
+                scaler_params_content = json.load(f)
+            print(f"Scaler params content (eerste 5 features min/max):")
+            for i, col in enumerate(scaler_params_content['feature_columns'][:5]):
+                print(f"  {col}: min={scaler_params_content['min_vals'][i]:.4f}, max={scaler_params_content['max_vals'][i]:.4f}")
+        else:
+            print(f"FOUT: CNN scaler parameters NIET opgeslagen op: {CNN_SCALER_PARAMS_PATH}")
 
     asyncio.run(run_test_pre_trainer())
