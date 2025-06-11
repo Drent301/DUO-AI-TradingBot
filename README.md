@@ -165,7 +165,7 @@ De workflow is grotendeels geïmplementeerd op algoritmisch niveau en de AI-modu
     * **Optimalisatie:** Documenteer de beperking en adviseer periodieke handmatige synchronisatie of onderzoek geavanceerde Freqtrade extensies voor dynamisch pairlist management.
 
 -   **Teststructuur (Formele Unit Tests):**
-    * **Ontbrekend:** Hoewel de `if __name__ == "__main__":` blokken zijn toegevoegd voor elk Python-bestand, is een **formele, geautomatiseerde testsuite met `pytest` cruciaal** voor robuustheid en kwaliteitsborging.
+    * **Ontbrekend:** Hoewel de `if __name__ == "__main__":` blokken zijn toegevoegd voor elk Python-bestand, is een **formele, geautomatiseerde testsuite cruciaal** voor robuustheid en kwaliteitsborging. Frameworks zoals [pytest](https://docs.pytest.org/en/stable/) of Python's ingebouwde [unittest](https://docs.python.org/3/library/unittest.html) module zouden hiervoor gebruikt kunnen worden.
     * **Prioriteit:** **Hoog**.
 
 ## Toekomstige Ontwikkeling
