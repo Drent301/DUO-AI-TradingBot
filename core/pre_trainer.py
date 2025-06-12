@@ -18,6 +18,8 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import DataLoader, TensorDataset
+from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score
+from sklearn.model_selection import train_test_split # Ensure this is present
 
 MEMORY_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'memory')
 PRETRAIN_LOG_FILE = os.path.join(MEMORY_DIR, 'pre_train_log.json')
@@ -244,43 +246,90 @@ class PreTrainer:
         # Reshape back to 3D: (num_samples, sequence_length, num_features)
         X_normalized = X_normalized_reshaped.reshape(X.shape)
 
-        # Tensor Conversion
-        # PyTorch CNNs (Conv1d) expect input: (batch_size, input_channels, sequence_length)
-        # Here, num_features becomes input_channels.
         X_tensor = torch.tensor(X_normalized, dtype=torch.float32).permute(0, 2, 1)
-        y_tensor = torch.tensor(y, dtype=torch.long) # CrossEntropyLoss expects Long type for labels
+        y_tensor = torch.tensor(y, dtype=torch.long)
 
-        # DataLoader
-        dataset = TensorDataset(X_tensor, y_tensor)
-        dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=True)
+        # Train-Validation Split
+        X_train, X_val, y_train, y_val = train_test_split(X_tensor, y_tensor, test_size=0.2, random_state=42, stratify=y_tensor if np.sum(y)>1 else None) # stratify if possible
+
+        train_dataset = TensorDataset(X_train, y_train)
+        val_dataset = TensorDataset(X_val, y_val)
+
+        train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
+        val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False)
 
         # Model, Criterion, Optimizer
-        input_channels = X_tensor.shape[1] # Number of features
+        input_channels = X_train.shape[1] # Number of features
         model = SimpleCNN(input_channels=input_channels, num_classes=2) # 2 classes: 0 or 1
-        model._set_num_classes_for_fc_init(2) # Pass num_classes for dynamic FC layer init
+        model._set_num_classes_for_fc_init(2)
 
         criterion = nn.CrossEntropyLoss()
         optimizer = optim.Adam(model.parameters(), lr=learning_rate)
 
+        best_val_loss = float('inf')
+        best_val_accuracy = 0.0
+        best_val_precision = 0.0
+        best_val_recall = 0.0
+        best_val_f1 = 0.0
+
         logger.info(f"Start trainingsloop voor {num_epochs} epochs...")
         for epoch in range(num_epochs):
-            epoch_loss = 0.0
-            for batch_idx, (data, targets) in enumerate(dataloader):
+            model.train()
+            train_loss = 0.0
+            for batch_idx, (data, targets) in enumerate(train_loader):
                 optimizer.zero_grad()
                 outputs = model(data)
                 loss = criterion(outputs, targets)
                 loss.backward()
                 optimizer.step()
-                epoch_loss += loss.item()
+                train_loss += loss.item()
 
-            avg_epoch_loss = epoch_loss / len(dataloader)
-            logger.info(f"Epoch [{epoch+1}/{num_epochs}], Gemiddelde Loss: {avg_epoch_loss:.4f}")
+            avg_train_loss = train_loss / len(train_loader)
 
-        # Save Model
+            # Validation phase
+            model.eval()
+            val_loss = 0.0
+            all_preds, all_targets = [], []
+            with torch.no_grad():
+                for data, targets in val_loader:
+                    outputs = model(data)
+                    loss = criterion(outputs, targets)
+                    val_loss += loss.item()
+
+                    # Convert outputs to probabilities for class 1, then to predictions
+                    probs = torch.softmax(outputs, dim=1)[:, 1]
+                    predicted_labels = (probs > 0.5).long()
+
+                    all_preds.extend(predicted_labels.cpu().numpy())
+                    all_targets.extend(targets.cpu().numpy())
+
+            avg_val_loss = val_loss / len(val_loader)
+            val_accuracy = accuracy_score(all_targets, all_preds)
+            val_precision = precision_score(all_targets, all_preds, average='binary', zero_division=0)
+            val_recall = recall_score(all_targets, all_preds, average='binary', zero_division=0)
+            val_f1 = f1_score(all_targets, all_preds, average='binary', zero_division=0)
+
+            logger.debug(
+                f"Epoch [{epoch+1}/{num_epochs}], Training Loss: {avg_train_loss:.4f}, "
+                f"Validation Loss: {avg_val_loss:.4f}, Validation Accuracy: {val_accuracy:.4f}, "
+                f"Validation Precision: {val_precision:.4f}, Validation Recall: {val_recall:.4f}, "
+                f"Validation F1: {val_f1:.4f} for {model_type}"
+            )
+
+            if avg_val_loss < best_val_loss:
+                best_val_loss = avg_val_loss
+                best_val_accuracy = val_accuracy
+                best_val_precision = val_precision
+                best_val_recall = val_recall
+                best_val_f1 = val_f1
+                torch.save(model.state_dict(), CNN_MODEL_PATH)
+                logger.debug(f"Model voor {model_type} opgeslagen. Val Loss: {best_val_loss:.4f}, Acc: {best_val_accuracy:.4f}, Prec: {best_val_precision:.4f}, Rec: {best_val_recall:.4f}, F1: {best_val_f1:.4f}")
+
+        # Save Model (this happens if last epoch was best, or to save final state regardless)
+        # The current logic saves only if val_loss improves. This is generally what we want.
         try:
-            torch.save(model.state_dict(), CNN_MODEL_PATH)
-            logger.info(f"PyTorch model '{model_type}' succesvol getraind en opgeslagen op {CNN_MODEL_PATH}")
-
+            # Ensure the best model is what's saved, which is handled by the check above.
+            logger.info(f"PyTorch model '{model_type}' training voltooid. Beste model opgeslagen op {CNN_MODEL_PATH}")
             # Save scaler parameters
             scaler_params = {
                 'feature_columns': feature_columns,
@@ -293,22 +342,38 @@ class PreTrainer:
 
         except Exception as e:
             logger.error(f"Fout bij opslaan PyTorch model of scaler parameters: {e}")
-            return # Stop if model or scaler cannot be saved
+            return
 
-        # Log pretrain activity
-        # Pass len(X) as data_size, representing number of sequences
-        await asyncio.to_thread(self._log_pretrain_activity, model_type, len(X))
+        # Log pre-training activiteit
+        await asyncio.to_thread(
+            self._log_pretrain_activity,
+            model_type=model_type, # Use the passed model_type
+            data_size=len(X_train) + len(X_val), # Total sequences used
+            best_val_loss=best_val_loss,
+            best_val_accuracy=best_val_accuracy,
+            best_val_precision=best_val_precision,
+            best_val_recall=best_val_recall,
+            best_val_f1=best_val_f1
+        )
+        logger.info(f"Pre-training voltooid voor {model_type}. Beste validatieverlies: {best_val_loss:.4f}, Beste nauwkeurigheid: {best_val_accuracy:.4f}")
+        # Return best_val_loss or a dict of all best metrics if needed by caller
+        return best_val_loss
 
 
-    def _log_pretrain_activity(self, model_type: str, data_size: int): # model_path removed
+    def _log_pretrain_activity(self, model_type: str, data_size: int, best_val_loss: float = None, best_val_accuracy: float = None, best_val_precision: float = None, best_val_recall: float = None, best_val_f1: float = None):
         """ Logt de pre-trainingsactiviteit. """
         entry = {
             "timestamp": datetime.now().isoformat(),
             "model_type": model_type,
-            "data_size": data_size, # This now represents number of sequences used for training
+            "data_size": data_size,
             "status": "completed_pytorch_training",
-            "model_path_saved": CNN_MODEL_PATH, # Log the fixed path
-            "scaler_params_path_saved": CNN_SCALER_PARAMS_PATH # Log scaler params path
+            "model_path_saved": CNN_MODEL_PATH,
+            "scaler_params_path_saved": CNN_SCALER_PARAMS_PATH,
+            "best_validation_loss": best_val_loss,
+            "best_validation_accuracy": best_val_accuracy,
+            "best_validation_precision": best_val_precision,
+            "best_validation_recall": best_val_recall,
+            "best_validation_f1": best_val_f1
         }
         logs = []
         try:
