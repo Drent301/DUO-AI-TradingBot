@@ -52,7 +52,21 @@ Een zelflerende, AI-gestuurde crypto trading bot, gebouwd bovenop Freqtrade, die
 
 2.  **Freqtrade Configuratie (`config/config.json`):**
     De basisconfiguratie is aanwezig. De volgende `pair_whitelist` in `config/config.json` is de definitieve, bijgewerkte lijst die momenteel door de bot wordt overwogen:
-    `"ETH/EUR", "BTC/EUR", "ZEN/EUR", "WETH/USDT", "USDC/USDT", "WBTC/USDT", "LINK/USDT", "UNI/USDT", "ZEN/BTC", "LSK/BTC", "ETH/BTC"`
+    ```json
+    [
+        "ETH/EUR",
+        "BTC/EUR",
+        "ZEN/EUR",
+        "WETH/USDT",
+        "USDC/USDT",
+        "WBTC/USDT",
+        "LINK/USDT",
+        "UNI/USDT",
+        "ZEN/BTC",
+        "LSK/BTC",
+        "ETH/BTC"
+    ]
+    ```
     De API-sleutels in `config.json` zijn placeholders en zullen door Freqtrade via de omgevingsvariabelen (geladen via `.env`) worden overschreven in live-modus.
     **Belangrijk:** Controleer de beschikbaarheid van paren zoals `LSK/BTC` op Bitvavo, aangezien niet alle exchanges alle cross-paren ondersteunen.
 
