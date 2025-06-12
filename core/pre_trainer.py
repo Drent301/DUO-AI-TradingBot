@@ -34,41 +34,49 @@ os.makedirs(MODELS_DIR, exist_ok=True) # Ensure MODELS_DIR is created (especiall
 
 # Define SimpleCNN class
 class SimpleCNN(nn.Module):
-    def __init__(self, input_channels, num_classes):
+    def __init__(self, input_channels, num_classes, sequence_length=30): # Added sequence_length, num_classes
         super(SimpleCNN, self).__init__()
-        self.conv1 = nn.Conv1d(in_channels=input_channels, out_channels=16, kernel_size=3, padding=1)
+        self.sequence_length = sequence_length # Store sequence_length
+        self.input_channels = input_channels # Store input_channels
+        self.num_classes = num_classes # Store num_classes
+
+        self.conv1 = nn.Conv1d(in_channels=self.input_channels, out_channels=16, kernel_size=3, padding=1)
         self.relu1 = nn.ReLU()
         self.pool1 = nn.MaxPool1d(kernel_size=2, stride=2)
         self.conv2 = nn.Conv1d(in_channels=16, out_channels=32, kernel_size=3, padding=1)
         self.relu2 = nn.ReLU()
         self.pool2 = nn.MaxPool1d(kernel_size=2, stride=2)
-        # Flattening will be done in forward pass dynamically
-        # The input size to the linear layer depends on the sequence length after pooling
-        # For sequence_length = 30:
-        # After pool1 (kernel_size=2, stride=2): 30 / 2 = 15
-        # After pool2 (kernel_size=2, stride=2): 15 / 2 = 7 (integer division for pooling output dim)
-        # So, self.fc1 = nn.Linear(32 * 7, num_classes) if sequence_length is fixed at 30
-        # If sequence_length varies, this needs to be calculated or use AdaptiveMaxPool1d
-        self.fc1 = None # Will be initialized in forward pass or based on a fixed sequence length
-        self.flatten_size = None # Store the dynamically calculated flatten size
+
+        # Calculate the flattened size for the linear layer using a dummy input
+        # Create a dummy input tensor with the specified sequence_length and input_channels
+        # Shape: (batch_size, input_channels, sequence_length) - batch_size can be 1 for this purpose
+        dummy_input = torch.randn(1, self.input_channels, self.sequence_length)
+
+        # Pass the dummy input through the convolutional and pooling layers
+        x_dummy = self.pool1(self.relu1(self.conv1(dummy_input)))
+        x_dummy = self.pool2(self.relu2(self.conv2(x_dummy)))
+
+        # Calculate the number of features after flattening
+        # x_dummy.shape will be (1, out_channels_conv2, sequence_length_after_pooling)
+        self.flatten_size = x_dummy.shape[1] * x_dummy.shape[2]
+
+        # Define the fully connected layer
+        self.fc = nn.Linear(self.flatten_size, self.num_classes) # Renamed fc1 to fc for clarity
 
     def forward(self, x):
+        # Pass input through conv and pool layers
         x = self.pool1(self.relu1(self.conv1(x)))
         x = self.pool2(self.relu2(self.conv2(x)))
 
-        if self.fc1 is None:
-            # Dynamically create the fully connected layer based on the input's shape
-            self.flatten_size = x.shape[1] * x.shape[2]
-            self.fc1 = nn.Linear(self.flatten_size, self.num_classes_for_fc_init) # requires num_classes at init
-            self.fc1.to(x.device) # Ensure fc1 is on the same device as x
+        # Flatten the output from conv/pool layers
+        # The view shape is (batch_size, flatten_size)
+        x = x.view(-1, self.flatten_size)
 
-        x = x.view(-1, self.flatten_size) # Flatten the tensor
-        x = self.fc1(x)
+        # Pass through the fully connected layer
+        x = self.fc(x)
         return x
 
-    def _set_num_classes_for_fc_init(self, num_classes):
-        # Helper to pass num_classes to fc layer initialization if done dynamically
-        self.num_classes_for_fc_init = num_classes
+# Removed _set_num_classes_for_fc_init as num_classes is now handled in __init__
 
 
 class PreTrainer:
@@ -260,8 +268,9 @@ class PreTrainer:
 
         # Model, Criterion, Optimizer
         input_channels = X_train.shape[1] # Number of features
-        model = SimpleCNN(input_channels=input_channels, num_classes=2) # 2 classes: 0 or 1
-        model._set_num_classes_for_fc_init(2)
+        # sequence_length is already defined and fetched from params_manager
+        model = SimpleCNN(input_channels=input_channels, num_classes=2, sequence_length=sequence_length)
+        # model._set_num_classes_for_fc_init(2) # No longer needed
 
         criterion = nn.CrossEntropyLoss()
         optimizer = optim.Adam(model.parameters(), lr=learning_rate)
@@ -334,7 +343,8 @@ class PreTrainer:
             scaler_params = {
                 'feature_columns': feature_columns,
                 'min_vals': min_vals.tolist(),
-                'max_vals': max_vals.tolist()
+                'max_vals': max_vals.tolist(),
+                'sequence_length': sequence_length # Add sequence_length to scaler_params
             }
             with open(CNN_SCALER_PARAMS_PATH, 'w') as f:
                 json.dump(scaler_params, f, indent=4)
