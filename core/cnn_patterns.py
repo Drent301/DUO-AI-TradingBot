@@ -16,22 +16,33 @@ logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
 
 class SimpleCNN(nn.Module):
-    def __init__(self, input_channels, num_classes):
+    def __init__(self, input_channels, num_classes, sequence_length=30): # Added sequence_length
         super(SimpleCNN, self).__init__()
-        self.conv1 = nn.Conv1d(in_channels=input_channels, out_channels=16, kernel_size=3, padding=1)
-        self.relu1 = nn.ReLU()
-        self.pool1 = nn.MaxPool1d(kernel_size=2)
+        self.sequence_length = sequence_length
+        self.input_channels = input_channels
+        self.num_classes = num_classes
 
+        self.conv1 = nn.Conv1d(in_channels=self.input_channels, out_channels=16, kernel_size=3, padding=1)
+        self.relu1 = nn.ReLU()
+        self.pool1 = nn.MaxPool1d(kernel_size=2, stride=2) # Added stride
         self.conv2 = nn.Conv1d(in_channels=16, out_channels=32, kernel_size=3, padding=1)
         self.relu2 = nn.ReLU()
-        self.pool2 = nn.MaxPool1d(kernel_size=2)
+        self.pool2 = nn.MaxPool1d(kernel_size=2, stride=2) # Added stride
 
-        self.fc = nn.Linear(32 * 7, num_classes) # Aanname: sequence_length wordt uiteindelijk 7
+        # Calculate the flattened size for the linear layer using a dummy input
+        dummy_input = torch.randn(1, self.input_channels, self.sequence_length)
+        x_dummy = self.pool1(self.relu1(self.conv1(dummy_input)))
+        x_dummy = self.pool2(self.relu2(self.conv2(x_dummy)))
+        self.flatten_size = x_dummy.shape[1] * x_dummy.shape[2]
+
+        self.fc = nn.Linear(self.flatten_size, self.num_classes)
 
     def forward(self, x):
         x = self.pool1(self.relu1(self.conv1(x)))
         x = self.pool2(self.relu2(self.conv2(x)))
-        x = x.view(x.size(0), -1)
+        # Flatten the output from conv/pool layers
+        # The view shape is (batch_size, flatten_size)
+        x = x.view(-1, self.flatten_size)
         x = self.fc(x)
         return x
 
@@ -61,27 +72,39 @@ class CNNPatterns:
 
             if os.path.exists(model_path) and os.path.exists(scaler_path):
                 try:
-                    # Laad model
-                    model = SimpleCNN(input_channels=config['input_channels'], num_classes=config['num_classes'])
-                    model.load_state_dict(torch.load(model_path))
-                    model.eval()
-                    self.models[pattern_name] = model
-                    logger.info(f"CNN model voor '{pattern_name}' succesvol geladen van {model_path}.")
-
                     # Laad scaler parameters en reconstrueer scaler
                     with open(scaler_path, 'r', encoding='utf-8') as f:
                         scaler_params = json.load(f)
+
+                    sequence_length = scaler_params.get('sequence_length', 30) # Get sequence_length, default to 30
+
+                    # Laad model
+                    model = SimpleCNN(input_channels=config['input_channels'], num_classes=config['num_classes'], sequence_length=sequence_length)
+                    model.load_state_dict(torch.load(model_path))
+                    model.eval()
+                    self.models[pattern_name] = model
+                    logger.info(f"CNN model voor '{pattern_name}' succesvol geladen van {model_path} met sequence_length={sequence_length}.")
+
                     scaler = MinMaxScaler() # Requires MinMaxScaler import
                     scaler.min_ = np.array(scaler_params['min_'])
                     scaler.scale_ = np.array(scaler_params['scale_'])
-                    # Ensure feature_names_in_ is set if your sklearn version expects it
-                    # For newer versions of sklearn, feature_names_in_ might be required.
-                    # If scaler_params contains 'feature_names_in_', use it:
-                    if 'feature_names_in_' in scaler_params:
-                        scaler.feature_names_in_ = np.array(scaler_params['feature_names_in_'])
-                    elif 'features_cols' in scaler_params: # Fallback for older params format
-                         scaler.feature_names_in_ = np.array(scaler_params['features_cols'])
 
+                    # Set n_features_in_ and feature_names_in_
+                    # Prefer 'feature_names_in_' if available, else 'features_cols'
+                    if 'feature_names_in_' in scaler_params and isinstance(scaler_params['feature_names_in_'], list):
+                        scaler.n_features_in_ = len(scaler_params['feature_names_in_'])
+                        scaler.feature_names_in_ = np.array(scaler_params['feature_names_in_'])
+                    elif 'features_cols' in scaler_params and isinstance(scaler_params['features_cols'], list): # Fallback for older params format
+                        scaler.n_features_in_ = len(scaler_params['features_cols'])
+                        scaler.feature_names_in_ = np.array(scaler_params['features_cols'])
+                    else:
+                        # Attempt to infer n_features_in_ from min_ or scale_ if names are not present
+                        # This is a fallback and assumes min_ or scale_ are correctly populated lists/arrays
+                        if scaler_params.get('min_') is not None:
+                             scaler.n_features_in_ = len(scaler_params['min_'])
+                        elif scaler_params.get('scale_') is not None:
+                             scaler.n_features_in_ = len(scaler_params['scale_'])
+                        logger.warning(f"Feature names ('feature_names_in_' or 'features_cols') not found or not a list in scaler_params for '{pattern_name}'. n_features_in_ inferred as {getattr(scaler, 'n_features_in_', 'Unknown')}. This might lead to issues if feature order/names are critical.")
 
                     self.scalers[pattern_name] = scaler
                     logger.info(f"Scaler parameters voor '{pattern_name}' succesvol geladen van {scaler_path}.")
