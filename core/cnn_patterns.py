@@ -29,20 +29,21 @@ class SimpleCNN(nn.Module):
         self.relu2 = nn.ReLU()
         self.pool2 = nn.MaxPool1d(kernel_size=2, stride=2) # Added stride
 
-        # Calculate the flattened size for the linear layer using a dummy input
-        dummy_input = torch.randn(1, self.input_channels, self.sequence_length)
-        x_dummy = self.pool1(self.relu1(self.conv1(dummy_input)))
-        x_dummy = self.pool2(self.relu2(self.conv2(x_dummy)))
-        self.flatten_size = x_dummy.shape[1] * x_dummy.shape[2]
+        # Dynamically calculate the number of features for the fully connected layer
+        with torch.no_grad():
+            dummy_input = torch.randn(1, input_channels, sequence_length)
+            x = self.pool1(self.relu1(self.conv1(dummy_input)))
+            x = self.pool2(self.relu2(self.conv2(x)))
+            fc_input_features = x.numel() # Calculate the total number of elements
 
-        self.fc = nn.Linear(self.flatten_size, self.num_classes)
+        self.fc = nn.Linear(fc_input_features, self.num_classes)
 
     def forward(self, x):
         x = self.pool1(self.relu1(self.conv1(x)))
         x = self.pool2(self.relu2(self.conv2(x)))
         # Flatten the output from conv/pool layers
-        # The view shape is (batch_size, flatten_size)
-        x = x.view(-1, self.flatten_size)
+        # The view shape is (batch_size, fc_input_features)
+        x = x.view(x.size(0), -1) # Dynamically flatten
         x = self.fc(x)
         return x
 
@@ -830,8 +831,8 @@ class CNNPatterns:
             if i > 0: # For subsequent candles, use previous HA open and HA close
                  ha_open = (ha_candles[i-1]['open'] + ha_candles[i-1]['close']) / 2
 
-            ha_high = max(c['high'], ha_open, ha_close)
-            ha_low = min(c['low'], ha_open, ha_close)
+            ha_high = np.max([c['high'], ha_open, ha_close])
+            ha_low = np.min([c['low'], ha_open, ha_close])
             ha_candles.append({'open': ha_open, 'close': ha_close, 'high': ha_high, 'low': ha_low})
 
         # Controleer trend van de laatste paar Heikin-Ashi candles

@@ -53,15 +53,14 @@ class SimpleCNN(nn.Module):
         dummy_input = torch.randn(1, self.input_channels, self.sequence_length)
 
         # Pass the dummy input through the convolutional and pooling layers
-        x_dummy = self.pool1(self.relu1(self.conv1(dummy_input)))
-        x_dummy = self.pool2(self.relu2(self.conv2(x_dummy)))
-
-        # Calculate the number of features after flattening
-        # x_dummy.shape will be (1, out_channels_conv2, sequence_length_after_pooling)
-        self.flatten_size = x_dummy.shape[1] * x_dummy.shape[2]
+        with torch.no_grad():
+            dummy_input_for_fc = torch.randn(1, self.input_channels, self.sequence_length)
+            x_for_fc = self.pool1(self.relu1(self.conv1(dummy_input_for_fc)))
+            x_for_fc = self.pool2(self.relu2(self.conv2(x_for_fc)))
+            fc_input_features = x_for_fc.numel()
 
         # Define the fully connected layer
-        self.fc = nn.Linear(self.flatten_size, self.num_classes) # Renamed fc1 to fc for clarity
+        self.fc = nn.Linear(fc_input_features, self.num_classes)
 
     def forward(self, x):
         # Pass input through conv and pool layers
@@ -69,8 +68,8 @@ class SimpleCNN(nn.Module):
         x = self.pool2(self.relu2(self.conv2(x)))
 
         # Flatten the output from conv/pool layers
-        # The view shape is (batch_size, flatten_size)
-        x = x.view(-1, self.flatten_size)
+        # The view shape is (batch_size, fc_input_features)
+        x = x.view(x.size(0), -1)
 
         # Pass through the fully connected layer
         x = self.fc(x)
