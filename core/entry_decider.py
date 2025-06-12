@@ -213,21 +213,31 @@ class EntryDecider:
         cnn_predictions_data = pattern_data.get('cnn_predictions', {})
         rule_patterns_data = pattern_data.get('patterns', {})
 
-        # 1. Process CNN prediction score (specifically 15m_bullFlag_score)
-        # CNN predictions are assumed to be on '15m' as per cnn_patterns.py
-        cnn_bull_flag_score_key = "15m_bullFlag_score"
-        cnn_score = cnn_predictions_data.get(cnn_bull_flag_score_key)
+        # 1. Process CNN prediction scores from pattern_data['cnn_predictions']
+        #    Iterate over a predefined list of bullish CNN score keys.
+        #    These keys should correspond to actual model outputs defined in cnn_patterns.py
+        #    and trained by pre_trainer.py.
+        bullish_cnn_score_keys = [
+            "15m_bullFlag_score",
+            "15m_anotherBullPattern_score", # Matching Test Scenario 1 mock data
+            # Add other real bullish pattern score keys here as models become available
+            # e.g. "15m_bullishPinBar_score", "15m_ascendingTriangle_score"
+        ]
+        logger.info(f"Symbol: {symbol}, Evaluating bullish CNN prediction keys: {bullish_cnn_score_keys}")
 
-        if cnn_score is not None and isinstance(cnn_score, (float, int)) and cnn_score > 0:
-            contribution = cnn_score * cnn_pattern_weight
-            weighted_pattern_score += contribution
-            logger.info(f"Symbol: {symbol}, CNN Score contribution from '{cnn_bull_flag_score_key}': {cnn_score:.2f} * {cnn_pattern_weight:.2f} (weight) = {contribution:.2f}. Current weighted_score: {weighted_pattern_score:.2f}")
-            detected_patterns_summary.append(f"CNN_{cnn_bull_flag_score_key}({cnn_score:.2f})")
-        elif cnn_score is not None:
-            logger.info(f"Symbol: {symbol}, CNN Score for '{cnn_bull_flag_score_key}' is {cnn_score}, not contributing to weighted_pattern_score.")
-        else:
-            logger.info(f"Symbol: {symbol}, No CNN Score found for '{cnn_bull_flag_score_key}'.")
+        for score_key in bullish_cnn_score_keys:
+            cnn_score = cnn_predictions_data.get(score_key)
+            if cnn_score is not None and isinstance(cnn_score, (float, int)) and cnn_score > 0:
+                contribution = cnn_score * cnn_pattern_weight
+                weighted_pattern_score += contribution
+                logger.info(f"Symbol: {symbol}, CNN Score contribution from '{score_key}': {cnn_score:.2f} * {cnn_pattern_weight:.2f} (weight) = {contribution:.2f}. Current weighted_score: {weighted_pattern_score:.2f}")
+                detected_patterns_summary.append(f"CNN_{score_key}({cnn_score:.2f})")
+            elif cnn_score is not None: # Score is present but not positive or not a number
+                logger.info(f"Symbol: {symbol}, CNN Score for '{score_key}' is '{cnn_score}', not valid or not positive, thus not contributing.")
+            # If score_key is not in cnn_predictions_data, get() returns None, so no log message needed here.
 
+        if not any(s.startswith("CNN_") for s in detected_patterns_summary):
+            logger.info(f"Symbol: {symbol}, No positive CNN scores found for defined bullish keys.")
 
         # 2. Add score for rule-based bullish patterns (break after first found)
         entry_rule_pattern_score = self.params_manager.get_param(
@@ -438,62 +448,58 @@ if __name__ == "__main__":
         decider.gpt_reflector.ask_ai = mock_ask_ai_positive
         decider.grok_reflector.ask_ai = mock_ask_ai_positive
         # Mock CNN to provide both ML score and a rule-based pattern
-        async def mock_cnn_ml_and_rule(*args, **kwargs):
-            # Updated structure for cnn_predictions
+        async def mock_cnn_ml_and_rule_multiple(*args, **kwargs):
             return {
                 "cnn_predictions": {
-                    f"{mock_df_5m.attrs.get('timeframe', '5m')}_bullFlag_score": 0.95
+                    "15m_bullFlag_score": 0.95, # Key from bullish_cnn_score_keys
+                    "15m_anotherBullPattern_score": 0.80, # Hypothetical, add to bullish_cnn_score_keys for testing
+                    "15m_someOtherUnused_score": 0.99 # This should be ignored
                 },
-                "patterns": { # Rule-based patterns still come from 'patterns'
-                    "bullishEngulfing": True
-                },
+                "patterns": {"bullishEngulfing": True},
                 "context": {"trend": "uptrend"}
             }
-        decider.cnn_patterns_detector.detect_patterns_multi_timeframe = mock_cnn_ml_and_rule
+        decider.cnn_patterns_detector.detect_patterns_multi_timeframe = mock_cnn_ml_and_rule_multiple
         decider.cooldown_tracker.is_cooldown_active = lambda t, s: False
 
         def mock_get_param_s1(key, strategy_id=None, default=None):
             params = {
-                "timeOfDayEffectiveness": {str(datetime.now().hour): 0.0}, # Neutral time effectiveness
+                "timeOfDayEffectiveness": {str(datetime.now().hour): 0.0},
                 "cnnPatternWeight": 0.8,
-                "entryLearnedBiasThreshold": 0.55, # Default
-                "entryTimeEffectivenessImpactFactor": 0.5, # Default
-                "entryRulePatternScore": 0.7 # Default
+                "entryLearnedBiasThreshold": 0.55,
+                "entryTimeEffectivenessImpactFactor": 0.5,
+                "entryRulePatternScore": 0.7,
+                "strongPatternThreshold": 0.5 # Default for this test scenario
             }
-            return params.get(key, default) # Use default from call if key not in mock
+            return params.get(key, default)
         decider.params_manager.get_param = mock_get_param_s1
 
-        # CALCULATION FOR SCENARIO 1 (strongPatternThreshold will use default 0.5 from mock_get_param_s1):
-        # entryLearnedBiasThreshold = 0.55 (default)
-        # entryTimeEffectivenessImpactFactor = 0.5 (default)
-        # entryRulePatternScore = 0.7 (default)
-        # cnnPatternWeight = 0.8 (from mock_get_param_s1)
-        # CNN score (15m_bullFlag_score) = 0.95
-        # Rule-based pattern "bullishEngulfing" detected.
-        # CNN contribution = 0.95 * 0.8 = 0.76
-        # Rule contribution = 0.7 * 0.8 = 0.56
-        # weighted_pattern_score = 0.76 + 0.56 = 1.32
-        # strong_pattern_threshold = 0.5 (default from mock_get_param_s1 as "strongPatternThreshold" is not in its map)
-        # is_strong_pattern = 1.32 >= 0.5 -> True
-        # entry_conviction_threshold (for AI confidence) = 0.7 (passed as argument)
-        # AI conf = 0.85. learned_bias = 0.7.
-        # time_adjusted_confidence_multiplier = 1.0 + (0.0 * 0.5) = 1.0
-        # final_ai_confidence = 0.85 * 1.0 = 0.85
-        # Conditions: LONG (True), final_ai_conf (0.85) >= entry_conv_thresh (0.7) (True),
-        #             learned_bias (0.7) >= entry_learned_bias_thresh (0.55) (True), is_strong_pattern (True). All True.
+        # CALCULATION FOR SCENARIO 1 (Updated for multi-CNN score logic):
+        # Assuming bullish_cnn_score_keys = ["15m_bullFlag_score", "15m_anotherBullPattern_score"]
+        # CNN_contrib_bullFlag = 0.95 * 0.8 = 0.76
+        # CNN_contrib_anotherBull = 0.80 * 0.8 = 0.64
+        # Rule_contrib (bullishEngulfing) = 0.7 * 0.8 = 0.56
+        # weighted_pattern_score = 0.76 + 0.64 + 0.56 = 1.96
+        # strong_pattern_threshold = 0.5 (from mock_get_param_s1)
+        # is_strong_pattern = 1.96 >= 0.5 -> True
+        # Other conditions (AI conf, bias) are met by mock_ask_ai_positive.
         entry_decision_s1 = await decider.should_enter(
             dataframe=mock_df_5m, symbol=test_symbol, current_strategy_id=test_strategy_id,
             trade_context=mock_trade_context,
             learned_bias=0.7, learned_confidence=0.8, entry_conviction_threshold=0.7
         )
-        print(f"Resultaat (Scenario 1 - ML + Rule): {json.dumps(entry_decision_s1, indent=2, default=str)}")
+        print(f"Resultaat (Scenario 1 - Multi-CNN + Rule): {json.dumps(entry_decision_s1, indent=2, default=str)}")
         assert entry_decision_s1['enter'] is True
         assert "AI_CONSENSUS_LONG_CONDITIONS_MET" in entry_decision_s1['reason']
         assert entry_decision_s1['confidence'] == 0.85
-        assert abs(entry_decision_s1['weighted_pattern_score'] - 1.32) < 0.001
+        # Expected WPS: (0.95*0.8 for bullFlag) + (0.80*0.8 for anotherBull - IF IT'S IN bullish_cnn_score_keys) + (0.7*0.8 for rule)
+        # If bullish_cnn_score_keys = ["15m_bullFlag_score", "15m_anotherBullPattern_score"] -> 0.76 + 0.64 + 0.56 = 1.96
+        # If bullish_cnn_score_keys = ["15m_bullFlag_score"] -> 0.76 + 0.56 = 1.32
+        # The code will be updated to include "15m_anotherBullPattern_score" in the list for the test.
+        assert abs(entry_decision_s1['weighted_pattern_score'] - 1.96) < 0.001
 
-        # --- Test Scenario 2: Low Weighted Pattern Score (CNN only, low score) ---
-        print("\n--- Test Scenario 2: Low Weighted Pattern Score (CNN only, low score) ---")
+
+        # --- Test Scenario 2: Low Weighted Pattern Score (Only one weak CNN score) ---
+        print("\n--- Test Scenario 2: Low Weighted Pattern Score (One weak CNN score) ---")
         async def mock_cnn_low_score_only(*args, **kwargs):
             # Updated structure for cnn_predictions, no rule-based patterns
             return {

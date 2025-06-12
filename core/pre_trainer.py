@@ -2,16 +2,15 @@
 import logging
 import os
 import json
-from typing import Dict, Any, List
+from typing import Dict, Any, List, Tuple, Optional
 from datetime import datetime, timedelta
 import pandas as pd
 import numpy as np
-import asyncio # Nodig voor de async main-test
-import talib.abstract as ta # For indicator calculation in prepare_training_data
-import dotenv # Added for __main__
-
-logger = logging.getLogger(__name__)
-logger.setLevel(logging.INFO)
+import asyncio
+import talib # Direct import of talib
+import dotenv
+import sqlite3 # For test block
+from sklearn.preprocessing import MinMaxScaler # For normalization
 
 # PyTorch Imports
 import torch
@@ -19,18 +18,33 @@ import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import DataLoader, TensorDataset
 
+# Import ParamsManager for use in PreTrainer class
+try:
+    from core.params_manager import ParamsManager
+except ImportError:
+    ParamsManager = None # Allow testing even if ParamsManager is not fully available initially
+
+logger = logging.getLogger(__name__)
+# Ensure logger has a handler, e.g., if running this file directly for testing
+# Moved sys import to the top of the file for standard practice,
+# but it's only used in __main__. If this file is imported, sys might not be needed by the logger immediately.
+import sys
+if not logger.handlers:
+    logging.basicConfig(level=logging.INFO,
+                        format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+                        handlers=[logging.StreamHandler(sys.stdout)])
+logger.setLevel(logging.INFO)
+
+
 MEMORY_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'memory')
 PRETRAIN_LOG_FILE = os.path.join(MEMORY_DIR, 'pre_train_log.json')
-TIME_EFFECTIVENESS_FILE = os.path.join(MEMORY_DIR, 'time_effectiveness.json')
-# Use 'data/models' as specified for PyTorch model
 MODELS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'data', 'models')
-CNN_MODEL_PATH = os.path.join(MODELS_DIR, 'cnn_patterns_model.pth')
-CNN_SCALER_PARAMS_PATH = os.path.join(MODELS_DIR, 'cnn_scaler_params.json') # Path for scaler parameters
+# CNN_MODEL_PATH is now dynamic per pattern, e.g., cnn_model_bullFlag.pth
+# CNN_SCALER_PATH is also dynamic per pattern, e.g., scaler_params_bullFlag.json
 
 os.makedirs(MEMORY_DIR, exist_ok=True)
-os.makedirs(MODELS_DIR, exist_ok=True) # Ensure MODELS_DIR is created (especially data/models)
+os.makedirs(MODELS_DIR, exist_ok=True)
 
-# Define SimpleCNN class
 class SimpleCNN(nn.Module):
     def __init__(self, input_channels, num_classes):
         super(SimpleCNN, self).__init__()
@@ -40,178 +54,132 @@ class SimpleCNN(nn.Module):
         self.conv2 = nn.Conv1d(in_channels=16, out_channels=32, kernel_size=3, padding=1)
         self.relu2 = nn.ReLU()
         self.pool2 = nn.MaxPool1d(kernel_size=2, stride=2)
-        # Flattening will be done in forward pass dynamically
-        # The input size to the linear layer depends on the sequence length after pooling
-        # For sequence_length = 30:
-        # After pool1 (kernel_size=2, stride=2): 30 / 2 = 15
-        # After pool2 (kernel_size=2, stride=2): 15 / 2 = 7 (integer division for pooling output dim)
-        # So, self.fc1 = nn.Linear(32 * 7, num_classes) if sequence_length is fixed at 30
-        # If sequence_length varies, this needs to be calculated or use AdaptiveMaxPool1d
-        self.fc1 = None # Will be initialized in forward pass or based on a fixed sequence length
-        self.flatten_size = None # Store the dynamically calculated flatten size
+        self.fc1 = None
+        self.flatten_size = None
+        self._num_classes_for_fc_init = num_classes # Store for dynamic init
 
     def forward(self, x):
         x = self.pool1(self.relu1(self.conv1(x)))
         x = self.pool2(self.relu2(self.conv2(x)))
-
         if self.fc1 is None:
-            # Dynamically create the fully connected layer based on the input's shape
             self.flatten_size = x.shape[1] * x.shape[2]
-            self.fc1 = nn.Linear(self.flatten_size, self.num_classes_for_fc_init) # requires num_classes at init
-            self.fc1.to(x.device) # Ensure fc1 is on the same device as x
-
-        x = x.view(-1, self.flatten_size) # Flatten the tensor
+            self.fc1 = nn.Linear(self.flatten_size, self._num_classes_for_fc_init)
+            self.fc1.to(x.device)
+        x = x.view(-1, self.flatten_size)
         x = self.fc1(x)
         return x
 
-    def _set_num_classes_for_fc_init(self, num_classes):
-        # Helper to pass num_classes to fc layer initialization if done dynamically
-        self.num_classes_for_fc_init = num_classes
-
-
 class PreTrainer:
-    """
-    Module voor pre-learning op historische Binance data.
-    Verwerkt indicatoren, CNN-labels en analyseert tijd-van-dag effectiviteit.
-    Nu met PyTorch CNN training.
-    """
-
-    def __init__(self, params_manager=None): # Added params_manager
-        if params_manager is None:
-            from core.params_manager import ParamsManager # Import here to avoid circular dependency
+    def __init__(self, params_manager_instance: Optional[ParamsManager] = None):
+        if params_manager_instance:
+            self.params_manager = params_manager_instance
+        elif ParamsManager: # Check if ParamsManager was imported successfully
             self.params_manager = ParamsManager()
-            logger.info("ParamsManager niet meegegeven, standaard initialisatie gebruikt in PreTrainer.")
         else:
-            self.params_manager = params_manager
+            logger.error("ParamsManager is not available. PreTrainer cannot function without it.")
+            raise ImportError("ParamsManager could not be imported or provided.")
         logger.info("PreTrainer geïnitialiseerd.")
+        # Initialize CNNPatterns here if it's frequently used or for direct pattern generation
+        # For now, it's instantiated in prepare_training_data if needed for labels.
 
-    async def fetch_historical_data(self, symbol: str, timeframe: str, limit: int = None) -> pd.DataFrame:
-        if limit is None: # Fetch limit from params_manager if not provided
-            limit = self.params_manager.get_param('data_fetch_limit', default=2000)
-        """
-        Haalt historische data op, bijvoorbeeld via Freqtrade's DataProvider
-        of direct via CCXT (wat in bitvavo_executor zit).
-        Voor pre-training, gebruiken we hier een gesimuleerde fetch.
-        """
-        logger.info(f"Simuleren ophalen historische data voor {symbol} ({timeframe})...")
-        # In een echte implementatie:
-        # from freqtrade.data.dataprovider import DataProvider
-        # from freqtrade.configuration import Configuration
-        # config = Configuration.from_files([]) # Minimal config
-        # dp = DataProvider(config, None, None)
-        # candles_df = dp.get_pair_dataframe(pair=symbol, timeframe=timeframe, candle_type='mark') # or 'spot'
-        # if candles_df is None or candles_df.empty:
-        #     logger.error(f"Kon geen historische data ophalen voor {symbol} ({timeframe}) via DataProvider.")
-        #     return pd.DataFrame()
-        # return candles_df.tail(limit)
+    async def fetch_historical_data_from_db(self, symbol: str, timeframe: str, limit: int = 2000) -> pd.DataFrame:
+        logger.info(f"Fetching historical data for {symbol} ({timeframe}) from DB, limit {limit}...")
+        # This path needs to be correctly configured for your Freqtrade setup
+        # FREQTRADE_DB_PATH defined globally for the module or passed appropriately
+        conn = None
+        try:
+            # Correctly use await for the async thread operation
+            conn = await asyncio.to_thread(sqlite3.connect, FREQTRADE_DB_PATH)
+            # Parameterized query for safety and correctness
+            query = f"SELECT * FROM candles_{symbol.replace('/', '_')}_{timeframe} ORDER BY date DESC LIMIT ?;"
+            # Use pandas to execute the query with parameters
+            df = pd.read_sql_query(query, conn, params=(limit,))
+            if df.empty:
+                logger.warning(f"No data found for {symbol} ({timeframe}) in database {FREQTRADE_DB_PATH}.")
+                return pd.DataFrame()
+
+            df.rename(columns={'open': 'Open', 'high': 'High', 'low': 'Low', 'close': 'Close', 'volume': 'Volume', 'date': 'Date'}, inplace=True)
+            df['Date'] = pd.to_datetime(df['Date'], unit='s') # Assuming date is stored as Unix timestamp in seconds
+            df.set_index('Date', inplace=True)
+            df.sort_index(ascending=True, inplace=True) # Ensure data is chronological
+            # Store metadata as attributes
+            df.attrs['timeframe'] = timeframe
+            df.attrs['pair'] = symbol
+            logger.info(f"Historical data fetched for {symbol} ({timeframe}): {len(df)} candles.")
+            return df
+        except sqlite3.Error as e:
+            logger.error(f"Database error while fetching data for {symbol} ({timeframe}): {e}")
+            return pd.DataFrame() # Return empty DataFrame on error
+        except Exception as e:
+            logger.error(f"Unexpected error fetching data for {symbol} ({timeframe}): {e}")
+            return pd.DataFrame()
+        finally:
+            if conn:
+                await asyncio.to_thread(conn.close)
 
 
-        # Dummy data generation
-        data = []
-        now = datetime.utcnow() # Use UTC for consistency
-        interval_seconds_map = {
-            '1m': 60, '5m': 300, '15m': 900, '1h': 3600,
-            '4h': 14400, '12h': 43200, '1d': 86400, '1w': 604800
-        }
-        interval_seconds = interval_seconds_map.get(timeframe, 300)
-
-        for i in range(limit):
-            date = now - timedelta(seconds=(limit - 1 - i) * interval_seconds)
-            open_ = 100 + i * 0.01 * (1 + np.random.randn() * 0.01) # More realistic price progression
-            close_ = open_ + (np.random.randn() * 0.5)
-            high_ = max(open_, close_) + (np.random.rand() * 0.2)
-            low_ = min(open_, close_) - (np.random.rand() * 0.2)
-            volume = 1000 + np.random.rand() * 5000 # Wider volume range
-            data.append([date, open_, high_, low_, close_, volume])
-
-        df = pd.DataFrame(data, columns=['date', 'open', 'high', 'low', 'close', 'volume'])
-        df['date'] = pd.to_datetime(df['date'])
-        df.set_index('date', inplace=True)
-        df.attrs['timeframe'] = timeframe
-        df.attrs['pair'] = symbol # Store pair as an attribute
-        logger.info(f"Historische data gesimuleerd voor {symbol} ({timeframe}): {len(df)} candles.")
-        return df
-
-    async def prepare_training_data(self, dataframe: pd.DataFrame) -> pd.DataFrame:
-        """
-        Verwerkt een dataframe door indicatoren toe te voegen en CNN-labels te genereren.
-        """
-        pair = dataframe.attrs.get('pair', 'N/A')
-        tf = dataframe.attrs.get('timeframe', 'N/A')
-        logger.info(f"Voorbereiden trainingsdata voor {pair} ({tf})...")
-
+    async def prepare_training_data(self, dataframe: pd.DataFrame, pattern_name: str = 'bullFlag') -> pd.DataFrame:
+        logger.info(f"Preparing training data for pattern '{pattern_name}'...")
         if dataframe.empty:
-            logger.warning("Lege dataframe ontvangen in prepare_training_data.")
+            logger.warning("Empty dataframe received in prepare_training_data.")
             return dataframe
 
-        # Voeg Freqtrade-compatibele indicatoren toe
-        if 'rsi' not in dataframe.columns:
-            dataframe['rsi'] = ta.RSI(dataframe) # Default timeperiod=14
-        if 'macd' not in dataframe.columns: # Ensure all MACD components are added if one is missing
-            macd_df = ta.MACD(dataframe) # Default fast=12, slow=26, signal=9
-            dataframe['macd'] = macd_df['macd']
-            dataframe['macdsignal'] = macd_df['macdsignal']
-            dataframe['macdhist'] = macd_df['macdhist']
+        df_copy = dataframe.copy()
 
-        # Voorbeeld: Bollinger Bands (vaak gebruikt in Freqtrade)
-        if 'bb_middleband' not in dataframe.columns:
-            from freqtrade.vendor.qtpylib.indicators import bollinger_bands # Local import for clarity
-            bollinger = bollinger_bands(ta.TYPPRICE(dataframe), window=20, stds=2)
-            dataframe['bb_lowerband'] = bollinger['lower']
-            dataframe['bb_middleband'] = bollinger['mid']
-            dataframe['bb_upperband'] = bollinger['upper']
+        # Add common indicators
+        df_copy['rsi'] = talib.RSI(df_copy['Close'].values, timeperiod=14)
+        macd, macdsignal, macdhist = talib.MACD(df_copy['Close'].values, fastperiod=12, slowperiod=26, signalperiod=9)
+        df_copy['macd'] = macd
+        df_copy['macdsignal'] = macdsignal
+        df_copy['macdhist'] = macdhist
 
+        # Labeling logic (example for 'bullFlag', can be expanded)
+        # This section needs to be highly adaptable based on `pattern_name`
+        if pattern_name == 'bullFlag':
+            # Example: A simple bull flag might be a short consolidation after a sharp rise.
+            # For ML, we need a more robust definition or use a pre-labeled dataset / different approach.
+            # Placeholder: label based on future profit as in the original example
+            future_N_candles = self.params_manager.get_param('future_N_candles_for_label', default=20)
+            profit_threshold_pct = self.params_manager.get_param('profit_threshold_for_label', default=0.02)
+            loss_threshold_pct = self.params_manager.get_param('loss_threshold_for_label', default=-0.01)
 
-        # Nieuwe bullFlag_label logica
-        future_N_candles = self.params_manager.get_param('future_N_candles_for_label', default=20) # Kijk N candles vooruit
-        profit_threshold_pct = self.params_manager.get_param('profit_threshold_for_label', default=0.02) # 2% winst
-        loss_threshold_pct = self.params_manager.get_param('loss_threshold_for_label', default=-0.01) # 1% verlies (negatief)
+            df_copy['future_high'] = df_copy['High'].shift(-future_N_candles)
+            df_copy['future_low'] = df_copy['Low'].shift(-future_N_candles)
 
-        dataframe['future_high'] = dataframe['high'].shift(-future_N_candles)
-        dataframe['future_low'] = dataframe['low'].shift(-future_N_candles) # Nodig voor stop-loss check
-        dataframe['future_close'] = dataframe['close'].shift(-future_N_candles)
+            profit_target_met = (df_copy['future_high'] - df_copy['Close']) / df_copy['Close'] >= profit_threshold_pct
+            loss_target_met = (df_copy['future_low'] - df_copy['Close']) / df_copy['Close'] <= loss_threshold_pct
 
-        # Bereken potentieel toekomstig rendement
-        dataframe['future_profit_pct'] = (dataframe['future_high'] - dataframe['close']) / dataframe['close']
+            df_copy[f'{pattern_name}_label'] = np.where(profit_target_met & ~loss_target_met, 1, 0)
+            df_copy.drop(columns=['future_high', 'future_low'], inplace=True, errors='ignore')
 
-        # Labeling conditions
-        # Conditie 1: Winstdoel bereikt - de toekomstige high is minstens X% boven de huidige sluitprijs
-        profit_target_met = dataframe['future_profit_pct'] >= profit_threshold_pct
+        elif pattern_name == 'bearTrap': # Example for a different pattern
+            # A bear trap: price breaks below support, then sharply reverses upwards.
+            # Labeling would be complex: identify support, break, then reversal.
+            # This is where a dedicated labeling function per pattern would be essential.
+            logger.warning(f"Labeling for pattern '{pattern_name}' is not fully implemented. Using placeholder zeros.")
+            df_copy[f'{pattern_name}_label'] = 0 # Placeholder
+        else:
+            logger.warning(f"Unknown pattern_name '{pattern_name}' for labeling. No labels generated.")
+            return pd.DataFrame() # Or handle as appropriate
 
-        # Conditie 2: Verliesdrempel geraakt - de toekomstige low is minstens Y% onder de huidige sluitprijs
-        # We kijken of de low onder de stop-loss is gekomen VOORDAT de profit target eventueel is gehaald.
-        # Dit is een vereenvoudiging; in werkelijkheid zou je de volgorde van H/L binnen de N candles moeten weten.
-        # Voor nu: als de future_low onder de loss_threshold is, markeren we het als potentieel verlies.
-        loss_threshold_met = (dataframe['future_low'] - dataframe['close']) / dataframe['close'] <= loss_threshold_pct
+        # Define feature columns (ensure these are common across patterns or handled dynamically)
+        self.feature_columns = ['Open', 'High', 'Low', 'Close', 'Volume', 'rsi', 'macd', 'macdsignal', 'macdhist']
 
-        # Labeling: 1 als winstdoel is bereikt EN verliesdrempel NIET is geraakt (of later is geraakt dan winst)
-        # Dit is een simpele benadering. Een meer geavanceerde label zou de volgorde van events moeten overwegen.
-        dataframe['bullFlag_label'] = np.where(profit_target_met & ~loss_threshold_met, 1, 0)
+        cols_to_drop_for_na = [f'{pattern_name}_label'] + self.feature_columns
+        df_copy.dropna(subset=cols_to_drop_for_na, inplace=True)
 
-        feature_columns = ['open', 'high', 'low', 'close', 'volume', 'rsi', 'macd', 'macdsignal', 'macdhist']
-        cols_to_drop_for_na = ['bullFlag_label', 'future_high', 'future_close', 'future_profit_pct', 'future_low'] + feature_columns
-        dataframe.dropna(subset=cols_to_drop_for_na, inplace=True)
+        logger.info(f"Training data prepared for '{pattern_name}' with {len(df_copy)} samples. Features: {self.feature_columns}")
+        return df_copy
 
-        # Drop temporary columns used for labeling
-        dataframe.drop(columns=['future_high', 'future_close', 'future_profit_pct', 'future_low'], inplace=True, errors='ignore')
+    async def train_ai_models(self, training_data: pd.DataFrame, pattern_name: str = 'bullFlag'):
+        logger.info(f"Starting training of PyTorch AI model for pattern '{pattern_name}' with {len(training_data)} samples...")
 
-        logger.info(f"Trainingsdata voorbereid met {len(dataframe)} samples na NA drop. Features: {feature_columns}")
-        return dataframe
-
-
-    async def train_ai_models(self, training_data: pd.DataFrame, model_type: str = 'SimpleCNN_Torch'):
-        """
-        Traint een SimpleCNN model met PyTorch op de voorbereide data.
-        """
-        logger.info(f"Start training van PyTorch AI-model '{model_type}' met {len(training_data)} initiële samples...")
-
-        if training_data.empty:
-            logger.warning(f"Geen trainingsdata voor model '{model_type}'. Training overgeslagen.")
+        if training_data.empty or f'{pattern_name}_label' not in training_data.columns:
+            logger.warning(f"No training data or labels for pattern '{pattern_name}'. Training skipped.")
             return
 
-        feature_columns = ['open', 'high', 'low', 'close', 'volume', 'rsi', 'macd', 'macdsignal', 'macdhist']
-        if not all(col in training_data.columns for col in feature_columns + ['bullFlag_label']):
-            logger.error(f"Benodigde kolommen ({feature_columns + ['bullFlag_label']}) niet allemaal aanwezig in training_data. Overslaan.")
+        if not hasattr(self, 'feature_columns') or not self.feature_columns:
+            logger.error("Feature columns not set (e.g., via prepare_training_data). Cannot train model.")
             return
 
         sequence_length = self.params_manager.get_param('sequence_length_cnn', default=30)
@@ -219,261 +187,260 @@ class PreTrainer:
         batch_size = self.params_manager.get_param('batch_size_cnn', default=32)
         learning_rate = self.params_manager.get_param('learning_rate_cnn', default=0.001)
 
-        # Data Preparation: Sequences and Normalization
         X_list, y_list = [], []
         for i in range(len(training_data) - sequence_length):
-            X_list.append(training_data[feature_columns].iloc[i:i + sequence_length].values)
-            y_list.append(training_data['bullFlag_label'].iloc[i + sequence_length - 1]) # Label from the last candle in sequence
+            X_list.append(training_data[self.feature_columns].iloc[i:i + sequence_length].values)
+            y_list.append(training_data[f'{pattern_name}_label'].iloc[i + sequence_length - 1])
 
         if not X_list:
-            logger.warning(f"Niet genoeg data ({len(training_data)} samples) om sequenties te maken met lengte {sequence_length}. Training overgeslagen.")
+            logger.warning(f"Not enough data to create sequences for '{pattern_name}'. Training skipped.")
             return
 
-        X = np.array(X_list)
-        y = np.array(y_list)
+        X_np = np.array(X_list)
+        y_np = np.array(y_list)
 
-        # Normalization (feature-wise min-max scaling to [0,1])
+        # Normalization using MinMaxScaler (applied per feature across all sequences)
         # Reshape X to 2D for scaling: (num_samples * sequence_length, num_features)
-        X_reshaped = X.reshape(-1, X.shape[-1])
-        min_vals = X_reshaped.min(axis=0)
-        max_vals = X_reshaped.max(axis=0)
-        # Avoid division by zero if a feature is constant
-        range_vals = max_vals - min_vals
-        range_vals[range_vals == 0] = 1
-        X_normalized_reshaped = (X_reshaped - min_vals) / range_vals
+        X_reshaped = X_np.reshape(-1, X_np.shape[-1])
+        scaler = MinMaxScaler()
+        X_normalized_reshaped = scaler.fit_transform(X_reshaped)
         # Reshape back to 3D: (num_samples, sequence_length, num_features)
-        X_normalized = X_normalized_reshaped.reshape(X.shape)
+        X_normalized = X_normalized_reshaped.reshape(X_np.shape)
 
-        # Tensor Conversion
-        # PyTorch CNNs (Conv1d) expect input: (batch_size, input_channels, sequence_length)
-        # Here, num_features becomes input_channels.
+        # Save scaler parameters
+        scaler_params = {
+            'feature_columns': self.feature_columns,
+            'min_': scaler.min_.tolist(),
+            'scale_': scaler.scale_.tolist()
+        }
+        scaler_path = os.path.join(MODELS_DIR, f'scaler_params_{pattern_name}.json')
+        with open(scaler_path, 'w') as f:
+            json.dump(scaler_params, f, indent=4)
+        logger.info(f"Scaler parameters for '{pattern_name}' saved to {scaler_path}")
+
+        # Tensor Conversion: PyTorch Conv1d expects (batch, channels, seq_len)
         X_tensor = torch.tensor(X_normalized, dtype=torch.float32).permute(0, 2, 1)
-        y_tensor = torch.tensor(y, dtype=torch.long) # CrossEntropyLoss expects Long type for labels
+        y_tensor = torch.tensor(y_np, dtype=torch.long) # CrossEntropyLoss expects Long type
 
-        # DataLoader
         dataset = TensorDataset(X_tensor, y_tensor)
         dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=True)
 
-        # Model, Criterion, Optimizer
         input_channels = X_tensor.shape[1] # Number of features
-        model = SimpleCNN(input_channels=input_channels, num_classes=2) # 2 classes: 0 or 1
-        model._set_num_classes_for_fc_init(2) # Pass num_classes for dynamic FC layer init
+        model = SimpleCNN(input_channels=input_channels, num_classes=2) # Assuming binary classification (pattern vs no pattern)
 
         criterion = nn.CrossEntropyLoss()
         optimizer = optim.Adam(model.parameters(), lr=learning_rate)
 
-        logger.info(f"Start trainingsloop voor {num_epochs} epochs...")
+        logger.info(f"Starting training loop for '{pattern_name}' for {num_epochs} epochs...")
         for epoch in range(num_epochs):
             epoch_loss = 0.0
-            for batch_idx, (data, targets) in enumerate(dataloader):
+            for data, targets in dataloader:
                 optimizer.zero_grad()
                 outputs = model(data)
                 loss = criterion(outputs, targets)
                 loss.backward()
                 optimizer.step()
                 epoch_loss += loss.item()
-
             avg_epoch_loss = epoch_loss / len(dataloader)
-            logger.info(f"Epoch [{epoch+1}/{num_epochs}], Gemiddelde Loss: {avg_epoch_loss:.4f}")
+            logger.info(f"Epoch [{epoch+1}/{num_epochs}] for '{pattern_name}', Avg Loss: {avg_epoch_loss:.4f}")
 
-        # Save Model
+        model_save_path = os.path.join(MODELS_DIR, f'cnn_model_{pattern_name}.pth')
         try:
-            torch.save(model.state_dict(), CNN_MODEL_PATH)
-            logger.info(f"PyTorch model '{model_type}' succesvol getraind en opgeslagen op {CNN_MODEL_PATH}")
-
-            # Save scaler parameters
-            scaler_params = {
-                'feature_columns': feature_columns,
-                'min_vals': min_vals.tolist(),
-                'max_vals': max_vals.tolist()
-            }
-            with open(CNN_SCALER_PARAMS_PATH, 'w') as f:
-                json.dump(scaler_params, f, indent=4)
-            logger.info(f"CNN scaler parameters opgeslagen op {CNN_SCALER_PARAMS_PATH}")
-
+            torch.save(model.state_dict(), model_save_path)
+            logger.info(f"PyTorch model for '{pattern_name}' trained and saved to {model_save_path}")
         except Exception as e:
-            logger.error(f"Fout bij opslaan PyTorch model of scaler parameters: {e}")
-            return # Stop if model or scaler cannot be saved
+            logger.error(f"Error saving PyTorch model for '{pattern_name}': {e}")
+            return
 
-        # Log pretrain activity
-        # Pass len(X) as data_size, representing number of sequences
-        await asyncio.to_thread(self._log_pretrain_activity, model_type, len(X))
+        await self._log_pretrain_activity(pattern_name, len(X_np), model_save_path, scaler_path)
 
-
-    def _log_pretrain_activity(self, model_type: str, data_size: int): # model_path removed
-        """ Logt de pre-trainingsactiviteit. """
+    async def _log_pretrain_activity(self, pattern_name: str, data_size: int, model_path: str, scaler_path: str):
         entry = {
             "timestamp": datetime.now().isoformat(),
-            "model_type": model_type,
-            "data_size": data_size, # This now represents number of sequences used for training
+            "pattern_name": pattern_name,
+            "data_size": data_size,
             "status": "completed_pytorch_training",
-            "model_path_saved": CNN_MODEL_PATH, # Log the fixed path
-            "scaler_params_path_saved": CNN_SCALER_PARAMS_PATH # Log scaler params path
+            "model_path_saved": model_path,
+            "scaler_params_path_saved": scaler_path
         }
         logs = []
+        # Similar loading and appending logic as before, ensuring atomicity if possible or handling races
+        # For simplicity, using basic load/append/write here
         try:
-            if os.path.exists(PRETRAIN_LOG_FILE) and os.path.getsize(PRETRAIN_LOG_FILE) > 0: # Check size
-                try:
-                    with open(PRETRAIN_LOG_FILE, 'r', encoding='utf-8') as f:
-                        content = f.read()
-                        if content: # Ensure content is not empty
-                            logs = json.loads(content)
-                            if not isinstance(logs, list): logs = [logs] # Handle single object case
-                        else: # File is empty
-                            logs = []
-                except json.JSONDecodeError:
-                    logger.warning(f"Kon {PRETRAIN_LOG_FILE} niet parsen, start met nieuwe log.")
-                    logs = [] # Reset if file is corrupt
+            if os.path.exists(PRETRAIN_LOG_FILE) and os.path.getsize(PRETRAIN_LOG_FILE) > 0:
+                with open(PRETRAIN_LOG_FILE, 'r', encoding='utf-8') as f:
+                    content = f.read()
+                    if content: logs = json.loads(content)
+                    if not isinstance(logs, list): logs = [logs]
             logs.append(entry)
-            with open(PRETRAIN_LOG_FILE, 'w', encoding='utf-8') as f: # Overwrite with updated logs
+            with open(PRETRAIN_LOG_FILE, 'w', encoding='utf-8') as f:
                 json.dump(logs, f, indent=2)
         except Exception as e:
-            logger.error(f"Fout bij loggen pre-train activiteit: {e}")
+            logger.error(f"Error logging pre-train activity: {e}")
 
-    async def analyze_time_of_day_effectiveness(self, historical_data: pd.DataFrame, strategy_id: str) -> Dict[str, Any]:
-        """
-        Analyseert de prestatie van een strategie per dagdeel.
-        [cite_start]Vertaald van timeOfDayEffectiveness[cite: 71, 141].
-        """
-        logger.info(f"Analyseren tijd-van-dag effectiviteit voor strategie {strategy_id}...")
+    async def run_pretraining_pipeline(self, symbol: str, timeframe: str, strategy_id: str, params_manager_instance: Optional[ParamsManager] = None):
+        # Ensure self.params_manager is correctly set
+        if params_manager_instance:
+            self.params_manager = params_manager_instance
+        elif not hasattr(self, 'params_manager') and ParamsManager: # If not set in __init__ (e.g. direct call)
+             self.params_manager = ParamsManager()
+        elif not hasattr(self, 'params_manager'):
+            logger.error("ParamsManager not available in run_pretraining_pipeline.")
+            return
 
-        if historical_data.empty:
-            logger.warning("Geen historische data voor tijd-van-dag analyse.")
-            return {}
+        logger.info(f"Starting pre-training pipeline for {symbol} ({timeframe}, strategy: {strategy_id})...")
 
-        # We gebruiken 'trade_outcome_label' die al is toegevoegd in prepare_training_data
-        if 'trade_outcome_label' not in historical_data.columns:
-            logger.warning("Kolom 'trade_outcome_label' ontbreekt. Kan geen tijd-van-dag effectiviteit analyseren.")
-            return {} # Of voeg hier een dummy toe als dat zinvol is voor de flow
-
-        # Zorg ervoor dat de index een DatetimeIndex is
-        if not isinstance(historical_data.index, pd.DatetimeIndex):
-            logger.error("DataFrame index is geen DatetimeIndex. Kan uur niet extraheren.")
-            return {}
-
-        df_copy = historical_data.copy() # Werk op een kopie
-        df_copy['hour_of_day'] = df_copy.index.hour
-
-        # Bereken gemiddelde outcome per uur
-        # Alleen rijen waar outcome niet 0 is (dus daadwerkelijke winst/verlies)
-        time_effectiveness = df_copy[df_copy['trade_outcome_label'] != 0].groupby('hour_of_day')['trade_outcome_label'].agg(['mean', 'count']).reset_index()
-        time_effectiveness.rename(columns={'mean': 'avg_outcome', 'count': 'num_trades'}, inplace=True)
-
-        # Converteer naar dictionary voor JSON opslag
-        result_dict = time_effectiveness.set_index('hour_of_day').to_dict(orient='index')
-
-        logger.info(f"Tijd-van-dag effectiviteit geanalyseerd: {result_dict}")
-
-        # Sla op naar bestand
-        # Use await asyncio.to_thread for blocking file I/O
-        def save_time_effectiveness():
-            with open(TIME_EFFECTIVENESS_FILE, 'w', encoding='utf-8') as f:
-                json.dump(result_dict, f, indent=2)
-        await asyncio.to_thread(save_time_effectiveness)
-        return result_dict
-
-    async def run_pretraining_pipeline(self, symbol: str, timeframe: str, strategy_id: str, params_manager=None): # Added params_manager
-        """
-        Voert de volledige pre-training pipeline uit met PyTorch CNN.
-        """
-        logger.info(f"Start pre-training pipeline voor {symbol} ({timeframe}, strategie: {strategy_id})...")
-
-        # Ensure self.params_manager is set, if not passed, it's initialized in __init__
-        if params_manager is not None and self.params_manager != params_manager: # If passed, ensure it's used
-            self.params_manager = params_manager
-            logger.info("ParamsManager extern meegegeven aan run_pretraining_pipeline.")
-
-
-        historical_df = await self.fetch_historical_data(symbol, timeframe) # limit is now handled by fetch_historical_data via params_manager
+        # 1. Fetch Data
+        historical_df = await self.fetch_historical_data_from_db(symbol, timeframe, limit=2000) # Example limit
         if historical_df.empty:
-            logger.error(f"Kan pre-training niet uitvoeren: geen historische data voor {symbol} ({timeframe}).")
+            logger.error(f"Cannot run pre-training: no historical data for {symbol} ({timeframe}).")
             return
 
-        processed_df = await self.prepare_training_data(historical_df)
-        if processed_df.empty:
-            logger.error(f"Kan pre-training niet uitvoeren: geen data na voorbereiding voor {symbol} ({timeframe}).")
+        # 2. Define patterns to train models for
+        # This could come from config or be dynamic
+        patterns_to_train = self.params_manager.get_param("trainablePatterns", strategy_id=strategy_id, default=['bullFlag'])
+        if not patterns_to_train:
+            logger.info("No patterns specified for training in params.json (trainablePatterns). Skipping model training.")
             return
 
-        # Train het CNN model
-        await self.train_ai_models(processed_df, model_type='SimpleCNN_Torch')
+        logger.info(f"Found patterns to train: {patterns_to_train}")
 
-        # Analyseer tijd-van-dag effectiviteit (conditioneel)
-        # De nieuwe prepare_training_data maakt 'bullFlag_label', niet 'trade_outcome_label'.
-        # Als 'analyze_time_of_day_effectiveness' nog steeds 'trade_outcome_label' vereist,
-        # moet die kolom apart worden gegenereerd of de analysefunctie aangepast.
-        # Voor nu, houden we de check zoals in het voorbeeld van de gebruiker.
-        if 'trade_outcome_label' in processed_df.columns:
-            await self.analyze_time_of_day_effectiveness(processed_df, strategy_id)
-        else:
-            logger.info("Kolom 'trade_outcome_label' niet gevonden in processed_df. Overslaan time_of_day_effectiveness.")
+        for pattern_name in patterns_to_train:
+            logger.info(f"Processing pattern: {pattern_name} for {symbol} ({timeframe})")
+            # 3. Prepare Data for the specific pattern
+            # This will add a '{pattern_name}_label' column
+            processed_df = await self.prepare_training_data(historical_df, pattern_name=pattern_name)
+            if processed_df.empty or f'{pattern_name}_label' not in processed_df.columns:
+                logger.error(f"Cannot train for pattern '{pattern_name}': data preparation failed or no labels generated.")
+                continue # Skip to next pattern
 
-        logger.info(f"Pre-training pipeline voltooid voor {symbol} ({timeframe}).")
+            # 4. Train Model for the specific pattern
+            await self.train_ai_models(processed_df, pattern_name=pattern_name)
 
-# Voorbeeld van hoe je het zou kunnen gebruiken (voor testen)
+        logger.info(f"Pre-training pipeline completed for {symbol} ({timeframe}).")
+
+
+# Global FREQTRADE_DB_PATH for the test block
+FREQTRADE_DB_PATH = "test_freqtrade_pretrainer.sqlite" # In-memory or test file
+
+# Test block
 if __name__ == "__main__":
-    dotenv_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '.env')
-    if not os.path.exists(dotenv_path):
-        print(f"LET OP: .env bestand niet gevonden op {dotenv_path}. Maak het aan indien nodig.")
-    dotenv.load_dotenv(dotenv_path) # Load environment variables
+    # import sys # Already imported at the top for logger config
+    # Configure logger for test output
+    # BasicConfig should ideally be called only once.
+    # If it was called when the logger was first defined, this might be redundant or cause issues.
+    # However, for a direct script run, it's often placed here.
+    # To be safe, check if handlers are already present.
+    if not logging.getLogger().handlers: # Check root logger
+        logging.basicConfig(level=logging.INFO,
+                            format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+                            handlers=[logging.StreamHandler(sys.stdout)])
 
-    # Setup basic logging for the test
-    import sys
-    logging.basicConfig(level=logging.INFO,
-                        format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-                        handlers=[logging.StreamHandler(sys.stdout)])
+    dotenv.load_dotenv(os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '.env'))
 
-    # Import ParamsManager here for the test block
-    try:
-        from core.params_manager import ParamsManager
-    except ImportError:
-        logger.error("ParamsManager kon niet worden geïmporteerd. Zorg ervoor dat het pad correct is.")
-        sys.exit(1) # Exit if essential components are missing for the test
+    # Test-specific FREQTRADE_DB_PATH
+    # This will be created in the same directory as the script when run directly
+    # FREQTRADE_DB_PATH = "test_freqtrade_pretrainer.sqlite" # Defined globally for the module now
 
-    # Dummy Freqtrade database setup (simplified, only if absolutely needed by params_manager or other components)
-    # For this test, we'll assume params_manager can run without a full Freqtrade setup if defaults are used.
-    # If Freqtrade's DB is strictly required by params_manager, this part would need actual Freqtrade setup.
-    # db_url = os.getenv('FREQTRADE_DB_URL', 'sqlite:///freqtrade_test_pretrain.sqlite')
-    # logger.info(f"Gebruik Freqtrade DB URL: {db_url} (uit .env of default)")
-    # if not os.path.exists(db_url.replace('sqlite:///', '')) and 'sqlite' in db_url:
-    #     logger.info(f"Test database {db_url} niet gevonden. Dit kan problemen veroorzaken als ParamsManager het vereist.")
-        # In een CI/CD of dev setup, zou je hier wellicht een dummy DB willen initialiseren.
-
+    def setup_dummy_db_for_pretrainer():
+        if os.path.exists(FREQTRADE_DB_PATH):
+            os.remove(FREQTRADE_DB_PATH)
+        conn = sqlite3.connect(FREQTRADE_DB_PATH)
+        cursor = conn.cursor()
+        # Create a table for ETH/USDT 5m - names must match Freqtrade's convention
+        # Store date as Unix timestamp (seconds) as Freqtrade does
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS candles_ETH_USDT_5m (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                date INTEGER UNIQUE NOT NULL,
+                open REAL NOT NULL,
+                high REAL NOT NULL,
+                low REAL NOT NULL,
+                close REAL NOT NULL,
+                volume REAL NOT NULL
+            );
+        """)
+        # Populate with some dummy data
+        now_ts = int(datetime.now().timestamp())
+        for i in range(1000): # More data for sequence generation
+            # Timestamps should be in seconds and unique
+            date_ts = now_ts - (1000 - i) * 300 # 300 seconds = 5 minutes
+            open_ = 100 + i * 0.01 + np.random.rand() * 0.1
+            close_ = open_ + (np.random.rand() - 0.5) * 0.2
+            high_ = max(open_, close_) + np.random.rand() * 0.1
+            low_ = min(open_, close_) - np.random.rand() * 0.1
+            volume = 1000 + np.random.rand() * 100
+            try:
+                cursor.execute("INSERT INTO candles_ETH_USDT_5m (date, open, high, low, close, volume) VALUES (?, ?, ?, ?, ?, ?)",
+                               (date_ts, open_, high_, low_, close_, volume))
+            except sqlite3.IntegrityError: # Skip if date already exists (should not happen with this logic)
+                pass
+        conn.commit()
+        conn.close()
+        logger.info(f"Dummy database for pretrainer test created at {FREQTRADE_DB_PATH} with ETH/USDT 5m data.")
 
     async def run_test_pre_trainer():
-        try:
-            params_manager_instance = ParamsManager() # Initialize with default path or ensure config exists
-            # Voorbeeld: stel een parameter in als dat nodig is voor de test
-            params_manager_instance.set_param('data_fetch_limit', 500) # Kleinere dataset voor snellere test
-            params_manager_instance.set_param('sequence_length_cnn', 10)
-            params_manager_instance.set_param('num_epochs_cnn', 3) # Minder epochs voor snelle test
-            logger.info(f"ParamsManager ingesteld voor test: data_fetch_limit={params_manager_instance.get_param('data_fetch_limit')}")
-        except Exception as e:
-            logger.error(f"Fout bij initialiseren/instellen ParamsManager: {e}")
-            return
+        setup_dummy_db_for_pretrainer()
 
-        pre_trainer = PreTrainer(params_manager=params_manager_instance)
-        test_symbol = "ETH/USDT" # Gebruik een symbool dat je data provider kan leveren (gesimuleerd hier)
-        test_timeframe = "1h"
-        test_strategy_id = "TestStrategyPyTorch" # Willekeurige ID voor test
+        # Clean up old model/scaler files for a clean test run
+        test_pattern_name = 'bullFlag' # Default pattern used in pipeline test
+        model_file_to_check = os.path.join(MODELS_DIR, f'cnn_model_{test_pattern_name}.pth')
+        scaler_file_to_check = os.path.join(MODELS_DIR, f'scaler_params_{test_pattern_name}.json')
+
+        if os.path.exists(model_file_to_check):
+            os.remove(model_file_to_check)
+            logger.info(f"Removed old test model: {model_file_to_check}")
+        if os.path.exists(scaler_file_to_check):
+            os.remove(scaler_file_to_check)
+            logger.info(f"Removed old test scaler: {scaler_file_to_check}")
+
+        # Initialize ParamsManager for the test if needed by PreTrainer's __init__
+        # or if run_pretraining_pipeline needs it explicitly.
+        # The PreTrainer now has a fallback if no PM is passed to __init__.
+        # However, run_pretraining_pipeline also has a fallback.
+        # For clarity, let's pass one.
+        pm_instance = None
+        if ParamsManager:
+            pm_instance = ParamsManager()
+            # Set trainablePatterns for the test if it's empty or not what we want
+            current_trainable = pm_instance.get_param("trainablePatterns", strategy_id="DUOAI_Strategy_PretrainTest")
+            if not current_trainable or test_pattern_name not in current_trainable:
+                 await pm_instance.set_param("trainablePatterns", [test_pattern_name], strategy_id="DUOAI_Strategy_PretrainTest")
+                 logger.info(f"Set 'trainablePatterns' to {[test_pattern_name]} for test strategy.")
+        else:
+            logger.warning("ParamsManager not imported, test might be limited.")
+
+
+        pre_trainer = PreTrainer(params_manager_instance=pm_instance) # Pass instance
+        test_symbol = "ETH/USDT"
+        test_timeframe = "5m"
+        # Use a distinct strategy_id for testing to avoid conflicts with live params.json
+        test_strategy_id = "DUOAI_Strategy_PretrainTest"
 
         print("\n--- Test PreTrainer Pipeline (PyTorch CNN) ---")
-        await pre_trainer.run_pretraining_pipeline(test_symbol, test_timeframe, test_strategy_id, params_manager=params_manager_instance)
+        # Pass the params_manager_instance to the pipeline as well
+        await pre_trainer.run_pretraining_pipeline(test_symbol, test_timeframe, test_strategy_id, params_manager_instance=pm_instance)
 
-        print(f"\nControleer logs in {PRETRAIN_LOG_FILE} en {TIME_EFFECTIVENESS_FILE}")
-        if os.path.exists(CNN_MODEL_PATH):
-            print(f"SUCCES: PyTorch CNN model opgeslagen op: {CNN_MODEL_PATH}")
-            print(f"Modelgrootte: {os.path.getsize(CNN_MODEL_PATH)} bytes")
+        print(f"\nCheck logs in {PRETRAIN_LOG_FILE}")
+        if os.path.exists(model_file_to_check):
+            print(f"SUCCES: PyTorch CNN model opgeslagen op: {model_file_to_check}")
+            print(f"Modelgrootte: {os.path.getsize(model_file_to_check)} bytes")
         else:
-            print(f"FOUT: PyTorch CNN model NIET opgeslagen op: {CNN_MODEL_PATH}")
+            print(f"FOUT: PyTorch CNN model NIET opgeslagen op: {model_file_to_check}")
 
-        if os.path.exists(CNN_SCALER_PARAMS_PATH):
-            print(f"SUCCES: CNN scaler parameters opgeslagen op: {CNN_SCALER_PARAMS_PATH}")
-            with open(CNN_SCALER_PARAMS_PATH, 'r') as f:
-                scaler_params_content = json.load(f)
-            print(f"Scaler params content (eerste 5 features min/max):")
-            for i, col in enumerate(scaler_params_content['feature_columns'][:5]):
-                print(f"  {col}: min={scaler_params_content['min_vals'][i]:.4f}, max={scaler_params_content['max_vals'][i]:.4f}")
+        if os.path.exists(scaler_file_to_check):
+            print(f"SUCCES: CNN scaler parameters opgeslagen op: {scaler_file_to_check}")
         else:
-            print(f"FOUT: CNN scaler parameters NIET opgeslagen op: {CNN_SCALER_PARAMS_PATH}")
+            print(f"FOUT: CNN scaler parameters NIET opgeslagen op: {scaler_file_to_check}")
 
-    asyncio.run(run_test_pre_trainer())
+        # Cleanup dummy DB
+        if os.path.exists(FREQTRADE_DB_PATH):
+            os.remove(FREQTRADE_DB_PATH)
+            logger.info(f"Dummy database {FREQTRADE_DB_PATH} removed.")
+
+    try:
+        asyncio.run(run_test_pre_trainer())
+    except ImportError as e:
+        logger.error(f"Test run failed due to import error: {e}. Ensure all dependencies are installed.")
+    except Exception as e:
+        logger.error(f"An unexpected error occurred during the test run: {e}", exc_info=True)
