@@ -1086,8 +1086,29 @@ if __name__ == "__main__":
     os.makedirs(CNNPatterns.MODELS_DIR, exist_ok=True) # Use class's MODELS_DIR
 
     def create_mock_dataframe_for_cnn(timeframe: str, num_rows: int) -> pd.DataFrame:
+        # Create a mock DataFrame with necessary columns for CNN input
         data = {
-            'date': pd.to_datetime([datetime.utcnow() - timedelta(minutes=i) for i in range(num_rows)]),
+            'date': pd.to_datetime([datetime.utcnow() - timedelta(minutes=i) for i in range(num_rows)])[::-1],
+            'open': np.random.rand(num_rows) * 100,
+            'high': np.random.rand(num_rows) * 100 + 100,
+            'low': np.random.rand(num_rows) * 100 - 50,
+            'close': np.random.rand(num_rows) * 100,
+            'volume': np.random.rand(num_rows) * 1000,
+            'rsi': np.random.rand(num_rows) * 100,
+            'macd': np.random.rand(num_rows) * 10,
+            'macdsignal': np.random.rand(num_rows) * 10,
+            'macdhist': np.random.rand(num_rows) * 10,
+            'bb_upperband': np.random.rand(num_rows) * 100 + 5,
+            'bb_middleband': np.random.rand(num_rows) * 100,
+            'bb_lowerband': np.random.rand(num_rows) * 100 - 5,
+        }
+        df = pd.DataFrame(data)
+        df.set_index('date', inplace=True) # Set 'date' as index like Freqtrade data
+        return df
+
+    async def run_test_cnn_patterns():
+        cnn_detector = CNNPatterns() # This will now load models based on pattern_configs
+        test_symbol_val = 'ETH/USDT' # Renamed variable
             'open': np.random.rand(num_rows) * 100,
             'high': np.random.rand(num_rows) * 100 + 100,
             'low': np.random.rand(num_rows) * 100 - 50,
