@@ -1059,6 +1059,7 @@ if __name__ == "__main__":
     from datetime import datetime, timedelta
     import dotenv
     import sys
+    FREQTRADE_DB_PATH = "freqtrade_test.sqlite3"
     # Removed sqlite3 import and FREQTRADE_DB_PATH logic as it's not directly relevant to testing cnn_patterns.py unit logic
     # and might cause issues if the DB doesn't exist or path is incorrect in a generic test environment.
     # Focus will be on mock dataframes.
@@ -1083,6 +1084,31 @@ if __name__ == "__main__":
     # The main CNNPatterns class should define MODELS_DIR.
 
     os.makedirs(CNNPatterns.MODELS_DIR, exist_ok=True) # Use class's MODELS_DIR
+
+    def create_mock_dataframe_for_cnn(timeframe: str, num_rows: int) -> pd.DataFrame:
+        data = {
+            'date': pd.to_datetime([datetime.utcnow() - timedelta(minutes=i) for i in range(num_rows)]),
+            'open': np.random.rand(num_rows) * 100,
+            'high': np.random.rand(num_rows) * 100 + 100,
+            'low': np.random.rand(num_rows) * 100 - 50,
+            'close': np.random.rand(num_rows) * 100,
+            'volume': np.random.rand(num_rows) * 1000,
+            'rsi': np.random.rand(num_rows) * 100,
+            'macd': np.random.rand(num_rows) * 10,
+            'macdsignal': np.random.rand(num_rows) * 10,
+            'macdhist': np.random.rand(num_rows) * 10,
+            'bb_upperband': np.random.rand(num_rows) * 100 + 5,
+            'bb_middleband': np.random.rand(num_rows) * 100,
+            'bb_lowerband': np.random.rand(num_rows) * 100 - 5,
+        }
+        df = pd.DataFrame(data)
+        df.set_index('date', inplace=True)
+        # Ensure all required columns for _dataframe_to_cnn_input are present
+        features_cols = ['open', 'high', 'low', 'close', 'volume', 'rsi', 'macd', 'macdsignal', 'macdhist']
+        for col in features_cols:
+            if col not in df.columns:
+                df[col] = np.nan # or some default value
+        return df
 
     # Mock SimpleCNN model for saving/loading test (already defined in the file)
     # class MockSimpleCNN(nn.Module): # Not needed, SimpleCNN is defined above
