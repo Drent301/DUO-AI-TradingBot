@@ -281,7 +281,11 @@ class PreTrainer:
         best_val_recall = 0.0
         best_val_f1 = 0.0
 
-        logger.info(f"Start trainingsloop voor {num_epochs} epochs...")
+        # Early stopping parameters
+        epochs_no_improve = 0
+        patience = self.params_manager.get_param('early_stopping_patience_cnn', default=3) # Default patience of 3 epochs
+
+        logger.info(f"Start trainingsloop voor {num_epochs} epochs met Early Stopping (patience={patience})...")
         # Initialize best_val_accuracy before the epoch loop, alongside best_val_loss
         # best_val_loss is already initialized, best_val_accuracy was also initialized
         # No change needed here for initialization based on current code structure.
@@ -340,15 +344,25 @@ class PreTrainer:
                 f"Validation F1: {val_f1:.4f} for {model_type}"
             )
 
-            # When val_loss < best_val_loss, also update best_val_accuracy = val_accuracy.
+            # Early stopping check and model saving
             if avg_epoch_val_loss < best_val_loss:
                 best_val_loss = avg_epoch_val_loss
-                best_val_accuracy = val_accuracy # This was already here
-                best_val_precision = val_precision # Keep updating other metrics too
-                best_val_recall = val_recall # Keep updating other metrics too
-                best_val_f1 = val_f1 # Keep updating other metrics too
+                best_val_accuracy = val_accuracy
+                best_val_precision = val_precision
+                best_val_recall = val_recall
+                best_val_f1 = val_f1
+                epochs_no_improve = 0
                 torch.save(model.state_dict(), CNN_MODEL_PATH)
-                logger.debug(f"Model voor {model_type} opgeslagen. Val Loss: {best_val_loss:.4f}, Acc: {best_val_accuracy:.4f}, Prec: {best_val_precision:.4f}, Rec: {best_val_recall:.4f}, F1: {best_val_f1:.4f}")
+                logger.debug(
+                    f"Beste model voor '{model_type}' opgeslagen op Epoch {epoch+1}. "
+                    f"Val Loss: {best_val_loss:.4f}, Acc: {best_val_accuracy:.4f}, "
+                    f"Prec: {best_val_precision:.4f}, Rec: {best_val_recall:.4f}, F1: {best_val_f1:.4f}."
+                )
+            else:
+                epochs_no_improve += 1
+                if epochs_no_improve >= patience:
+                    logger.info(f"Early stopping geactiveerd voor '{model_type}' op Epoch {epoch+1} na {patience} epochs zonder verbetering.")
+                    break # Stop training
 
         # At the end of the training for a pattern (after the epoch loop),
         # ensure that final_val_loss is best_val_loss and final_val_accuracy is best_val_accuracy
