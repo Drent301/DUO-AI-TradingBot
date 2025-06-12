@@ -1,13 +1,15 @@
-freqtrade
-ccxt
-ta
-pandas-ta
+# freqtrade
+# ccxt
+# ta
+# pandas-ta
 openai
 groq
 numpy
 pandas
-scikit-learn
-matplotlib
-seaborn
+# scikit-learn
+# matplotlib
+# seaborn
 python-dotenv
 requests
+pytest
+pytest-asyncio
