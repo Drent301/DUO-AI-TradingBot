@@ -1,15 +1,17 @@
+python-dotenv
+pytest
+pytest-asyncio
+pandas
+numpy
+torch
+scikit-learn
+talib-binary
+openai
+groq
+requests
 # freqtrade
 # ccxt
 # ta
 # pandas-ta
-openai
-groq
-numpy
-pandas
-# scikit-learn
 # matplotlib
 # seaborn
-python-dotenv
-requests
-pytest
-pytest-asyncio

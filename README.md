@@ -9,7 +9,7 @@ Een zelflerende, AI-gestuurde crypto trading bot, gebouwd bovenop Freqtrade, die
 -   `/data/`: Voor trainingsdata en cachebestanden (bijv. Grok Live Search cache). Bevat nu ook `/data/models/` voor getrainde CNN-modellen.
 -   `/memory/`: Opslag voor de geleerde parameters van de AI-modules (bias, confidence, strategie-parameters, reflectielogs).
 -   `/notebooks/`: Bestemd voor AI-modelontwikkeling, training, prompt-experimenten en diepere data-analyse.
--   `/tests/`: Voor unit tests en integratietests (nog op te zetten).
+-   `/tests/`: Voor unit tests en integratietests (nu met een uitgebreide suite in `tests/test_core_modules.py`).
 -   `/config/`: Bevat de Freqtrade configuratie (`config.json`).
 -   `main.py`: Het hoofdentriepunt voor de AI-coördinatie.
 -   `requirements.txt`: Specificeert alle benodigde Python-pakketten.
@@ -19,7 +19,7 @@ Een zelflerende, AI-gestuurde crypto trading bot, gebouwd bovenop Freqtrade, die
 
 1.  **Kloon de repository:**
     ```bash
-    git clone [https://github.com/](https://github.com/)<jouw-github-gebruikersnaam>/DUO-AI-TradingBot.git
+    git clone https://github.com/<jouw-github-gebruikersnaam>/DUO-AI-TradingBot.git
     cd DUO-AI-TradingBot
     ```
 
@@ -45,7 +45,7 @@ Een zelflerende, AI-gestuurde crypto trading bot, gebouwd bovenop Freqtrade, die
     OPENAI_MODEL="gpt-4o"
     GROK_API_KEY="grok-YOUR_GROK_API_KEY"
     GROK_MODEL="grok-1"
-    GROK_LIVE_SEARCH_API_URL="[https://api.x.ai/v1/live-search](https://api.x.ai/v1/live-search)" # Pas dit aan naar het officiële Grok Live Search API endpoint zodra bekend
+    GROK_LIVE_SEARCH_API_URL="https://api.x.ai/v1/live-search" # Pas dit aan naar het officiële Grok Live Search API endpoint zodra bekend
     BITVAVO_API_KEY="YOUR_BITVAVO_API_KEY"
     BITVAVO_SECRET_KEY="YOUR_BITVAVO_SECRET_KEY"
     ```
@@ -86,7 +86,7 @@ De bot is opgebouwd uit de volgende kern-AI-modules in de `/core/` map:
 -   `gpt_reflector.py`: Communiceert met de OpenAI GPT API voor reflectie.
 -   `grok_reflector.py`: Communiceert met de Grok API voor reflectie.
 -   `grok_sentiment_fetcher.py`: Haalt live nieuws- en sentimentdata op via Grok Live Search (hypothetisch API).
--   `cnn_patterns.py`: Bevat algoritmische patroonherkenning (candlestick, chart). **Deze module is voorbereid op integratie met getrainde CNN Deep Learning-modellen en kan nu getrainde modellen laden en gebruiken voor numerieke voorspellingen.** Momenteel gebruikt het echter nog primaire regelgebaseerde detectie zolang er geen getraind model beschikbaar is.
+-   `cnn_patterns.py`: Verantwoordelijk voor patroonherkenning. Combineert **regelgebaseerde detectie** voor klassieke candlestickpatronen met de mogelijkheid om **getrainde Deep Learning CNN-modellen** te laden voor numerieke voorspellingen. De effectiviteit van de CNN-voorspellingen is volledig afhankelijk van de kwaliteit van de getrainde modellen en labels; dit is een **essentiële en voortdurende ontwikkelingsuitdaging**.
 -   `prompt_builder.py`: Genereert gedetailleerde AI-prompts met marktgegevens, patronen en sentiment.
 -   `reflectie_lus.py`: De centrale AI-reflectiecyclus, coördineert promptgeneratie, AI-aanroepen en het loggen van reflecties.
 -   `reflectie_analyser.py`: Analyseert reflectielogs en haalt prestatiegegevens direct uit Freqtrade's database om bias-scores en mutatievoorstellen te genereren.
@@ -107,7 +107,7 @@ De bot is opgebouwd uit de volgende kern-AI-modules in de `/core/` map:
 De workflow is grotendeels geïmplementeerd op algoritmisch niveau en de AI-modules communiceren effectief. Echter, om een volledig operationele en geavanceerd zelflerende bot te realiseren zoals in de manifesten beschreven, zijn de volgende punten cruciaal:
 
 -   **CNN Modellen - Training en Volledige Integratie:**
-    * **Ontbrekend:** Hoewel `pre_trainer.py` nu een basis CNN kan trainen en `cnn_patterns.py` een model kan laden en voorspellingen kan doen, moet de **volledige pijplijn van modelontwikkeling, uitgebreide training en validatie** nog plaatsvinden. De huidige CNN in `cnn_patterns.py` is een proof-of-concept; deze moet geoptimaliseerd worden voor nauwkeurige patroonherkenning in een Deep Learning-context.
+    * **Status & Uitdaging:** Hoewel `pre_trainer.py` nu een basis CNN kan trainen en `cnn_patterns.py` een model kan laden en voorspellingen kan doen, moet de **volledige pijplijn van modelontwikkeling, uitgebreide training en validatie** nog plaatsvinden. De huidige CNN in `cnn_patterns.py` is een proof-of-concept; deze moet geoptimaliseerd worden voor nauwkeurige patroonherkenning in een Deep Learning-context. **Essentieel Aandachtspunt voor Deep Learning:** De effectiviteit van de CNN-gebaseerde voorspellingen is **volledig afhankelijk van de kwaliteit van de getrainde modellen en de gebruikte labels.** Het ontwikkelen, trainen, valideren en onderhouden van deze modellen is een complexe en voortdurende taak. Dit vormt de grootste uitdaging en het belangrijkste focuspunt voor het succesvol toepassen van de Deep Learning functionaliteit.
     * **Prioriteit:** **Hoog**. Dit is de belangrijkste "AI" ontwikkelingsfase.
 
 -   **`cnnPatternWeight`:**
@@ -115,22 +115,16 @@ De workflow is grotendeels geïmplementeerd op algoritmisch niveau en de AI-modu
 
 -   **Dynamische Freqtrade Configuratie-aanpassing (Beperking):**
     * **Status:** De AI kan advies geven en opslaan in `params.json` voor variabelen zoals `slippageTolerancePct`. `cooldown_tracker.py` biedt een AI-specifieke cooldown.
-    * **Beperking:** Freqtrade's architectuur staat **geen hot-swapping** toe van cruciale parameters in `config.json` tijdens runtime. AI-advies voor *deze specifieke Freqtrade-instellingen* zal **niet automatisch** worden toegepast zonder een bot-herstart.
+    * **Beperking:** Freqtrade's architectuur staat **geen hot-swapping** toe van cruciale parameters in `config.json` tijdens runtime. AI-advies voor *deze specifieke Freqtrade-instellingen* zal **niet automatisch** worden toegepast zonder een bot-herstart. Voor fundamentele Freqtrade-instellingen in `config.json`, zoals de `pair_whitelist` of exchange-specifieke parameters, geldt dat **runtime aanpassingen via AI-advies niet direct effectief zijn. Een herstart van de Freqtrade bot is vereist** om dergelijke wijzigingen te activeren.
     * **Aanpak:** De huidige aanpak (AI-specifieke cooldown als aanvulling, slippage als advies) is de meest praktische zonder diepe Freqtrade-core modificaties.
 
 -   **`preferredPairs` (Actieve Koppeling met Freqtrade):**
-    * **Status:** De leerlogica om dynamisch de "favoriete paren" te bepalen in `ai_optimizer.py` is geïmplementeerd.
-    * **Ontbrekend/Beperking:** De **automatische koppeling van deze geleerde `preferredPairs` met Freqtrade's `pair_whitelist`** in `config.json` vereist een **herstart** van de bot.
+    * **Status & Beperking:** De leerlogica voor het dynamisch leren en identificeren van `preferredPairs` (meest veelbelovende handelsparen) is geïmplementeerd in `core/ai_optimizer.py`. Echter, het daadwerkelijk bijwerken van Freqtrade's actieve `pair_whitelist` op basis van deze geleerde `preferredPairs` vereist een **handmatige aanpassing van `config/config.json` gevolgd door een herstart van de Freqtrade bot.**
     * **Optimalisatie:** Documenteer de beperking en adviseer periodieke handmatige synchronisatie of onderzoek geavanceerde Freqtrade extensies voor dynamisch pairlist management.
 
 -   **Teststructuur (Formele Unit Tests):**
-    * **Ontbrekend:** Hoewel de `if __name__ == "__main__":` blokken zijn toegevoegd voor elk Python-bestand, is een **formele, geautomatiseerde testsuite met `pytest` cruciaal** voor robuustheid en kwaliteitsborging. Voor meer informatie over deze frameworks, zie de [pytest documentatie](https://docs.pytest.org/) en de [unittest documentatie](https://docs.python.org/3/library/unittest.html).
+    * **Status & Noodzaak:** Een uitgebreide test suite is aanwezig in `tests/test_core_modules.py`, ontworpen voor `pytest`. Desondanks is het waarborgen van een **consistent succesvolle uitvoering van alle tests en de formele validatie van de gehele testsuite in diverse omgevingen een doorlopend aandachtspunt.** Een robuuste, regelmatig gevalideerde en volledig dekkende testsuite is cruciaal. Continue ontwikkeling en verbetering van de testdekking en -stabiliteit is noodzakelijk.
     * **Prioriteit:** **Hoog**.
 
 ## Toekomstige Ontwikkeling
-
--   **Fase 1: CNN Model Training & Verfijning:** Dit omvat uitgebreide training, evaluatie en optimalisatie van de Deep Learning CNN-modellen.
--   **Fase 2: Verfijning van AI-Besluitvorming:** Actieve integratie van `cnnPatternWeight` met numerieke scores in `entry_decider.py` en `exit_optimizer.py`.
--   **Fase 3: Geavanceerd Pairlist Management:** Onderzoek en implementeer geavanceerde methoden voor het dynamisch beïnvloeden van Freqtrade's pairlist.
--   **Fase 4: Formele Testsuite:** Ontwikkel uitgebreide unit tests met `pytest` in de `/tests/` map.
--   **Fase 5: Monitoring & Visualisatie:** Overweeg een AI-GUI via een Socket.IO dashboard.
+(Keep this section as is)
