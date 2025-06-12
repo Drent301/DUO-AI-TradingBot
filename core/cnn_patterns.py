@@ -16,6 +16,9 @@ logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
 
 class SimpleCNN(nn.Module):
+# Future Improvement: The current training parameters (e.g., epochs, learning rate, batch_size)
+# and model architecture are foundational. Systematic hyperparameter tuning and experimentation
+# with different CNN architectures should be conducted to optimize performance for specific patterns.
     def __init__(self, input_channels, num_classes, sequence_length=30): # Added sequence_length
         super(SimpleCNN, self).__init__()
         self.sequence_length = sequence_length
@@ -48,6 +51,9 @@ class SimpleCNN(nn.Module):
         return x
 
 class CNNPatterns:
+# Future Improvement: For optimal ML performance, consider enhancing training label quality.
+# Current algorithmic labeling is a good starting point, but more refined labels,
+# potentially annotated with domain expertise, could significantly improve model accuracy and robustness.
     """
     Detecteert visuele candlestick- en technische patronen in marktdata.
     Integreert nu een PyTorch CNN model voor patroonherkenning.
@@ -196,7 +202,9 @@ class CNNPatterns:
             return 0.0
 
         # Call the new _dataframe_to_cnn_input method
-        cnn_input_tensor = self._dataframe_to_cnn_input(dataframe, pattern_name) # sequence_length is default in _dataframe_to_cnn_input
+        # Use the sequence_length specific to the loaded model
+        model_sequence_length = model.sequence_length
+        cnn_input_tensor = self._dataframe_to_cnn_input(dataframe, pattern_name, sequence_length=model_sequence_length)
 
         if cnn_input_tensor is None:
             logger.debug(f"Kon geen CNN input tensor genereren voor patroon '{pattern_name}'.")
