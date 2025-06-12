@@ -270,9 +270,16 @@ class EntryDecider:
         # This log was already added when fetching entryLearnedBiasThreshold, so it's fine.
         # logger.info(f"Symbol: {symbol}, Using entryLearnedBiasThreshold: {entry_learned_bias_threshold} (Default: 0.55)")
 
-        strong_pattern_threshold = entry_conviction_threshold # Use entry_conviction_threshold as the threshold for strong patterns
-        is_strong_pattern = weighted_pattern_score >= strong_pattern_threshold
-        logger.info(f"Symbol: {symbol}, Weighted Pattern Score: {weighted_pattern_score:.2f}, Strong Pattern Threshold (entry_conviction_threshold): {strong_pattern_threshold:.2f}, IsStrongPattern: {is_strong_pattern}")
+        strong_pattern_threshold_param = self.params_manager.get_param(
+            "strongPatternThreshold",
+            strategy_id=current_strategy_id,
+            default=0.5 # Default if not found in params
+        )
+        logger.info(f"Symbol: {symbol}, Using strongPatternThreshold: {strong_pattern_threshold_param} (Default: 0.5)")
+
+        # strong_pattern_threshold = entry_conviction_threshold # This line will be replaced/removed
+        is_strong_pattern = weighted_pattern_score >= strong_pattern_threshold_param
+        logger.info(f"Symbol: {symbol}, Weighted Pattern Score: {weighted_pattern_score:.2f}, Strong Pattern Threshold (from Params): {strong_pattern_threshold_param:.2f}, IsStrongPattern: {is_strong_pattern}")
 
 
         # AI-besluitvormingslogica
@@ -283,7 +290,7 @@ class EntryDecider:
            learned_bias >= entry_learned_bias_threshold and \
            is_strong_pattern:
 
-            logger.info(f"[EntryDecider] ✅ Entry GOEDKEURING voor {symbol}. Consensus: {consensus_intentie}, Final AI Conf: {final_ai_confidence:.2f} (Threshold: {entry_conviction_threshold:.2f}), Geleerde Bias: {learned_bias:.2f} (Threshold: >={entry_learned_bias_threshold:.2f}), Is Strong Pattern: {is_strong_pattern} (Weighted Score: {weighted_pattern_score:.2f} >= Threshold: {strong_pattern_threshold:.2f}).")
+            logger.info(f"[EntryDecider] ✅ Entry GOEDKEURING voor {symbol}. Consensus: {consensus_intentie}, Final AI Conf: {final_ai_confidence:.2f} (Threshold: {entry_conviction_threshold:.2f}), Geleerde Bias: {learned_bias:.2f} (Threshold: >={entry_learned_bias_threshold:.2f}), Is Strong Pattern: {is_strong_pattern} (Weighted Score: {weighted_pattern_score:.2f} >= Threshold Param: {strong_pattern_threshold_param:.2f}).")
             return {
                 "enter": True,
                 "reason": "AI_CONSENSUS_LONG_CONDITIONS_MET",
@@ -299,14 +306,14 @@ class EntryDecider:
             if consensus_intentie != "LONG": reason_parts.append(f"ai_intent_not_long ({consensus_intentie})")
             if final_ai_confidence < entry_conviction_threshold: reason_parts.append(f"final_ai_conf_low ({final_ai_confidence:.2f}_vs_{entry_conviction_threshold:.2f})")
             if learned_bias < entry_learned_bias_threshold: reason_parts.append(f"learned_bias_low ({learned_bias:.2f}_vs_{entry_learned_bias_threshold:.2f})")
-            if not is_strong_pattern: reason_parts.append(f"pattern_score_low ({weighted_pattern_score:.2f}_vs_{strong_pattern_threshold:.2f})")
+            if not is_strong_pattern: reason_parts.append(f"pattern_score_low ({weighted_pattern_score:.2f}_vs_{strong_pattern_threshold_param:.2f})") # Use strong_pattern_threshold_param
 
             full_reason_str = "_".join(reason_parts) if reason_parts else "entry_conditions_not_met"
             if not reason_parts and consensus_intentie == "LONG": # If intent was long but other conditions failed
-                 full_reason_str = f"intent_long_other_conditions_failed_conf{final_ai_confidence:.2f}_bias{learned_bias:.2f}_pattern_score{weighted_pattern_score:.2f}_vs_bias_thresh{entry_learned_bias_threshold:.2f}_pattern_thresh{strong_pattern_threshold:.2f}"
+                 full_reason_str = f"intent_long_other_conditions_failed_conf{final_ai_confidence:.2f}_bias{learned_bias:.2f}_pattern_score{weighted_pattern_score:.2f}_vs_bias_thresh{entry_learned_bias_threshold:.2f}_pattern_thresh{strong_pattern_threshold_param:.2f}" # Use strong_pattern_threshold_param
 
 
-            logger.info(f"[EntryDecider] ❌ Entry GEWEIGERD voor {symbol}. Reden: {full_reason_str}. AI Intentie: {consensus_intentie}, Final AI Conf: {final_ai_confidence:.2f}, Geleerde Bias: {learned_bias:.2f} (Threshold: {entry_learned_bias_threshold:.2f}), Is Strong Pattern: {is_strong_pattern} (Weighted Score: {weighted_pattern_score:.2f} vs Threshold: {strong_pattern_threshold:.2f}).")
+            logger.info(f"[EntryDecider] ❌ Entry GEWEIGERD voor {symbol}. Reden: {full_reason_str}. AI Intentie: {consensus_intentie}, Final AI Conf: {final_ai_confidence:.2f}, Geleerde Bias: {learned_bias:.2f} (Threshold: {entry_learned_bias_threshold:.2f}), Is Strong Pattern: {is_strong_pattern} (Weighted Score: {weighted_pattern_score:.2f} vs Threshold Param: {strong_pattern_threshold_param:.2f}).")
             return {
                 "enter": False,
                 "reason": full_reason_str,
@@ -446,28 +453,34 @@ if __name__ == "__main__":
                 "cnnPatternWeight": 0.8,
                 "entryLearnedBiasThreshold": 0.55, # Default
                 "entryTimeEffectivenessImpactFactor": 0.5, # Default
-                "entryRulePatternScore": 0.7 # Default
+                "entryRulePatternScore": 0.7, # Default
+                "strongPatternThreshold": 0.7 # NEW: Add this for the test
             }
             return params.get(key, default) # Use default from call if key not in mock
         decider.params_manager.get_param = mock_get_param_s1
 
         # CALCULATION FOR SCENARIO 1 (Updated for new logic):
-        # entryLearnedBiasThreshold = 0.55 (default)
-        # entryTimeEffectivenessImpactFactor = 0.5 (default)
-        # entryRulePatternScore = 0.7 (default)
+        # entryLearnedBiasThreshold = 0.55 (default from mock)
+        # entryTimeEffectivenessImpactFactor = 0.5 (default from mock)
+        # entryRulePatternScore = 0.7 (default from mock)
         # cnnPatternWeight = 0.8 (from mock_get_param_s1)
+        # strongPatternThreshold = 0.7 (from mock_get_param_s1)
         # CNN score (15m_bullFlag_score) = 0.95 (from mock_cnn_ml_and_rule)
         # Rule-based pattern "bullishEngulfing" detected.
         # CNN contribution = 0.95 * 0.8 = 0.76
         # Rule contribution = 0.7 * 0.8 = 0.56
         # weighted_pattern_score = 0.76 + 0.56 = 1.32
-        # strong_pattern_threshold (entry_conviction_threshold) = 0.7 (passed as argument)
-        # is_strong_pattern = 1.32 >= 0.7 -> True
-        # AI conf = 0.85. learned_bias = 0.7.
+        # is_strong_pattern = 1.32 >= strongPatternThreshold (0.7) -> True
+        # AI conf from mock_ask_ai_positive = 0.85. learned_bias = 0.7 (passed to should_enter).
         # time_adjusted_confidence_multiplier = 1.0 + (0.0 * 0.5) = 1.0
         # final_ai_confidence = 0.85 * 1.0 = 0.85
-        # Conditions: LONG (True), final_ai_conf (0.85) >= entry_conv_thresh (0.7) (True),
-        #             learned_bias (0.7) >= entry_learned_bias_thresh (0.55) (True), is_strong_pattern (True). All True.
+        # entry_conviction_threshold = 0.7 (passed as argument to should_enter)
+        # Conditions for entry:
+        # consensus_intentie == "LONG" (True, from mock_ask_ai_positive)
+        # final_ai_confidence (0.85) >= entry_conviction_threshold (0.7) (True)
+        # learned_bias (0.7) >= entry_learned_bias_threshold (0.55) (True)
+        # is_strong_pattern (True)
+        # All True.
         entry_decision_s1 = await decider.should_enter(
             dataframe=mock_df_5m, symbol=test_symbol, current_strategy_id=test_strategy_id,
             trade_context=mock_trade_context,
@@ -495,22 +508,26 @@ if __name__ == "__main__":
         # It also gives neutral time effect, which is fine.
 
         # CALCULATION FOR SCENARIO 2 (Updated for new logic):
+        # params from mock_get_param_s1:
         # cnnPatternWeight = 0.8
+        # strongPatternThreshold = 0.7
         # CNN score (15m_bullFlag_score) = 0.1 (from mock_cnn_low_score_only)
         # No rule-based patterns.
         # CNN contribution = 0.1 * 0.8 = 0.08
         # Rule contribution = 0
         # weighted_pattern_score = 0.08
-        # strong_pattern_threshold (entry_conviction_threshold) = 0.7
-        # is_strong_pattern = 0.08 >= 0.7 -> False.
+        # is_strong_pattern = weighted_pattern_score (0.08) >= strongPatternThreshold (0.7) -> False.
+        # This is the primary reason for rejection.
         entry_decision_s2 = await decider.should_enter(
             dataframe=mock_df_5m, symbol=test_symbol, current_strategy_id=test_strategy_id,
             trade_context=mock_trade_context,
-            learned_bias=0.7, learned_confidence=0.8, entry_conviction_threshold=0.7 # entry_conviction_threshold is 0.7
+            learned_bias=0.7, learned_confidence=0.8, entry_conviction_threshold=0.7
         )
         print(f"Resultaat (Scenario 2 - Low CNN Score): {json.dumps(entry_decision_s2, indent=2, default=str)}")
         assert entry_decision_s2['enter'] is False
-        assert "pattern_score_low" in entry_decision_s2['reason'] # Should be pattern_score_low (0.08_vs_0.70)
+        # The reason string includes the score vs threshold. The threshold is now strongPatternThreshold (0.7 from mock).
+        assert "pattern_score_low (0.08_vs_0.70)" in entry_decision_s2['reason']
+
 
         # --- Test Scenario 3: Negative Time-of-Day Effectiveness Blocks Entry (Custom Impact Factor) ---
         print("\n--- Test Scenario 3: Negative Time-of-Day Effectiveness Blocks Entry (Custom Impact Factor) ---")
@@ -522,19 +539,24 @@ if __name__ == "__main__":
                 "cnnPatternWeight": 0.8,
                 "entryLearnedBiasThreshold": 0.55, # Default
                 "entryTimeEffectivenessImpactFactor": 0.7, # Custom, higher impact
-                "entryRulePatternScore": 0.7 # Default
+                "entryRulePatternScore": 0.7, # Default
+                "strongPatternThreshold": 0.7 # Add this for the test
             }
             return params.get(key, default)
         decider.params_manager.get_param = mock_get_param_s3
 
         # CALCULATION FOR SCENARIO 3:
+        # Params from mock_get_param_s3:
         # entryTimeEffectivenessImpactFactor = 0.7
-        # weighted_pattern_score = 1.32 (as per mock_cnn_ml_and_rule and cnnPatternWeight=0.8)
+        # cnnPatternWeight = 0.8
+        # strongPatternThreshold = 0.7
+        # weighted_pattern_score = 1.32 (as per mock_cnn_ml_and_rule and cnnPatternWeight=0.8 from S3 mock)
+        # is_strong_pattern = 1.32 >= strongPatternThreshold (0.7) -> True.
         # AI conf 0.85 (from mock_ask_ai_positive).
         # Time mult = 1 + (-0.8 * 0.7) = 1 - 0.56 = 0.44.
         # final_ai_conf = 0.85 * 0.44 = 0.374.
-        # This 0.374 is < entry_conviction_threshold (0.7).
-        # Conditions: LONG, 0.374 >= 0.7 (False), 0.7 >= 0.55, 1.32 >= 0.7. Fails on AI confidence.
+        # entry_conviction_threshold = 0.7 (passed to should_enter)
+        # Primary failure: final_ai_conf (0.374) < entry_conviction_threshold (0.7).
         entry_decision_s3 = await decider.should_enter(
             dataframe=mock_df_5m, symbol=test_symbol, current_strategy_id=test_strategy_id,
             trade_context=mock_trade_context,
