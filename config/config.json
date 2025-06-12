@@ -37,7 +37,9 @@
   },
   "stake_currency": "EUR",
   "stake_amount": "unlimited",
-  "max_open_trades": 1,
+  "max_open_trades": 3,
+  "position_stacking": true,
+  "max_trade_exposure": 0.5,
   "tradable_modes": {
     "backtest": true,
     "live": false,
@@ -47,10 +49,16 @@
   "startup_candle_count": 100,
   "runmode": "backtest",
   "strategy": "DUOAI_Strategy",
+  "minimal_roi": {
+    "0": 0.03,
+    "30": 0.015,
+    "60": 0.005,
+    "120": 0
+  },
   "protections": [
     {
       "method": "CooldownPeriod",
-      "stop_duration_candles": 5
+      "stop_duration_candles": 0
     },
     {
       "method": "MaxDrawdown",
