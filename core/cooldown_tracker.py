@@ -46,7 +46,12 @@ class CooldownTracker:
         try:
             # Ensure the directory exists before trying to save the file
             os.makedirs(os.path.dirname(COOLDOWN_MEMORY_FILE), exist_ok=True)
-            await asyncio.to_thread(lambda: json.dump(self._cooldown_state, open(COOLDOWN_MEMORY_FILE, 'w', encoding='utf-8'), indent=2))
+            # Using a lambda to pass arguments to json.dump correctly with to_thread
+            def _dump_json():
+                with open(COOLDOWN_MEMORY_FILE, 'w', encoding='utf-8') as f:
+                    json.dump(self._cooldown_state, f, indent=4) # Changed indent to 4
+
+            await asyncio.to_thread(_dump_json)
         except IOError as e:
             logger.error(f"Fout bij opslaan cooldown staat: {e}")
 
@@ -55,7 +60,18 @@ class CooldownTracker:
         Activeert een cooldown voor een specifieke token/strategie.
         De duur van de cooldown wordt opgehaald uit `params_manager`.
         """
-        cooldown_duration_seconds = self.params_manager.get_param("cooldownDurationSeconds", strategy_id=None) # Globale parameter
+        # Fetch duration, providing a default value if not found by get_param.
+        # ParamsManager's get_param will use its internal defaults first.
+        cooldown_duration_seconds = self.params_manager.get_param(
+            "cooldownDurationSeconds",
+            strategy_id=None,
+            default=300 # Explicit default for activate_cooldown if get_param returns None
+        )
+
+        # Ensure duration is a sensible number, fallback if a weird value was retrieved (e.g. None or non-numeric from a corrupt file)
+        if not isinstance(cooldown_duration_seconds, (int, float)) or cooldown_duration_seconds < 0:
+            logger.warning(f"Invalid cooldownDurationSeconds value ({cooldown_duration_seconds}) retrieved from params. Using default 300s.")
+            cooldown_duration_seconds = 300
 
         cooldown_end_time = datetime.now() + timedelta(seconds=cooldown_duration_seconds)
 
@@ -81,7 +97,12 @@ class CooldownTracker:
         end_time_str = cooldown_info.get("end_time")
         if not end_time_str: return False # Should not happen if well-formed
 
-        cooldown_end_time = datetime.fromisoformat(end_time_str)
+        try:
+            cooldown_end_time = datetime.fromisoformat(end_time_str)
+        except ValueError:
+            logger.error(f"Invalid end_time format for {token}/{strategy_id}: {end_time_str}. Considering cooldown inactive.")
+            return False
+
 
         if datetime.now() < cooldown_end_time:
             logger.debug(f"[CooldownTracker] Cooldown actief voor {token}/{strategy_id}. Resterende tijd: {cooldown_end_time - datetime.now()}.")
@@ -98,6 +119,9 @@ class CooldownTracker:
         """
         if token in self._cooldown_state and strategy_id in self._cooldown_state[token]:
             del self._cooldown_state[token][strategy_id]
+            # Clean up token entry if no more strategies are under cooldown for it
+            if not self._cooldown_state[token]:
+                del self._cooldown_state[token]
             await self._save_cooldown_state()
             logger.info(f"[CooldownTracker] Cooldown handmatig gedeactiveerd voor {token}/{strategy_id}.")
 
@@ -114,6 +138,10 @@ if __name__ == "__main__":
     dotenv.load_dotenv(dotenv_path)
 
     async def run_test_cooldown_tracker():
+        # Ensure params file has a value for cooldownDurationSeconds for the test
+        pm = ParamsManager()
+        await pm.set_param("cooldownDurationSeconds", 5) # Set a global short cooldown for testing
+
         tracker = CooldownTracker()
         test_token = "ETH/USDT"
         test_strategy_id = "DUOAI_Strategy"
@@ -125,44 +153,44 @@ if __name__ == "__main__":
         assert not tracker.is_cooldown_active(test_token, test_strategy_id)
 
         # Activate cooldown
-        print(f"Activeren cooldown voor {test_token}/{test_strategy_id} (duur: 5 seconden)...")
-        # Voor de test, overschrijf de cooldown duration in params_manager
-        # This requires params_manager to have a set_param method or similar for testing
-        # Assuming params_manager might not have a direct set_param, we'll log this need.
-        # For the test to run as is, ParamsManager would need a way to override params.
-        # We will proceed assuming params_manager.set_param is available for testing purposes.
-        if hasattr(tracker.params_manager, 'set_param'):
-            tracker.params_manager.set_param("cooldownDurationSeconds", 5)
-        else:
-            logger.warning("params_manager.set_param not available. Test may not reflect dynamic cooldown duration.")
-            # Fallback: if we can't set it, the test will use the default from params_manager's source
+        print(f"Activeren cooldown voor {test_token}/{test_strategy_id} (duur van ParamsManager)...")
 
         await tracker.activate_cooldown(test_token, test_strategy_id, reason="test_activation")
         print(f"Is cooldown actief na activatie? {tracker.is_cooldown_active(test_token, test_strategy_id)}")
         assert tracker.is_cooldown_active(test_token, test_strategy_id)
 
-        # Wait for 3 seconds (still in cooldown)
+        # Wait for 3 seconds (still in cooldown if duration was 5s)
         print("Wachten 3 seconden...")
         await asyncio.sleep(3)
         print(f"Is cooldown actief na 3 seconden? {tracker.is_cooldown_active(test_token, test_strategy_id)}")
         assert tracker.is_cooldown_active(test_token, test_strategy_id)
 
-        # Wait for another 3 seconds (cooldown should be over)
+        # Wait for another 3 seconds (cooldown should be over if duration was 5s)
         print("Wachten nogmaals 3 seconden...")
-        await asyncio.sleep(3)
+        await asyncio.sleep(3) # Total 6 seconds
         print(f"Is cooldown actief na 6 seconden? {tracker.is_cooldown_active(test_token, test_strategy_id)}")
         assert not tracker.is_cooldown_active(test_token, test_strategy_id)
 
         # Test handmatige deactivatie
-        if hasattr(tracker.params_manager, 'set_param'): # Reset for this test if possible
-            tracker.params_manager.set_param("cooldownDurationSeconds", 5)
-
+        await pm.set_param("cooldownDurationSeconds", 60) # Set a longer cooldown
         await tracker.activate_cooldown(test_token, test_strategy_id, reason="manual_deactivation_test")
         print(f"Cooldown opnieuw geactiveerd. Actief? {tracker.is_cooldown_active(test_token, test_strategy_id)}")
         assert tracker.is_cooldown_active(test_token, test_strategy_id)
         await tracker.deactivate_cooldown(test_token, test_strategy_id)
         print(f"Cooldown gedeactiveerd. Actief? {tracker.is_cooldown_active(test_token, test_strategy_id)}")
         assert not tracker.is_cooldown_active(test_token, test_strategy_id)
+
+        # Test that the token entry is removed if no strategies are left
+        await tracker.activate_cooldown("OTHER/TOKEN", "StratX", "test")
+        assert "OTHER/TOKEN" in tracker._cooldown_state
+        await tracker.deactivate_cooldown("OTHER/TOKEN", "StratX")
+        assert "OTHER/TOKEN" not in tracker._cooldown_state
+        print("Test opschonen token entry geslaagd.")
+
+        # Test invalid end_time format handling in is_cooldown_active
+        tracker._cooldown_state["INVALID/TOKEN"] = {"StratY": {"end_time": "invalid_datetime_format"}}
+        assert not tracker.is_cooldown_active("INVALID/TOKEN", "StratY")
+        print("Test ongeldig end_time formaat geslaagd.")
 
 
     asyncio.run(run_test_cooldown_tracker())

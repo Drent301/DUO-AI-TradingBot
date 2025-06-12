@@ -31,6 +31,7 @@ class ParamsManager:
                 with open(PARAMS_FILE, 'r', encoding='utf-8') as f:
                     return json.load(f)
             else:
+                logger.info(f"Parameterbestand {PARAMS_FILE} niet gevonden of is leeg. Start met standaardparameters.")
                 return self._get_default_params()
         except (FileNotFoundError, json.JSONDecodeError):
             logger.warning(f"Parameterbestand {PARAMS_FILE} niet gevonden of corrupt. Start met standaardparameters.")
@@ -43,77 +44,92 @@ class ParamsManager:
                 "maxTradeRiskPct": 0.02,
                 "slippageTolerancePct": 0.001,
                 "cooldownDurationSeconds": 300
+                # Add other global defaults as needed
             },
             "strategies": {
-                "DUOAI_Strategy": {
+                "DUOAI_Strategy": { # Example strategy
                     "entryConvictionThreshold": 0.7,
                     "exitConvictionDropTrigger": 0.4,
-                    "cnnPatternWeight": 1.0, # NIEUW: Initiële waarde voor CNN-patroon gewicht
-                    "strongPatternThreshold": 0.5, # Default threshold for strong patterns
+                    "cnnPatternWeight": 1.0,
+                    "strongPatternThreshold": 0.5,
                     "preferredPairs": [],
                     "minimal_roi": {"0": 0.05, "30": 0.03, "60": 0.02, "120": 0.01},
                     "stoploss": -0.10,
                     "trailing_stop_positive": 0.005,
                     "trailing_stop_positive_offset": 0.01
+                    # Add other strategy defaults as needed
                 }
             },
             "timeOfDayEffectiveness": {}
+            # Add other top-level default sections as needed
         }
 
     async def _save_params(self):
         """Slaat de huidige leerbare parameters op naar een JSON-bestand."""
         try:
-            await asyncio.to_thread(lambda: json.dump(self._params, open(PARAMS_FILE, 'w', encoding='utf-8'), indent=2))
+            # Using a lambda to pass arguments to json.dump correctly with to_thread
+            # Ensure the lambda correctly opens the file for writing
+            def _dump_json():
+                with open(PARAMS_FILE, 'w', encoding='utf-8') as f:
+                    json.dump(self._params, f, indent=4) # Changed indent to 4
+
+            await asyncio.to_thread(_dump_json)
         except IOError as e:
             logger.error(f"Fout bij opslaan leerbare parameters: {e}")
 
-    def get_param(self, key: str, strategy_id: Optional[str] = None) -> Any:
-        """Haalt een specifieke leerbare parameter op."""
-        # Eerst proberen strategie-specifieke parameter op te halen
-        if strategy_id and "strategies" in self._params and strategy_id in self._params["strategies"]:
-            if key in self._params["strategies"][strategy_id]:
-                return self._params["strategies"][strategy_id][key]
+    def get_param(self, key: str, strategy_id: Optional[str] = None, default: Any = None) -> Any:
+        """Haalt een specifieke leerbare parameter op, met fallback naar defaults en een uiteindelijke default waarde."""
+        default_params_snapshot = self._get_default_params() # Get a fresh copy of defaults
 
-        # Fallback naar globale parameters als strategie-specifiek niet gevonden of niet van toepassing
-        if key in self._params.get("global", {}): # Ensure "global" key exists
-            return self._params["global"][key]
+        # 1. Try live strategy-specific parameters
+        if strategy_id:
+            strategy_params = self._params.get("strategies", {}).get(strategy_id, {})
+            if key in strategy_params:
+                return strategy_params[key]
 
-        # Check root level for keys like timeOfDayEffectiveness that might not be under "global"
-        if key in self._params and key not in ["strategies", "global"]:
+        # 2. Try live root-level parameters (e.g., timeOfDayEffectiveness)
+        #    Exclude "global" and "strategies" themselves from this type of lookup.
+        if key in self._params and key not in ["global", "strategies"]:
             return self._params[key]
 
+        # 3. Try live global parameters
+        if key in self._params.get("global", {}):
+            return self._params["global"][key]
 
-        # Als niets gevonden, haal op uit default params
-        default_global = self._get_default_params()["global"].get(key)
-        if default_global is not None: return default_global
+        # If not found in live parameters, try default parameters with the same lookup order
+        # 4. Try default strategy-specific parameters
+        if strategy_id:
+            default_strategy_params = default_params_snapshot.get("strategies", {}).get(strategy_id, {})
+            if key in default_strategy_params:
+                return default_strategy_params[key]
 
-        default_strategy_params = self._get_default_params()["strategies"].get(strategy_id, {})
-        default_strategy_value = default_strategy_params.get(key)
-        if default_strategy_value is not None: return default_strategy_value
+        # 5. Try default root-level parameters
+        if key in default_params_snapshot and key not in ["global", "strategies"]:
+            return default_params_snapshot[key]
 
-        # Fallback for timeOfDayEffectiveness if not in global or strategy specific
-        if key == "timeOfDayEffectiveness" and key in self._get_default_params():
-            return self._get_default_params()[key]
+        # 6. Try default global parameters
+        if key in default_params_snapshot.get("global", {}):
+            return default_params_snapshot["global"][key]
 
-        return None # Return None if parameter is not found anywhere
+        # 7. If not found anywhere, return the provided default argument
+        return default
 
     async def set_param(self, key: str, value: Any, strategy_id: Optional[str] = None):
         """Stelt een leerbare parameter in en slaat op."""
+        default_params_snapshot = self._get_default_params() # To understand structure
+
         if strategy_id:
             if "strategies" not in self._params: self._params["strategies"] = {}
-            if strategy_id not in self._params["strategies"]: self._params["strategies"][strategy_id] = {}
+            if strategy_id not in self._params["strategies"]: self._params["strategies"][strategy_id] = {} # Initialize new strategy dict
             self._params["strategies"][strategy_id][key] = value
             logger.info(f"Leerbare parameter '{key}' voor strategie '{strategy_id}' bijgewerkt naar: {value}")
-        else:
-            # Check if the key is a known global key or if it's 'timeOfDayEffectiveness'
-            if key in self._get_default_params()["global"]:
-                 self._params["global"][key] = value
-            elif key == "timeOfDayEffectiveness" or key in self._get_default_params(): # check root level default keys
-                 self._params[key] = value # Store at root level for global settings like timeOfDayEffectiveness
-            else:
-                 # If it's an unknown key and no strategy_id, default to storing in "global"
-                 if "global" not in self._params: self._params["global"] = {}
-                 self._params["global"][key] = value
+        # Check if the key is a known top-level default key (like timeOfDayEffectiveness)
+        elif key in default_params_snapshot and key not in ["global", "strategies"]:
+             self._params[key] = value
+             logger.info(f"Root-level leerbare parameter '{key}' bijgewerkt naar: {value}")
+        else: # Assume global parameter otherwise
+            if "global" not in self._params: self._params["global"] = {}
+            self._params["global"][key] = value
             logger.info(f"Globale leerbare parameter '{key}' bijgewerkt naar: {value}")
         await self._save_params()
 
@@ -131,10 +147,10 @@ class ParamsManager:
         await self._save_params()
         logger.info(f"ROI/SL parameters voor strategie '{strategy_id}' bijgewerkt.")
 
-    async def update_time_effectiveness(self, data: Dict[int, float]):
+    async def update_time_effectiveness(self, data: Dict[int, float]): # Note: Test suite uses str keys for hour
         """Werkt tijd-van-dag effectiviteit data bij."""
-        # Global parameter, stored at the root of the params structure
-        self._params["timeOfDayEffectiveness"] = data
+        # Convert integer keys from older versions if necessary, ensure string keys for JSON
+        self._params["timeOfDayEffectiveness"] = {str(k): v for k, v in data.items()}
         await self._save_params()
         logger.info("Tijd-van-dag effectiviteit bijgewerkt.")
 
@@ -167,8 +183,14 @@ if __name__ == "__main__":
         print(f"Standaard maxTradeRiskPct (global): {max_risk}")
         assert max_risk == 0.02
 
+        # Test get_param with explicit default
+        non_existent = params_manager.get_param("nonExistentKey", default="fallback_value")
+        print(f"Test nonExistentKey met default: {non_existent}")
+        assert non_existent == "fallback_value"
+
+
         # Set a global parameter
-        await params_manager.set_param("maxTradeRiskPct", 0.03) # Implicitly global due to default structure
+        await params_manager.set_param("maxTradeRiskPct", 0.03)
         print(f"Nieuwe maxTradeRiskPct (global): {params_manager.get_param('maxTradeRiskPct')}")
         assert params_manager.get_param("maxTradeRiskPct") == 0.03
 
@@ -187,10 +209,26 @@ if __name__ == "__main__":
         print(f"Standaard strongPatternThreshold voor {test_strategy_id}: {strong_pattern_threshold}")
         assert strong_pattern_threshold == 0.5
 
-        # Get a parameter that only exists in default strategy for a different strategy_id (should fallback to None)
+        # Test getting a param for a strategy not in current _params, but defined in defaults
+        default_only_strat_param = params_manager.get_param("entryConvictionThreshold", "NEW_DEFAULT_STRAT_ONLY", default=0.99)
+        # Assuming NEW_DEFAULT_STRAT_ONLY is not in _get_default_params, it should return the 'default' argument
+        # If NEW_DEFAULT_STRAT_ONLY *was* in defaults, it would return that. Let's assume it's not for this test.
+        # To make this test more robust, we'd ensure NEW_DEFAULT_STRAT_ONLY isn't in _get_default_params
+        # For now, if it's not, it will correctly fall back to the provided default=0.99
+        # If it *is* in defaults (e.g. if DUOAI_Strategy was used), it would return that default (0.7)
+        # Let's use a key that's unlikely to be in DUOAI_Strategy defaults:
+        unique_key_for_new_strat = params_manager.get_param("uniqueKeyForNewStrat", "NEW_DEFAULT_STRAT_ONLY", default="new_strat_fallback")
+        print(f"Test uniqueKeyForNewStrat voor NEW_DEFAULT_STRAT_ONLY: {unique_key_for_new_strat}")
+        assert unique_key_for_new_strat == "new_strat_fallback"
+
+
+        # Get a parameter that only exists in default strategy for a different strategy_id (should fallback to None without explicit default)
         cnn_weight_other_fallback = params_manager.get_param("cnnPatternWeight", other_strategy_id)
         print(f"Standaard cnnPatternWeight voor {other_strategy_id} (geen default, niet global): {cnn_weight_other_fallback}")
+        # This assertion depends on OTHER_Strategy NOT being in _get_default_params(). If it is, this would fail.
+        # If OTHER_Strategy has no "cnnPatternWeight" in defaults, it will be None.
         assert cnn_weight_other_fallback is None
+
 
         # Set a strategy-specific parameter
         await params_manager.set_param("entryConvictionThreshold", 0.8, test_strategy_id)
@@ -215,12 +253,12 @@ if __name__ == "__main__":
         assert updated_strategy_params == new_roi
 
         # Test time effectiveness update
-        time_data = {0: 0.1, 1: 0.05, 2: -0.02} # Keys should be strings as per JSON standard
-        time_data_str_keys = {str(k): v for k,v in time_data.items()}
-        await params_manager.update_time_effectiveness(time_data_str_keys)
+        time_data = {0: 0.1, 1: 0.05, 2: -0.02} # Test with int keys
+        time_data_str_keys = {str(k): v for k,v in time_data.items()} # Expected after processing
+        await params_manager.update_time_effectiveness(time_data) # Pass int keys
         fetched_time_effectiveness = params_manager.get_param('timeOfDayEffectiveness')
         print(f"Tijd-van-dag effectiviteit: {fetched_time_effectiveness}")
-        assert fetched_time_effectiveness == time_data_str_keys
+        assert fetched_time_effectiveness == time_data_str_keys # Assert against str keys
 
         # Verify loaded state
         print("\nVerifiëren van opgeslagen staat (door opnieuw te laden)...")
