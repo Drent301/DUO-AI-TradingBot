@@ -125,8 +125,12 @@ class ExitOptimizer:
         exit_rule_pattern_score_param = self.params_manager.get_param("exitRulePatternScore", strategy_id=current_strategy_id, default=0.7)
         logger.info(f"Symbol: {symbol} (Exit), Using exitRulePatternScore: {exit_rule_pattern_score_param} (Default: 0.7)")
 
-        strong_bearish_pattern_threshold = self.params_manager.get_param("strongBearishPatternThreshold", strategy_id=current_strategy_id, default=0.5)
-        logger.info(f"Symbol: {symbol} (Exit), Using strongBearishPatternThreshold: {strong_bearish_pattern_threshold} (Default: 0.5)")
+        strong_pattern_threshold_param = self.params_manager.get_param(
+            "strongPatternThreshold", # Changed key
+            strategy_id=current_strategy_id,
+            default=0.5
+        )
+        logger.info(f"Symbol: {symbol} (Exit), Using strongPatternThreshold: {strong_pattern_threshold_param} (Default: 0.5)")
 
         # 2. Calculate weighted_bearish_pattern_score
         weighted_bearish_pattern_score = 0.0
@@ -179,11 +183,11 @@ class ExitOptimizer:
         logger.info(f"Symbol: {symbol} (Exit), Final Calculated Weighted Bearish Pattern Score: {weighted_bearish_pattern_score:.4f} from patterns: [{'; '.join(detected_patterns_summary)}]")
 
         # 3. Determine is_strong_bearish_pattern
-        is_strong_bearish_pattern = weighted_bearish_pattern_score >= strong_bearish_pattern_threshold
+        is_strong_bearish_pattern = weighted_bearish_pattern_score >= strong_pattern_threshold_param # Use renamed variable
 
         log_msg_pattern_strength = (f"Strong bearish pattern {'DETECTED' if is_strong_bearish_pattern else 'NOT detected'}. "
                                     f"Score {weighted_bearish_pattern_score:.4f} "
-                                    f"{'>=' if is_strong_bearish_pattern else '<'} Threshold {strong_bearish_pattern_threshold:.2f}")
+                                    f"{'>=' if is_strong_bearish_pattern else '<'} Threshold {strong_pattern_threshold_param:.2f}") # Use renamed variable
         logger.info(f"Symbol: {symbol} (Exit), {log_msg_pattern_strength}")
 
         # AI-besluitvormingslogica voor exit
@@ -488,7 +492,7 @@ if __name__ == "__main__":
             params = {
                 "cnnPatternWeight": 0.8,
                 "exitRulePatternScore": 0.7,
-                "strongBearishPatternThreshold": 0.75, # Updated threshold
+                "strongPatternThreshold": 0.75, # Changed from strongBearishPatternThreshold
                 "exitConvictionDropTrigger": 0.4, # Default for this test suite
                 "minProfitForLowConfExit": 0.005, # Default
                 "exitPatternConfThreshold": 0.5, # Default
@@ -527,7 +531,7 @@ if __name__ == "__main__":
         # Params from mock_params_get_for_tests:
         # cnnPatternWeight = 0.8
         # exitRulePatternScore = 0.7
-        # strongBearishPatternThreshold = 0.75
+        # strongPatternThreshold = 0.75 (formerly strongBearishPatternThreshold)
         # CNN data from default_cnn_mock_data:
         # CNN score = 0.9 for f"{mock_df_timeframe}_bearishEngulfing_score"
         # Rule pattern = "bearishEngulfing": True
@@ -535,7 +539,7 @@ if __name__ == "__main__":
         # CNN contribution = 0.9 (score) * 0.8 (weight) = 0.72
         # Rule contribution = 0.7 (exitRulePatternScore) * 0.8 (weight) = 0.56 (bearishEngulfing is True)
         # weighted_bearish_pattern_score = 0.72 + 0.56 = 1.28
-        # is_strong_bearish_pattern = 1.28 >= 0.75 (strongBearishPatternThreshold) -> True
+        # is_strong_bearish_pattern = 1.28 >= 0.75 (strongPatternThreshold from mock) -> True
         # AI conf: GPT 0.6, Grok 0.65 -> combined_confidence = 0.625
         # exitPatternConfThreshold = 0.5 (from mock_params_get_for_tests)
         # Condition: is_strong_bearish_pattern (True) AND combined_confidence (0.625) > exitPatternConfThreshold (0.5) -> True. Exit.
@@ -574,7 +578,7 @@ if __name__ == "__main__":
         # CNN contribution = 0.1 (score) * 0.8 (weight) = 0.08
         # Rule contribution = 0 (no rule pattern detected as bearishEngulfing is False)
         # weighted_bearish_pattern_score = 0.08
-        # is_strong_bearish_pattern = 0.08 >= 0.75 (strongBearishPatternThreshold) -> False
+        # is_strong_bearish_pattern = 0.08 >= 0.75 (strongPatternThreshold from mock) -> False
         # No exit trigger from pattern strength.
         # AI intent is HOLD, so no "ai_sell_intent_confident".
         # AI confidence 0.625 is not < exitConvictionDropTrigger (0.4), so no "low_ai_confidence_profit_taking".
