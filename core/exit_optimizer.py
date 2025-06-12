@@ -140,9 +140,8 @@ class ExitOptimizer:
 
         # CNN Numerical Prediction Score
         current_timeframe = dataframe.attrs.get('timeframe', '5m')
-        # Define target bearish CNN score keys
-        # For now, stick to bearishEngulfing for the current timeframe.
-        target_bearish_cnn_keys = [f"{current_timeframe}_bearishEngulfing_score"]
+        # Define target bearish CNN score keys - Changed to no_bullFlag_score
+        target_bearish_cnn_keys = [f"{current_timeframe}_no_bullFlag_score"]
         # Consider adding others like _darkCloudCover_score, _shootingStar_score if conventional and available
 
         if cnn_predictions_data: # Check if cnn_predictions dictionary exists and is not empty
@@ -152,7 +151,7 @@ class ExitOptimizer:
                 if cnn_score is not None and isinstance(cnn_score, (float, int)) and cnn_score > 0:
                     contribution = cnn_score * cnn_pattern_weight
                     weighted_bearish_pattern_score += contribution
-                    logger.info(f"Symbol: {symbol} (Exit), CNN Bearish contribution from '{key}': {cnn_score:.4f} * {cnn_pattern_weight:.2f} = {contribution:.4f}. Current weighted_score: {weighted_bearish_pattern_score:.4f}")
+                    logger.info(f"Symbol: {symbol} (Exit), CNN no_bullFlag_score (as bearish signal) contribution from '{key}': {cnn_score:.4f} * {cnn_pattern_weight:.2f} = {contribution:.4f}. Current weighted_score: {weighted_bearish_pattern_score:.4f}")
                     detected_patterns_summary.append(f"CNN_{key}({cnn_score:.4f})")
                     break # Break after the first positive CNN score contribution
         else:
@@ -516,7 +515,10 @@ if __name__ == "__main__":
         mock_df_timeframe = mock_df.attrs.get('timeframe', '5m')
         default_cnn_mock_data = {
             "patterns": {"bearishEngulfing": True, "eveningStar": False}, # bearishEngulfing is the first rule pattern
-            "cnn_predictions": {f"{mock_df_timeframe}_bearishEngulfing_score": 0.9}
+            "cnn_predictions": {
+                f"{mock_df_timeframe}_no_bullFlag_score": 0.9, # Changed key, high bearish signal
+                f"{mock_df_timeframe}_bullFlag_score": 0.1    # Optional bullFlag_score
+            }
         }
         # Use deepcopy if the mock data is mutable and modified by tests, not strictly needed here as returning new dict
         optimizer.cnn_patterns_detector.detect_patterns_multi_timeframe = lambda *args, **kwargs: default_cnn_mock_data.copy()
@@ -531,13 +533,13 @@ if __name__ == "__main__":
         # Params from mock_params_get_for_tests:
         # cnnPatternWeight = 0.8
         # exitRulePatternScore = 0.7
-        # strongPatternThreshold = 0.75 (formerly strongBearishPatternThreshold)
+        # strongPatternThreshold = 0.75
         # CNN data from default_cnn_mock_data:
-        # CNN score = 0.9 for f"{mock_df_timeframe}_bearishEngulfing_score"
+        # CNN score for f"{mock_df_timeframe}_no_bullFlag_score" = 0.9
         # Rule pattern = "bearishEngulfing": True
         # Calculation:
-        # CNN contribution = 0.9 (score) * 0.8 (weight) = 0.72
-        # Rule contribution = 0.7 (exitRulePatternScore) * 0.8 (weight) = 0.56 (bearishEngulfing is True)
+        # CNN contribution (no_bullFlag_score) = 0.9 * 0.8 = 0.72
+        # Rule contribution (bearishEngulfing) = 0.7 * 0.8 = 0.56
         # weighted_bearish_pattern_score = 0.72 + 0.56 = 1.28
         # is_strong_bearish_pattern = 1.28 >= 0.75 (strongPatternThreshold from mock) -> True
         # AI conf: GPT 0.6, Grok 0.65 -> combined_confidence = 0.625
@@ -572,11 +574,11 @@ if __name__ == "__main__":
         # AI conf: GPT 0.6, Grok 0.65 -> combined_confidence = 0.625 (still > 0.5)
         # Intent: HOLD
         # CNN data (weak):
-        # CNN score = 0.1 for f"{mock_df_timeframe}_bearishEngulfing_score"
-        # Rule pattern = "bearishEngulfing": False
+        # CNN score for f"{mock_df_timeframe}_no_bullFlag_score" = 0.1
+        # Rule pattern "bearishEngulfing" = False
         # Calculation:
-        # CNN contribution = 0.1 (score) * 0.8 (weight) = 0.08
-        # Rule contribution = 0 (no rule pattern detected as bearishEngulfing is False)
+        # CNN contribution (no_bullFlag_score) = 0.1 * 0.8 = 0.08
+        # Rule contribution = 0 (bearishEngulfing is False)
         # weighted_bearish_pattern_score = 0.08
         # is_strong_bearish_pattern = 0.08 >= 0.75 (strongPatternThreshold from mock) -> False
         # No exit trigger from pattern strength.
@@ -591,7 +593,10 @@ if __name__ == "__main__":
 
         weak_cnn_mock_data = {
             "patterns": {"bearishEngulfing": False, "eveningStar": False},
-            "cnn_predictions": {f"{mock_df_timeframe}_bearishEngulfing_score": 0.1}
+            "cnn_predictions": {
+                f"{mock_df_timeframe}_no_bullFlag_score": 0.1, # Low bearish signal
+                f"{mock_df_timeframe}_bullFlag_score": 0.9    # High bull signal (irrelevant for this path)
+            }
         }
         original_cnn_detect_temp = optimizer.cnn_patterns_detector.detect_patterns_multi_timeframe
         optimizer.cnn_patterns_detector.detect_patterns_multi_timeframe = lambda *args, **kwargs: weak_cnn_mock_data.copy()

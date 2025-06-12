@@ -50,6 +50,8 @@ class ParamsManager:
                     "exitConvictionDropTrigger": 0.4,
                     "cnnPatternWeight": 1.0, # NIEUW: Initiële waarde voor CNN-patroon gewicht
                     "strongPatternThreshold": 0.5, # Default threshold for strong patterns
+                    "entryRulePatternScore": 0.7, # NIEUW: Default score for a detected rule-based entry pattern
+                    "exitRulePatternScore": 0.7,  # NIEUW: Default score for a detected rule-based exit pattern
                     "preferredPairs": [],
                     "minimal_roi": {"0": 0.05, "30": 0.03, "60": 0.02, "120": 0.01},
                     "stoploss": -0.10,
@@ -187,6 +189,14 @@ if __name__ == "__main__":
         print(f"Standaard strongPatternThreshold voor {test_strategy_id}: {strong_pattern_threshold}")
         assert strong_pattern_threshold == 0.5
 
+        entry_rule_score = params_manager.get_param("entryRulePatternScore", test_strategy_id)
+        print(f"Standaard entryRulePatternScore voor {test_strategy_id}: {entry_rule_score}")
+        assert entry_rule_score == 0.7
+
+        exit_rule_score = params_manager.get_param("exitRulePatternScore", test_strategy_id)
+        print(f"Standaard exitRulePatternScore voor {test_strategy_id}: {exit_rule_score}")
+        assert exit_rule_score == 0.7
+
         # Get a parameter that only exists in default strategy for a different strategy_id (should fallback to None)
         cnn_weight_other_fallback = params_manager.get_param("cnnPatternWeight", other_strategy_id)
         print(f"Standaard cnnPatternWeight voor {other_strategy_id} (geen default, niet global): {cnn_weight_other_fallback}")
@@ -241,6 +251,14 @@ if __name__ == "__main__":
         reloaded_strong_threshold = reloaded_manager.get_param('strongPatternThreshold', test_strategy_id)
         print(f"Hergeladen strongPatternThreshold voor {test_strategy_id}: {reloaded_strong_threshold}")
         assert reloaded_strong_threshold == 0.5
+
+        reloaded_entry_rule_score = reloaded_manager.get_param('entryRulePatternScore', test_strategy_id)
+        print(f"Hergeladen entryRulePatternScore voor {test_strategy_id}: {reloaded_entry_rule_score}")
+        assert reloaded_entry_rule_score == 0.7
+
+        reloaded_exit_rule_score = reloaded_manager.get_param('exitRulePatternScore', test_strategy_id)
+        print(f"Hergeladen exitRulePatternScore voor {test_strategy_id}: {reloaded_exit_rule_score}")
+        assert reloaded_exit_rule_score == 0.7
 
         print(f"Hergeladen ROI voor {test_strategy_id}: {reloaded_manager.get_param('minimal_roi', test_strategy_id)}")
         assert reloaded_manager.get_param("minimal_roi", test_strategy_id) == new_roi
