@@ -282,28 +282,41 @@ class PreTrainer:
         best_val_f1 = 0.0
 
         logger.info(f"Start trainingsloop voor {num_epochs} epochs...")
+        # Initialize best_val_accuracy before the epoch loop, alongside best_val_loss
+        # best_val_loss is already initialized, best_val_accuracy was also initialized
+        # No change needed here for initialization based on current code structure.
+        # best_val_precision, best_val_recall, best_val_f1 are also already initialized.
+
         for epoch in range(num_epochs):
             model.train()
-            train_loss = 0.0
+            # Initialize epoch_train_loss = 0.0 before the training loop for each epoch.
+            epoch_train_loss = 0.0
             for batch_idx, (data, targets) in enumerate(train_loader):
                 optimizer.zero_grad()
                 outputs = model(data)
                 loss = criterion(outputs, targets)
                 loss.backward()
                 optimizer.step()
-                train_loss += loss.item()
+                # Inside the training batch loop, accumulate loss: epoch_train_loss += loss.item() * data.size(0).
+                epoch_train_loss += loss.item() * data.size(0)
 
-            avg_train_loss = train_loss / len(train_loader)
+            # After the training batch loop, calculate average training loss:
+            # avg_epoch_train_loss = epoch_train_loss / len(dataloader.dataset).
+            # Using len(train_dataset) as requested if dataloader.dataset is not correct.
+            # len(train_dataset) is indeed correct here.
+            avg_epoch_train_loss = epoch_train_loss / len(train_dataset)
 
             # Validation phase
             model.eval()
-            val_loss = 0.0
+            current_epoch_val_loss = 0.0 # Using a new variable for epoch-specific validation loss sum
             all_preds, all_targets = [], []
             with torch.no_grad():
                 for data, targets in val_loader:
                     outputs = model(data)
-                    loss = criterion(outputs, targets)
-                    val_loss += loss.item()
+                    # batch_val_loss to avoid confusion with training loss
+                    batch_val_loss = criterion(outputs, targets)
+                    # Accumulate validation loss: val_loss += batch_val_loss.item() * data.size(0)
+                    current_epoch_val_loss += batch_val_loss.item() * data.size(0)
 
                     # Convert outputs to probabilities for class 1, then to predictions
                     probs = torch.softmax(outputs, dim=1)[:, 1]
@@ -312,33 +325,51 @@ class PreTrainer:
                     all_preds.extend(predicted_labels.cpu().numpy())
                     all_targets.extend(targets.cpu().numpy())
 
-            avg_val_loss = val_loss / len(val_loader)
+            # Calculate average validation loss for the epoch using len(val_dataset)
+            avg_epoch_val_loss = current_epoch_val_loss / len(val_dataset)
             val_accuracy = accuracy_score(all_targets, all_preds)
             val_precision = precision_score(all_targets, all_preds, average='binary', zero_division=0)
             val_recall = recall_score(all_targets, all_preds, average='binary', zero_division=0)
             val_f1 = f1_score(all_targets, all_preds, average='binary', zero_division=0)
 
+            # Update the logging statement to use avg_epoch_train_loss.
             logger.debug(
-                f"Epoch [{epoch+1}/{num_epochs}], Training Loss: {avg_train_loss:.4f}, "
-                f"Validation Loss: {avg_val_loss:.4f}, Validation Accuracy: {val_accuracy:.4f}, "
+                f"Epoch [{epoch+1}/{num_epochs}], Training Loss: {avg_epoch_train_loss:.4f}, "
+                f"Validation Loss: {avg_epoch_val_loss:.4f}, Validation Accuracy: {val_accuracy:.4f}, "
                 f"Validation Precision: {val_precision:.4f}, Validation Recall: {val_recall:.4f}, "
                 f"Validation F1: {val_f1:.4f} for {model_type}"
             )
 
-            if avg_val_loss < best_val_loss:
-                best_val_loss = avg_val_loss
-                best_val_accuracy = val_accuracy
-                best_val_precision = val_precision
-                best_val_recall = val_recall
-                best_val_f1 = val_f1
+            # When val_loss < best_val_loss, also update best_val_accuracy = val_accuracy.
+            if avg_epoch_val_loss < best_val_loss:
+                best_val_loss = avg_epoch_val_loss
+                best_val_accuracy = val_accuracy # This was already here
+                best_val_precision = val_precision # Keep updating other metrics too
+                best_val_recall = val_recall # Keep updating other metrics too
+                best_val_f1 = val_f1 # Keep updating other metrics too
                 torch.save(model.state_dict(), CNN_MODEL_PATH)
                 logger.debug(f"Model voor {model_type} opgeslagen. Val Loss: {best_val_loss:.4f}, Acc: {best_val_accuracy:.4f}, Prec: {best_val_precision:.4f}, Rec: {best_val_recall:.4f}, F1: {best_val_f1:.4f}")
+
+        # At the end of the training for a pattern (after the epoch loop),
+        # ensure that final_val_loss is best_val_loss and final_val_accuracy is best_val_accuracy
+        # before calling _log_pretrain_activity.
+        # The _log_pretrain_activity call already uses best_val_loss, best_val_accuracy, etc.
+        # So no explicit assignment like val_loss = best_val_loss is needed here if those are used.
 
         # Save Model (this happens if last epoch was best, or to save final state regardless)
         # The current logic saves only if val_loss improves. This is generally what we want.
         try:
             # Ensure the best model is what's saved, which is handled by the check above.
-            logger.info(f"PyTorch model '{model_type}' training voltooid. Beste model opgeslagen op {CNN_MODEL_PATH}")
+            # Check if a model was actually saved (i.e., if best_val_loss was updated from inf)
+            if os.path.exists(CNN_MODEL_PATH): # Check if the model file was created/updated
+                 logger.info(f"PyTorch model '{model_type}' training voltooid. Beste model opgeslagen op {CNN_MODEL_PATH}")
+            else:
+                 # This case could happen if no improvement was seen from the initial best_val_loss = float('inf')
+                 # or if there was an issue saving the file, though torch.save would likely error.
+                 # If training_data was very small, X_list could be empty, skipping training loop.
+                 # In such cases, best_val_loss would remain 'inf'.
+                 logger.warning(f"PyTorch model '{model_type}' training voltooid, maar er is mogelijk geen model opgeslagen (of het is niet verbeterd). Controleer logs.")
+
             # Save scaler parameters
             scaler_params = {
                 'feature_columns': feature_columns,
