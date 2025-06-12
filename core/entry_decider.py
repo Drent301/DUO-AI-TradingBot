@@ -595,5 +595,4 @@ if __name__ == "__main__":
         decider.params_manager.get_param = original_params_get # Restore original get_param
         decider.cooldown_tracker.is_cooldown_active = original_cooldown_active
 
-
     asyncio.run(run_test_entry_decider())
