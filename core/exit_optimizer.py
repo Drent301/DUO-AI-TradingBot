@@ -172,13 +172,13 @@ class ExitOptimizer:
 
         logger.info(f"Symbol: {symbol} (Exit), Final Calculated Weighted Bearish Pattern Score: {weighted_pattern_score:.2f} from patterns: [{'; '.join(detected_patterns_summary)}]")
 
-        # Fetch strong_bearish_pattern_threshold from ParamsManager
+        # Fetch strong_bearish_pattern_threshold from ParamsManager using the common key
         strong_bearish_pattern_threshold = self.params_manager.get_param(
-            "strongBearishPatternThresholdExit",
+            "strongPatternThreshold", # Common parameter key
             strategy_id=current_strategy_id,
-            default=0.5 # Default value if not found in params.json
+            default=0.5
         )
-        logger.info(f"Symbol: {symbol} (Exit), Using strongBearishPatternThresholdExit: {strong_bearish_pattern_threshold} (Strategy: {current_strategy_id}, Default: 0.5)")
+        logger.info(f"Symbol: {symbol} (Exit), Using common strongPatternThreshold: {strong_bearish_pattern_threshold} (Strategy: {current_strategy_id}, Default: 0.5)")
 
         is_strong_bearish_pattern = weighted_pattern_score >= strong_bearish_pattern_threshold
 
@@ -497,12 +497,12 @@ if __name__ == "__main__":
         print("\n--- Test Scenario 1A: Strong Bearish Pattern (Rule + CNN), Custom Threshold (0.6) - EXIT ---")
         current_mock_params = {
             "exitConvictionDropTrigger": 0.4,
-            "cnnPatternWeight": 0.8, # Custom weight
-            "strongBearishPatternThresholdExit": 0.6,
+            "cnnPatternWeight": 0.8,
+            "strongPatternThreshold": 0.6, # Using common key for the test
             "exitPatternConfThreshold": 0.5,
             "exitAISellIntentConfThreshold": 0.6,
             "minProfitForLowConfExit": 0.005,
-            "exitRulePatternScore": 0.7 # Default rule score
+            "exitRulePatternScore": 0.7
         }
         optimizer.params_manager.get_param = lambda key, strategy_id=None, default=None: current_mock_params.get(key, default)
 
@@ -538,7 +538,7 @@ if __name__ == "__main__":
         current_mock_params = {
             "exitConvictionDropTrigger": 0.4,
             "cnnPatternWeight": 1.0,
-            "strongBearishPatternThresholdExit": 0.8, # Higher threshold
+            "strongPatternThreshold": 0.8, # Using common key for the test
             "exitPatternConfThreshold": 0.5,
             "exitAISellIntentConfThreshold": 0.6,
             "minProfitForLowConfExit": 0.005,
@@ -566,11 +566,14 @@ if __name__ == "__main__":
 
         # Scenario 1C: Strong Rule Pattern, Default Thresholds (exitRulePatternScore=0.7, strongBearishPatternThresholdExit=0.5), No CNN - Exit
         print("\n--- Test Scenario 1C: Strong Rule Pattern, Default Thresholds, No CNN - EXIT ---")
-        current_mock_params = { # Defaults will be used for unspecified params here
+        current_mock_params = {
             "exitConvictionDropTrigger": 0.4,
-            "cnnPatternWeight": 1.0, # Default cnnPatternWeight
-            # strongBearishPatternThresholdExit will use default 0.5
-            # exitRulePatternScore will use default 0.7
+            "cnnPatternWeight": 1.0,
+            # strongPatternThreshold will use default 0.5 from get_param call
+            # exitRulePatternScore will use default 0.7 from get_param call
+            "minProfitForLowConfExit": 0.005, # Explicitly set for clarity, though could use default
+            "exitPatternConfThreshold": 0.5, # Explicitly set
+            "exitAISellIntentConfThreshold": 0.6 # Explicitly set
         }
         optimizer.params_manager.get_param = lambda key, strategy_id=None, default=None: current_mock_params.get(key, default)
 

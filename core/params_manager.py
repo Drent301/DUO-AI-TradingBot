@@ -48,7 +48,8 @@ class ParamsManager:
                 "DUOAI_Strategy": {
                     "entryConvictionThreshold": 0.7,
                     "exitConvictionDropTrigger": 0.4,
-                    "cnnPatternWeight": 1.0, # NIEUW: Initiële waarde voor CNN-patroon gewicht
+                    "cnnPatternWeight": 1.0,
+                    "strongPatternThreshold": 0.5, # Default threshold for pattern strength
                     "preferredPairs": [],
                     "minimal_roi": {"0": 0.05, "30": 0.03, "60": 0.02, "120": 0.01},
                     "stoploss": -0.10,
@@ -182,6 +183,11 @@ if __name__ == "__main__":
         print(f"Standaard cnnPatternWeight voor {test_strategy_id}: {cnn_weight_default}")
         assert cnn_weight_default == 1.0
 
+        # Get strategy-specific parameter (strongPatternThreshold from default)
+        strong_thresh_default = params_manager.get_param("strongPatternThreshold", test_strategy_id)
+        print(f"Standaard strongPatternThreshold voor {test_strategy_id}: {strong_thresh_default}")
+        assert strong_thresh_default == 0.5
+
         # Get a parameter that only exists in default strategy for a different strategy_id (should fallback to None)
         cnn_weight_other_fallback = params_manager.get_param("cnnPatternWeight", other_strategy_id)
         print(f"Standaard cnnPatternWeight voor {other_strategy_id} (geen default, niet global): {cnn_weight_other_fallback}")
@@ -228,6 +234,10 @@ if __name__ == "__main__":
         # cnnPatternWeight for test_strategy_id was not explicitly set for test_strategy_id, so it should load default.
         print(f"Hergeladen cnnPatternWeight voor {test_strategy_id}: {reloaded_manager.get_param('cnnPatternWeight', test_strategy_id)}")
         assert reloaded_manager.get_param("cnnPatternWeight", test_strategy_id) == 1.0
+
+        # strongPatternThreshold for test_strategy_id was not explicitly set, should load default.
+        print(f"Hergeladen strongPatternThreshold voor {test_strategy_id}: {reloaded_manager.get_param('strongPatternThreshold', test_strategy_id)}")
+        assert reloaded_manager.get_param("strongPatternThreshold", test_strategy_id) == 0.5
 
         # Check the cnnPatternWeight for other_strategy_id after reload
         print(f"Hergeladen cnnPatternWeight voor {other_strategy_id}: {reloaded_manager.get_param('cnnPatternWeight', other_strategy_id)}")
