@@ -116,34 +116,29 @@ class ExitOptimizer:
         pattern_data = await self.cnn_patterns_detector.detect_patterns_multi_timeframe(candles_by_timeframe, symbol)
 
         # Fetch cnnPatternWeight from ParamsManager
-        cnn_pattern_weight = self.params_manager.get_param("cnnPatternWeight", strategy_id=current_strategy_id)
-        if cnn_pattern_weight is None:
-            cnn_pattern_weight = 1.0 # Default value if not found
-            logger.warning(f"cnnPatternWeight not found for strategy {current_strategy_id} in ExitOptimizer, using default 1.0.")
+        cnn_pattern_weight = self.params_manager.get_param("cnnPatternWeight", strategy_id=current_strategy_id, default=1.0)
+        if not isinstance(cnn_pattern_weight, (float, int)): # Robust handling
+            logger.warning(f"Invalid cnnPatternWeight type ({type(cnn_pattern_weight)}) for strategy {current_strategy_id}, using default 1.0.")
+            cnn_pattern_weight = 1.0
+        logger.info(f"Symbol: {symbol} (Exit), Using cnnPatternWeight: {cnn_pattern_weight} (Default: 1.0)")
 
         weighted_pattern_score = 0.0
-        detected_patterns_summary = [] # For logging
+        detected_patterns_summary = []
+        cnn_predictions_data = pattern_data.get('cnn_predictions', {})
+        rule_patterns_data = pattern_data.get('patterns', {})
 
         # 1. Process CNN Predictions for bearish signals
-        # Assuming CNN predictions are on a fixed timeframe, e.g., '15m'
-        # The key "no_bullFlag_score" is used as a proxy for bearishness from the current binary model.
-        # A dedicated bearish model would have more specific keys like "bearSignal_score".
         cnn_prediction_timeframe = "15m" # As defined in cnn_patterns.py for predictions
-
-        # Potential bearish keys from a binary (bull/nobull) or multi-class (bull/bear/neutral) model
-        # For now, using "no_bullFlag_score" as a proxy for bearish indication.
-        bearish_cnn_score_keys = [
-            f"{cnn_prediction_timeframe}_no_bullFlag_score", # From current binary model
-            f"{cnn_prediction_timeframe}_bearSignal_score",  # Hypothetical future bearish model score
-            f"{cnn_prediction_timeframe}_strongBearish_score" # Hypothetical future bearish model score
+        bearish_cnn_keys = [
+            f"{cnn_prediction_timeframe}_no_bullFlag_score", # Proxy for bearish
+            f"{cnn_prediction_timeframe}_bearSignal_score"   # Hypothetical specific bear signal
         ]
 
-        cnn_predictions = pattern_data.get('cnn_predictions', {})
-        if cnn_predictions: # Check if cnn_predictions dictionary exists and is not empty
-            logger.info(f"Symbol: {symbol} (Exit), Evaluating CNN predictions: {cnn_predictions}")
-            for key in bearish_cnn_score_keys:
-                score = cnn_predictions.get(key)
-                if score is not None and isinstance(score, (float, int)) and score > 0:
+        if cnn_predictions_data: # Check if cnn_predictions dictionary exists and is not empty
+            logger.info(f"Symbol: {symbol} (Exit), Evaluating CNN predictions: {cnn_predictions_data}")
+            for key in bearish_cnn_keys:
+                score = cnn_predictions_data.get(key)
+                if score is not None and isinstance(score, (float, int)) and score > 0: # score > 0 indicates presence
                     contribution = score * cnn_pattern_weight
                     weighted_pattern_score += contribution
                     logger.info(f"Symbol: {symbol} (Exit), CNN Bearish contribution from '{key}': {score:.2f} * {cnn_pattern_weight:.2f} = {contribution:.2f}. Current weighted_score: {weighted_pattern_score:.2f}")
@@ -152,37 +147,28 @@ class ExitOptimizer:
             logger.info(f"Symbol: {symbol} (Exit), No CNN predictions found in pattern_data.")
 
         # 2. Rule-Based Bearish Pattern Score
+        exit_rule_pattern_score = self.params_manager.get_param("exitRulePatternScore", strategy_id=current_strategy_id, default=0.7)
+        logger.info(f"Symbol: {symbol} (Exit), Using exitRulePatternScore: {exit_rule_pattern_score} (Default: 0.7)")
+
         rule_based_bearish_patterns = [
             'bearishEngulfing', 'eveningStar', 'threeBlackCrows', 'darkCloudCover',
             'bearishRSIDivergence', 'CDLEVENINGSTAR', 'CDL3BLACKCROWS', 'CDLDARKCLOUDCOVER',
             'CDLHANGINGMAN', 'doubleTop', 'descendingTriangle', 'parabolicCurveDown'
         ]
 
-        rule_pattern_detected_flag = False
-        detected_rule_patterns_log = []
-        # Ensure 'patterns' key exists and is a dictionary
-        rule_patterns_dict = pattern_data.get('patterns', {})
-        if isinstance(rule_patterns_dict, dict):
+        if isinstance(rule_patterns_data, dict):
             for p_name in rule_based_bearish_patterns:
-                if rule_patterns_dict.get(p_name): # Checks for existence and truthiness
-                    rule_pattern_detected_flag = True
-                    detected_rule_patterns_log.append(p_name)
-                    # Consider if multiple rule-based patterns should contribute or just one flag
-                    # For now, one detection adds a fixed value, scaled by weight.
-
-            if rule_pattern_detected_flag:
-                # Assign a base score for any detected rule-based bearish pattern
-                # This could be made more granular if different rules had different base scores
-                rule_based_contribution_value = 0.7 # Example base score for rule-based detection
-                contribution = rule_based_contribution_value * cnn_pattern_weight # Apply same weight as CNN for consistency, or use a different one
-                weighted_pattern_score += contribution # Add to existing score from CNN
-                logger.info(f"Symbol: {symbol} (Exit), Detected rule-based bearish patterns: {detected_rule_patterns_log}. Added contribution: {rule_based_contribution_value:.2f} * {cnn_pattern_weight:.2f} = {contribution:.2f}. Current weighted_score: {weighted_pattern_score:.2f}")
-                detected_patterns_summary.append(f"rules({','.join(detected_rule_patterns_log)})")
-            else:
-                logger.info(f"Symbol: {symbol} (Exit), No strong rule-based bearish patterns detected from the predefined list.")
+                if rule_patterns_data.get(p_name): # Checks for existence and truthiness
+                    contribution = exit_rule_pattern_score * cnn_pattern_weight
+                    weighted_pattern_score += contribution
+                    logger.info(f"Symbol: {symbol} (Exit), Detected rule-based bearish pattern: '{p_name}'. Added contribution: {exit_rule_pattern_score:.2f} * {cnn_pattern_weight:.2f} = {contribution:.2f}. Current weighted_score: {weighted_pattern_score:.2f}")
+                    detected_patterns_summary.append(f"rule({p_name})")
+                    break # Only the first detected rule-based bearish pattern contributes
         else:
             logger.warning(f"Symbol: {symbol} (Exit), 'patterns' key missing or not a dict in pattern_data. Skipping rule-based pattern check.")
 
+        if not any(s.startswith("rule(") for s in detected_patterns_summary) and not any(s.startswith("CNN_") for s in detected_patterns_summary):
+             logger.info(f"Symbol: {symbol} (Exit), No contributing CNN or rule-based bearish patterns detected.")
 
         logger.info(f"Symbol: {symbol} (Exit), Final Calculated Weighted Bearish Pattern Score: {weighted_pattern_score:.2f} from patterns: [{'; '.join(detected_patterns_summary)}]")
 
@@ -204,7 +190,12 @@ class ExitOptimizer:
         # exit_conviction_drop_trigger is passed as argument, or use default from signature
 
         # Scenario 1: AI is onzeker en trade is in winst (take profit)
-        if combined_confidence < exit_conviction_drop_trigger and current_profit_pct > 0.005: # 0.005 (0.5%) is a minimal profit to consider for this rule
+        # exit_conviction_drop_trigger is an argument to should_exit, so already configurable.
+        # The 0.005 (0.5%) profit condition can also be made configurable if needed.
+        min_profit_for_low_conf_exit = self.params_manager.get_param("minProfitForLowConfExit", strategy_id=current_strategy_id, default=0.005)
+        logger.info(f"Symbol: {symbol} (Exit), Using minProfitForLowConfExit: {min_profit_for_low_conf_exit} (Default: 0.005)")
+
+        if combined_confidence < exit_conviction_drop_trigger and current_profit_pct > min_profit_for_low_conf_exit:
             logger.info(f"[ExitOptimizer] ✅ Exit door lage AI confidence ({combined_confidence:.2f} < {exit_conviction_drop_trigger}) en trade in winst ({current_profit_pct:.2%}) voor {symbol}.")
             return {"exit": True, "reason": "low_ai_confidence_profit_taking", "confidence": combined_confidence, "pattern_details": pattern_data.get('patterns', {}), "weighted_bearish_score": weighted_pattern_score}
 
@@ -335,14 +326,18 @@ class ExitOptimizer:
         # Fetch SL adjustment parameters
         sl_bias_impact_factor = self.params_manager.get_param("slBiasImpactFactor", strategy_id=current_strategy_id, default=0.2)
         sl_confidence_impact_factor = self.params_manager.get_param("slConfidenceImpactFactor", strategy_id=current_strategy_id, default=0.2)
-        sl_min_offset = self.params_manager.get_param("slMinOffset", strategy_id=current_strategy_id, default=0.005) # 0.5%
-        sl_max_offset = self.params_manager.get_param("slMaxOffset", strategy_id=current_strategy_id, default=0.10)  # 10%
-        sl_min_hard_stop = self.params_manager.get_param("slMinHardStop", strategy_id=current_strategy_id, default=-0.20) # -20%
-        sl_max_hard_stop = self.params_manager.get_param("slMaxHardStop", strategy_id=current_strategy_id, default=-0.01) # -1%
-        sl_default_trigger_profit = self.params_manager.get_param("slDefaultTriggerProfit", strategy_id=current_strategy_id, default=0.005) # 0.5% profit to trigger
+        sl_min_offset = self.params_manager.get_param("slMinOffset", strategy_id=current_strategy_id, default=0.005)
+        sl_max_offset = self.params_manager.get_param("slMaxOffset", strategy_id=current_strategy_id, default=0.10)
+        sl_hard_stop_multiplier = self.params_manager.get_param("slHardStopMultiplier", strategy_id=current_strategy_id, default=1.5) # Multiplier for hard stop based on offset
+        sl_min_hard_stop = self.params_manager.get_param("slMinHardStop", strategy_id=current_strategy_id, default=-0.20)
+        sl_max_hard_stop = self.params_manager.get_param("slMaxHardStop", strategy_id=current_strategy_id, default=-0.01)
+        sl_default_trigger_profit = self.params_manager.get_param("slDefaultTriggerProfit", strategy_id=current_strategy_id, default=0.005)
+        sl_trigger_profit_threshold = self.params_manager.get_param("slTriggerProfitThreshold", strategy_id=current_strategy_id, default=0.05) # Profit level to adjust trigger
+        sl_trigger_profit_factor = self.params_manager.get_param("slTriggerProfitFactor", strategy_id=current_strategy_id, default=0.5) # Factor to adjust trigger by
 
         logger.info(f"[{symbol}] SL Opt. Params: biasImpact={sl_bias_impact_factor}, confImpact={sl_confidence_impact_factor}, minOffset={sl_min_offset}, maxOffset={sl_max_offset}, "
-                    f"minHardStop={sl_min_hard_stop}, maxHardStop={sl_max_hard_stop}, defaultTrigger={sl_default_trigger_profit}")
+                    f"hardStopMultiplier={sl_hard_stop_multiplier}, minHardStop={sl_min_hard_stop}, maxHardStop={sl_max_hard_stop}, defaultTrigger={sl_default_trigger_profit}, "
+                    f"triggerProfitThreshold={sl_trigger_profit_threshold}, triggerProfitFactor={sl_trigger_profit_factor}")
 
         adjusted_trailing_offset = ai_recommended_sl_pct # Start with AI recommendation
 
@@ -353,15 +348,15 @@ class ExitOptimizer:
             final_trailing_offset = adjusted_trailing_offset * bias_factor * confidence_factor
             final_trailing_offset = max(sl_min_offset, min(final_trailing_offset, sl_max_offset))
 
-            # Calculate a hard stoploss based on this (e.g., 1.5x the offset)
-            hard_stoploss_value = -(final_trailing_offset * 1.5) # Example: Make hard SL 1.5x the trailing offset
+            # Calculate a hard stoploss based on this
+            hard_stoploss_value = -(final_trailing_offset * sl_hard_stop_multiplier)
             hard_stoploss_value = max(sl_min_hard_stop, min(hard_stoploss_value, sl_max_hard_stop))
 
-            # Dynamic trailing stop trigger based on profit (example)
+            # Dynamic trailing stop trigger based on profit
             trailing_stop_trigger = sl_default_trigger_profit
             current_profit_pct = trade.get('profit_pct', 0.0)
-            if current_profit_pct > 0.05: # If profit is > 5% (this 0.05 could also be a param)
-                trailing_stop_trigger = current_profit_pct * 0.5 # e.g., trigger at 50% of current profit (this 0.5 could be a param)
+            if current_profit_pct > sl_trigger_profit_threshold:
+                trailing_stop_trigger = current_profit_pct * sl_trigger_profit_factor
 
             logger.info(f"[ExitOptimizer] AI SL Optimalisatie voor {symbol}: "
                         f"Hard SL: {hard_stoploss_value:.2%}, "
@@ -488,7 +483,7 @@ if __name__ == "__main__":
             optimizer.confidence_engine.get_confidence_score = lambda t, s: 0.6
 
         # Mock params_manager.get_param to return specific values for keys
-        current_mock_params = {}
+        current_mock_params = {} # Make this a dictionary accessible by the test cases
         def mock_get_param_dynamic(key, strategy_id=None, default=None):
             # Allow tests to set params via current_mock_params dictionary
             return current_mock_params.get(key, default)
@@ -498,68 +493,103 @@ if __name__ == "__main__":
         # --- Test should_exit ---
         print("\n--- Test ExitOptimizer (should_exit) ---")
 
-        # Scenario 1A: Strong Bearish Pattern, Threshold from Params (0.6) - Exit
-        print("\n--- Test Scenario 1A: Strong Bearish Pattern, Custom Threshold (0.6) - EXIT ---")
+        # Scenario 1A: Strong Bearish Pattern (Rule + CNN), Custom Threshold (0.6) - Exit
+        print("\n--- Test Scenario 1A: Strong Bearish Pattern (Rule + CNN), Custom Threshold (0.6) - EXIT ---")
         current_mock_params = {
             "exitConvictionDropTrigger": 0.4,
-            "cnnPatternWeight": 1.0,
-            "strongBearishPatternThresholdExit": 0.6, # Custom threshold for this test
-            "exitPatternConfThreshold": 0.5, # Default
-            "exitAISellIntentConfThreshold": 0.6 # Default
+            "cnnPatternWeight": 0.8, # Custom weight
+            "strongBearishPatternThresholdExit": 0.6,
+            "exitPatternConfThreshold": 0.5,
+            "exitAISellIntentConfThreshold": 0.6,
+            "minProfitForLowConfExit": 0.005,
+            "exitRulePatternScore": 0.7 # Default rule score
         }
+        optimizer.params_manager.get_param = lambda key, strategy_id=None, default=None: current_mock_params.get(key, default)
 
-        async def mock_ask_ai_s1a(*args, **kwargs):
-            return {"reflectie": "Hold, but watch out.", "confidence": 0.7, "intentie": "HOLD"} # AI Conf > 0.5
+
+        async def mock_ask_ai_s1a(*args, **kwargs): # High AI confidence
+            return {"reflectie": "Hold, but watch out.", "confidence": 0.7, "intentie": "HOLD"}
         optimizer.gpt_reflector.ask_ai = mock_ask_ai_s1a
         optimizer.grok_reflector.ask_grok = mock_ask_ai_s1a
 
-        async def mock_cnn_s1a(*args, **kwargs): # Weighted score = 0.7 (rule) * 1.0 = 0.7
-            return {"patterns": {"eveningStar": True}, "cnn_predictions": {}}
+        async def mock_cnn_s1a(*args, **kwargs):
+            return {
+                "patterns": {"eveningStar": True}, # Rule pattern
+                "cnn_predictions": {"15m_no_bullFlag_score": 0.9} # CNN bearish score
+            }
         optimizer.cnn_patterns_detector.detect_patterns_multi_timeframe = mock_cnn_s1a
 
-        # weighted_score = 0.7. Threshold = 0.6. 0.7 >= 0.6 is True. AI conf = 0.7 > 0.5. Exit.
+        # Calculation for S1A:
+        # CNN_contrib = 0.9 (score) * 0.8 (weight) = 0.72
+        # Rule_contrib = 0.7 (exitRulePatternScore) * 0.8 (weight) = 0.56 (eveningStar is first)
+        # weighted_pattern_score = 0.72 + 0.56 = 1.28
+        # strong_bearish_pattern_threshold = 0.6 (from current_mock_params)
+        # is_strong_bearish_pattern = 1.28 >= 0.6 -> True
+        # AI_conf (0.7) > exitPatternConfThreshold (0.5) -> True. Exit.
         exit_decision_s1a = await optimizer.should_exit(
             mock_df, mock_trade_profitable, test_symbol, test_strategy_id, 0.5, 0.7, 0.4, mock_candles_by_timeframe)
         print(f"Resultaat (Scenario 1A): {json.dumps(exit_decision_s1a, indent=2, default=str)}")
         assert exit_decision_s1a['exit'] is True
         assert exit_decision_s1a['reason'] == "bearish_pattern_with_ai_confirmation"
-        assert abs(exit_decision_s1a['weighted_bearish_score'] - 0.7) < 0.01
+        assert abs(exit_decision_s1a['weighted_bearish_score'] - 1.28) < 0.01
 
-        # Scenario 1B: Strong Bearish Pattern, Threshold from Params (0.8) - NO Exit (score 0.7 not enough)
-        print("\n--- Test Scenario 1B: Strong Bearish Pattern, Custom Threshold (0.8) - NO EXIT ---")
-        def mock_get_param_s1b(key, strategy_id=None, default=None):
-            if key == "exitConvictionDropTrigger": return 0.4
-            if key == "cnnPatternWeight": return 1.0
-            if key == "strongBearishPatternThresholdExit": return 0.8 # Higher custom threshold
-            return default
-        optimizer.params_manager.get_param = mock_get_param_s1b
-        # Using same AI and CNN mocks from S1A (score 0.7)
-        # weighted_score = 0.7. Threshold = 0.8. 0.7 >= 0.8 is False. No Exit from this rule.
+        # Scenario 1B: Weak Pattern (Low CNN, No Rule), Custom Threshold (0.8) - NO Exit
+        print("\n--- Test Scenario 1B: Weak Pattern (Low CNN, No Rule), Custom Threshold (0.8) - NO EXIT ---")
+        current_mock_params = {
+            "exitConvictionDropTrigger": 0.4,
+            "cnnPatternWeight": 1.0,
+            "strongBearishPatternThresholdExit": 0.8, # Higher threshold
+            "exitPatternConfThreshold": 0.5,
+            "exitAISellIntentConfThreshold": 0.6,
+            "minProfitForLowConfExit": 0.005,
+            "exitRulePatternScore": 0.7
+        }
+        optimizer.params_manager.get_param = lambda key, strategy_id=None, default=None: current_mock_params.get(key, default)
+
+        async def mock_cnn_s1b(*args, **kwargs):
+            return {
+                "patterns": {}, # No rule pattern
+                "cnn_predictions": {"15m_no_bullFlag_score": 0.2} # Low CNN score
+            }
+        optimizer.cnn_patterns_detector.detect_patterns_multi_timeframe = mock_cnn_s1b
+        # Using AI mock from S1A (AI conf 0.7 > 0.5)
+        # Calculation for S1B:
+        # CNN_contrib = 0.2 * 1.0 = 0.2
+        # Rule_contrib = 0
+        # weighted_pattern_score = 0.2
+        # strong_bearish_pattern_threshold = 0.8
+        # is_strong_bearish_pattern = 0.2 >= 0.8 -> False. No Exit from this rule.
         exit_decision_s1b = await optimizer.should_exit(
             mock_df, mock_trade_profitable, test_symbol, test_strategy_id, 0.5, 0.7, 0.4, mock_candles_by_timeframe)
         print(f"Resultaat (Scenario 1B): {json.dumps(exit_decision_s1b, indent=2, default=str)}")
-        assert exit_decision_s1b['exit'] is False # AI intent is HOLD, and pattern is not strong enough
+        assert exit_decision_s1b['exit'] is False
 
-        # Scenario 1C: Strong Bearish Pattern, Default Threshold (0.5) - Exit
-        print("\n--- Test Scenario 1C: Strong Bearish Pattern, Default Threshold (0.5) - EXIT ---")
-        def mock_get_param_s1c(key, strategy_id=None, default=None): # Let strongBearishPatternThresholdExit use default
-            if key == "exitConvictionDropTrigger": return 0.4
-            if key == "cnnPatternWeight": return 1.0
-            # Not returning strongBearishPatternThresholdExit, so default (0.5) should be used
-            return default if key != "strongBearishPatternThresholdExit" else default
-        optimizer.params_manager.get_param = mock_get_param_s1c
+        # Scenario 1C: Strong Rule Pattern, Default Thresholds (exitRulePatternScore=0.7, strongBearishPatternThresholdExit=0.5), No CNN - Exit
+        print("\n--- Test Scenario 1C: Strong Rule Pattern, Default Thresholds, No CNN - EXIT ---")
+        current_mock_params = { # Defaults will be used for unspecified params here
+            "exitConvictionDropTrigger": 0.4,
+            "cnnPatternWeight": 1.0, # Default cnnPatternWeight
+            # strongBearishPatternThresholdExit will use default 0.5
+            # exitRulePatternScore will use default 0.7
+        }
+        optimizer.params_manager.get_param = lambda key, strategy_id=None, default=None: current_mock_params.get(key, default)
 
-        async def mock_cnn_s1c(*args, **kwargs): # Weighted score = (0.2 from CNN) + (0.7 from rule) = 0.9
-            return {"patterns": {"CDL3BLACKCROWS": True} , "cnn_predictions": {"15m_no_bullFlag_score": 0.2}}
+        async def mock_cnn_s1c(*args, **kwargs):
+            return {"patterns": {"CDL3BLACKCROWS": True}, "cnn_predictions": {}} # No CNN score
         optimizer.cnn_patterns_detector.detect_patterns_multi_timeframe = mock_cnn_s1c
-        # Using AI mock from S1A (AI conf 0.7 > 0.5)
-        # weighted_score = 0.9. Default Threshold = 0.5. 0.9 >= 0.5 is True. Exit.
+        # Using AI mock from S1A (AI conf 0.7 > exitPatternConfThreshold default 0.5)
+        # Calculation for S1C:
+        # CNN_contrib = 0
+        # Rule_contrib = 0.7 (default exitRulePatternScore) * 1.0 (default cnnPatternWeight) = 0.7
+        # weighted_pattern_score = 0.7
+        # strong_bearish_pattern_threshold = 0.5 (default)
+        # is_strong_bearish_pattern = 0.7 >= 0.5 -> True. Exit.
         exit_decision_s1c = await optimizer.should_exit(
             mock_df, mock_trade_profitable, test_symbol, test_strategy_id, 0.5, 0.7, 0.4, mock_candles_by_timeframe)
         print(f"Resultaat (Scenario 1C): {json.dumps(exit_decision_s1c, indent=2, default=str)}")
         assert exit_decision_s1c['exit'] is True
         assert exit_decision_s1c['reason'] == "bearish_pattern_with_ai_confirmation"
-        assert abs(exit_decision_s1c['weighted_bearish_score'] - 0.9) < 0.01
+        assert abs(exit_decision_s1c['weighted_bearish_score'] - 0.7) < 0.01
 
 
         # Scenario 2: AI low confidence while in profit (original test, ensure default threshold doesn't break it)

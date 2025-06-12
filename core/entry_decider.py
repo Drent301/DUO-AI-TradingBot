@@ -202,67 +202,62 @@ class EntryDecider:
         pattern_data = await self.cnn_patterns_detector.detect_patterns_multi_timeframe(candles_by_timeframe, symbol)
 
         # Fetch cnnPatternWeight from ParamsManager
-        cnn_pattern_weight = self.params_manager.get_param("cnnPatternWeight", strategy_id=current_strategy_id)
-        if cnn_pattern_weight is None:
-            cnn_pattern_weight = 1.0 # Default value if not found
-            logger.warning(f"cnnPatternWeight not found for strategy {current_strategy_id}, using default 1.0.")
+        cnn_pattern_weight = self.params_manager.get_param("cnnPatternWeight", strategy_id=current_strategy_id, default=1.0)
+        if not isinstance(cnn_pattern_weight, (float, int)):
+            logger.warning(f"Invalid cnnPatternWeight type ({type(cnn_pattern_weight)}) for strategy {current_strategy_id}, using default 1.0.")
+            cnn_pattern_weight = 1.0
+        logger.info(f"Symbol: {symbol}, Using cnnPatternWeight: {cnn_pattern_weight} (Default: 1.0)")
 
         weighted_pattern_score = 0.0
         detected_patterns_summary = [] # For logging
+        cnn_predictions_data = pattern_data.get('cnn_predictions', {})
+        rule_patterns_data = pattern_data.get('patterns', {})
 
-        # 1. Process CNN prediction scores from pattern_data['cnn_predictions']
-        if pattern_data and isinstance(pattern_data.get('cnn_predictions'), dict):
-            cnn_predictions = pattern_data['cnn_predictions']
-            current_timeframe = dataframe.attrs.get('timeframe', '5m') # Default to '5m' if not set
+        # 1. Process CNN prediction score (specifically 15m_bullFlag_score)
+        # CNN predictions are assumed to be on '15m' as per cnn_patterns.py
+        cnn_bull_flag_score_key = "15m_bullFlag_score"
+        cnn_score = cnn_predictions_data.get(cnn_bull_flag_score_key)
 
-            # Define relevant bullish CNN score keys to look for
-            # This list can be expanded based on patterns produced by cnn_patterns.py
-            bullish_cnn_score_keys = [
-                f"{current_timeframe}_bullFlag_score",
-                f"{current_timeframe}_bullishPinBar_score",
-                # Add other relevant keys here, e.g.:
-                # f"{current_timeframe}_anotherBullishPattern_score",
-            ]
-
-            for score_key in bullish_cnn_score_keys:
-                score_value = cnn_predictions.get(score_key)
-                if isinstance(score_value, (float, int)) and score_value > 0:
-                    contribution = score_value * cnn_pattern_weight
-                    weighted_pattern_score += contribution
-                    logger.info(f"Symbol: {symbol}, Added CNN pattern score for '{score_key}': {score_value:.2f} (score) * {cnn_pattern_weight:.2f} (weight) = {contribution:.2f}. Current weighted_pattern_score: {weighted_pattern_score:.2f}")
-                    detected_patterns_summary.append(f"CNN_{score_key}({score_value:.2f})")
+        if cnn_score is not None and isinstance(cnn_score, (float, int)) and cnn_score > 0:
+            contribution = cnn_score * cnn_pattern_weight
+            weighted_pattern_score += contribution
+            logger.info(f"Symbol: {symbol}, CNN Score contribution from '{cnn_bull_flag_score_key}': {cnn_score:.2f} * {cnn_pattern_weight:.2f} (weight) = {contribution:.2f}. Current weighted_score: {weighted_pattern_score:.2f}")
+            detected_patterns_summary.append(f"CNN_{cnn_bull_flag_score_key}({cnn_score:.2f})")
+        elif cnn_score is not None:
+            logger.info(f"Symbol: {symbol}, CNN Score for '{cnn_bull_flag_score_key}' is {cnn_score}, not contributing to weighted_pattern_score.")
         else:
-            logger.info(f"Symbol: {symbol}, No 'cnn_predictions' dictionary found in pattern_data or it's not a dictionary.")
+            logger.info(f"Symbol: {symbol}, No CNN Score found for '{cnn_bull_flag_score_key}'.")
 
-        # 2. Add score for rule-based bullish patterns (maintaining existing logic)
-        #    Using a fixed contribution (e.g., 0.7) if any strong rule-based pattern is detected.
+
+        # 2. Add score for rule-based bullish patterns (break after first found)
+        entry_rule_pattern_score = self.params_manager.get_param(
+            "entryRulePatternScore",
+            strategy_id=current_strategy_id,
+            default=0.7 # This default is already correctly handled by previous change
+        )
+        # This log was already added when fetching entryRulePatternScore, so it's fine.
+        # logger.info(f"Symbol: {symbol}, Using entryRulePatternScore: {entry_rule_pattern_score} (Default: 0.7)")
+
         rule_based_bullish_patterns = [
             'bullishEngulfing', 'CDLENGULFING', 'morningStar', 'CDLMORNINGSTAR',
             'threeWhiteSoldiers', 'CDL3WHITESOLDIERS', 'bullFlag', 'bullishRSIDivergence',
             'CDLHAMMER', 'CDLINVERTEDHAMMER', 'CDLPIERCING', 'ascendingTriangle', 'pennant'
         ]
 
-        rule_pattern_detected_flag = False
-        detected_rule_patterns_log = []
-        if pattern_data and isinstance(pattern_data.get('patterns'), dict):
+        if isinstance(rule_patterns_data, dict):
             for p_name in rule_based_bullish_patterns:
-                if pattern_data['patterns'].get(p_name): # Checks for existence and truthiness (boolean True or status string)
-                    rule_pattern_detected_flag = True
-                    detected_rule_patterns_log.append(p_name)
-
-        if rule_pattern_detected_flag:
-            rule_based_contribution_value = self.params_manager.get_param(
-                "entryRulePatternScore",
-                strategy_id=current_strategy_id,
-                default=0.7
-            )
-            logger.info(f"Symbol: {symbol}, Using entryRulePatternScore: {rule_based_contribution_value} (Default: 0.7)")
-            contribution = rule_based_contribution_value * cnn_pattern_weight
-            weighted_pattern_score += contribution
-            logger.info(f"Symbol: {symbol}, Detected rule-based patterns: {detected_rule_patterns_log}. Added contribution: {rule_based_contribution_value:.2f} * {cnn_pattern_weight:.2f} = {contribution:.2f}. Current weighted_pattern_score: {weighted_pattern_score:.2f}")
-            detected_patterns_summary.append(f"rules({', '.join(detected_rule_patterns_log)})")
+                if rule_patterns_data.get(p_name): # Checks for existence and truthiness
+                    contribution = entry_rule_pattern_score * cnn_pattern_weight
+                    weighted_pattern_score += contribution
+                    logger.info(f"Symbol: {symbol}, Detected rule-based pattern: '{p_name}'. Added contribution: {entry_rule_pattern_score:.2f} * {cnn_pattern_weight:.2f} = {contribution:.2f}. Current weighted_score: {weighted_pattern_score:.2f}")
+                    detected_patterns_summary.append(f"rule({p_name})")
+                    break  # Only the first detected rule-based pattern contributes
         else:
-            logger.info(f"Symbol: {symbol}, No strong rule-based bullish patterns detected from the predefined list.")
+            logger.warning(f"Symbol: {symbol}, 'patterns' key missing or not a dict in pattern_data. Skipping rule-based pattern check.")
+
+        if not any(s.startswith("rule(") for s in detected_patterns_summary): # Log if no rule patterns were found and contributed
+             logger.info(f"Symbol: {symbol}, No contributing rule-based bullish patterns detected from the predefined list.")
+
 
         logger.info(f"Symbol: {symbol}, Final Calculated Weighted Pattern Score: {weighted_pattern_score:.2f} from patterns: [{'; '.join(detected_patterns_summary)}]")
 
@@ -270,19 +265,25 @@ class EntryDecider:
         entry_learned_bias_threshold = self.params_manager.get_param(
             "entryLearnedBiasThreshold",
             strategy_id=current_strategy_id,
-            default=0.55
+            default=0.55 # This default is already correctly handled by previous change
         )
-        logger.info(f"Symbol: {symbol}, Using entryLearnedBiasThreshold: {entry_learned_bias_threshold} (Default: 0.55)")
+        # This log was already added when fetching entryLearnedBiasThreshold, so it's fine.
+        # logger.info(f"Symbol: {symbol}, Using entryLearnedBiasThreshold: {entry_learned_bias_threshold} (Default: 0.55)")
+
+        strong_pattern_threshold = entry_conviction_threshold # Use entry_conviction_threshold as the threshold for strong patterns
+        is_strong_pattern = weighted_pattern_score >= strong_pattern_threshold
+        logger.info(f"Symbol: {symbol}, Weighted Pattern Score: {weighted_pattern_score:.2f}, Strong Pattern Threshold (entry_conviction_threshold): {strong_pattern_threshold:.2f}, IsStrongPattern: {is_strong_pattern}")
+
 
         # AI-besluitvormingslogica
         # Entry conditions: AI intent is LONG, final (time-adjusted) confidence meets threshold,
-        # learned bias is sufficiently bullish, and weighted pattern score meets AI conviction threshold.
+        # learned bias is sufficiently bullish, and is_strong_pattern is True.
         if consensus_intentie == "LONG" and \
            final_ai_confidence >= entry_conviction_threshold and \
            learned_bias >= entry_learned_bias_threshold and \
-           weighted_pattern_score >= entry_conviction_threshold: # Using entry_conviction_threshold for pattern score as per instruction
+           is_strong_pattern:
 
-            logger.info(f"[EntryDecider] ✅ Entry GOEDKEURING voor {symbol}. Consensus: {consensus_intentie}, Final AI Conf: {final_ai_confidence:.2f} (Threshold: {entry_conviction_threshold:.2f}), Geleerde Bias: {learned_bias:.2f} (Threshold: >={entry_learned_bias_threshold:.2f}), Weighted Pattern Score: {weighted_pattern_score:.2f} (Threshold: {entry_conviction_threshold:.2f}).")
+            logger.info(f"[EntryDecider] ✅ Entry GOEDKEURING voor {symbol}. Consensus: {consensus_intentie}, Final AI Conf: {final_ai_confidence:.2f} (Threshold: {entry_conviction_threshold:.2f}), Geleerde Bias: {learned_bias:.2f} (Threshold: >={entry_learned_bias_threshold:.2f}), Is Strong Pattern: {is_strong_pattern} (Weighted Score: {weighted_pattern_score:.2f} >= Threshold: {strong_pattern_threshold:.2f}).")
             return {
                 "enter": True,
                 "reason": "AI_CONSENSUS_LONG_CONDITIONS_MET",
@@ -298,22 +299,26 @@ class EntryDecider:
             if consensus_intentie != "LONG": reason_parts.append(f"ai_intent_not_long ({consensus_intentie})")
             if final_ai_confidence < entry_conviction_threshold: reason_parts.append(f"final_ai_conf_low ({final_ai_confidence:.2f}_vs_{entry_conviction_threshold:.2f})")
             if learned_bias < entry_learned_bias_threshold: reason_parts.append(f"learned_bias_low ({learned_bias:.2f}_vs_{entry_learned_bias_threshold:.2f})")
-            if weighted_pattern_score < entry_conviction_threshold: reason_parts.append(f"pattern_score_low ({weighted_pattern_score:.2f}_vs_{entry_conviction_threshold:.2f})")
+            if not is_strong_pattern: reason_parts.append(f"pattern_score_low ({weighted_pattern_score:.2f}_vs_{strong_pattern_threshold:.2f})")
 
             full_reason_str = "_".join(reason_parts) if reason_parts else "entry_conditions_not_met"
             if not reason_parts and consensus_intentie == "LONG": # If intent was long but other conditions failed
-                 full_reason_str = f"intent_long_other_conditions_failed_conf{final_ai_confidence:.2f}_bias{learned_bias:.2f}_pattern_score{weighted_pattern_score:.2f}_vs_{entry_conviction_threshold:.2f}_bias_thresh{entry_learned_bias_threshold:.2f}"
+                 full_reason_str = f"intent_long_other_conditions_failed_conf{final_ai_confidence:.2f}_bias{learned_bias:.2f}_pattern_score{weighted_pattern_score:.2f}_vs_bias_thresh{entry_learned_bias_threshold:.2f}_pattern_thresh{strong_pattern_threshold:.2f}"
 
 
-            logger.info(f"[EntryDecider] ❌ Entry GEWEIGERD voor {symbol}. Reden: {full_reason_str}. AI Intentie: {consensus_intentie}, Final AI Conf: {final_ai_confidence:.2f}, Geleerde Bias: {learned_bias:.2f} (Threshold: {entry_learned_bias_threshold:.2f}), Weighted Pattern Score: {weighted_pattern_score:.2f} (Threshold: {entry_conviction_threshold:.2f}).")
+            logger.info(f"[EntryDecider] ❌ Entry GEWEIGERD voor {symbol}. Reden: {full_reason_str}. AI Intentie: {consensus_intentie}, Final AI Conf: {final_ai_confidence:.2f}, Geleerde Bias: {learned_bias:.2f} (Threshold: {entry_learned_bias_threshold:.2f}), Is Strong Pattern: {is_strong_pattern} (Weighted Score: {weighted_pattern_score:.2f} vs Threshold: {strong_pattern_threshold:.2f}).")
             return {
                 "enter": False,
                 "reason": full_reason_str,
-                "confidence": final_ai_confidence, # Report final (potentially adjusted) confidence
+                "confidence": final_ai_confidence,
                 "learned_bias": learned_bias,
                 "ai_intent": consensus_intentie,
                 "ai_details": consensus_result,
-                "pattern_details": pattern_data.get('patterns', {})
+                "pattern_details": { # Include both for clarity in logs/analysis
+                    "rules": rule_patterns_data,
+                    "cnn_predictions": cnn_predictions_data
+                },
+                "weighted_pattern_score": weighted_pattern_score
             }
 
 # Voorbeeld van hoe je het zou kunnen gebruiken (voor testen)
@@ -446,20 +451,23 @@ if __name__ == "__main__":
             return params.get(key, default) # Use default from call if key not in mock
         decider.params_manager.get_param = mock_get_param_s1
 
-        # CALCULATION FOR SCENARIO 1:
+        # CALCULATION FOR SCENARIO 1 (Updated for new logic):
         # entryLearnedBiasThreshold = 0.55 (default)
         # entryTimeEffectivenessImpactFactor = 0.5 (default)
         # entryRulePatternScore = 0.7 (default)
-        # CNN score = 0.95 (from mock_cnn_ml_and_rule)
-        # Rule-based score = 0.7 (from entryRulePatternScore)
         # cnnPatternWeight = 0.8 (from mock_get_param_s1)
-        # weighted_pattern_score = (0.95 * 0.8) + (0.7 * 0.8) = 0.76 + 0.56 = 1.32
-        # entry_conviction_threshold = 0.7 (passed as argument)
-        # AI conf = 0.85 (from mock_ask_ai_positive)
-        # learned_bias = 0.7 (passed as argument) >= entryLearnedBiasThreshold (0.55) -> True
+        # CNN score (15m_bullFlag_score) = 0.95 (from mock_cnn_ml_and_rule)
+        # Rule-based pattern "bullishEngulfing" detected.
+        # CNN contribution = 0.95 * 0.8 = 0.76
+        # Rule contribution = 0.7 * 0.8 = 0.56
+        # weighted_pattern_score = 0.76 + 0.56 = 1.32
+        # strong_pattern_threshold (entry_conviction_threshold) = 0.7 (passed as argument)
+        # is_strong_pattern = 1.32 >= 0.7 -> True
+        # AI conf = 0.85. learned_bias = 0.7.
         # time_adjusted_confidence_multiplier = 1.0 + (0.0 * 0.5) = 1.0
         # final_ai_confidence = 0.85 * 1.0 = 0.85
-        # All conditions: LONG, 0.85 >= 0.7, 0.7 >= 0.55, 1.32 >= 0.7. All True.
+        # Conditions: LONG (True), final_ai_conf (0.85) >= entry_conv_thresh (0.7) (True),
+        #             learned_bias (0.7) >= entry_learned_bias_thresh (0.55) (True), is_strong_pattern (True). All True.
         entry_decision_s1 = await decider.should_enter(
             dataframe=mock_df_5m, symbol=test_symbol, current_strategy_id=test_strategy_id,
             trade_context=mock_trade_context,
@@ -468,8 +476,8 @@ if __name__ == "__main__":
         print(f"Resultaat (Scenario 1 - ML + Rule): {json.dumps(entry_decision_s1, indent=2, default=str)}")
         assert entry_decision_s1['enter'] is True
         assert "AI_CONSENSUS_LONG_CONDITIONS_MET" in entry_decision_s1['reason']
-        # final_ai_confidence = 0.85 * (1 + 0.0*0.5) = 0.85.
         assert entry_decision_s1['confidence'] == 0.85
+        assert abs(entry_decision_s1['weighted_pattern_score'] - 1.32) < 0.001
 
         # --- Test Scenario 2: Low Weighted Pattern Score (CNN only, low score) ---
         print("\n--- Test Scenario 2: Low Weighted Pattern Score (CNN only, low score) ---")
@@ -486,13 +494,15 @@ if __name__ == "__main__":
         # params_manager mock (mock_get_param_s1) is still active, giving cnnPatternWeight = 0.8
         # It also gives neutral time effect, which is fine.
 
-        # CALCULATION FOR SCENARIO 2:
-        # CNN score = 0.1 (from mock_cnn_low_score_only)
-        # Rule-based score = 0.0 (no rule patterns in mock)
-        # cnnPatternWeight = 0.8 (from mock_get_param_s1)
-        # weighted_pattern_score = (0.1 * 0.8) + (0.0 * 0.8) = 0.08
-        # entry_conviction_threshold = 0.7 (passed as argument)
-        # Condition weighted_pattern_score >= entry_conviction_threshold (0.08 >= 0.7) is False.
+        # CALCULATION FOR SCENARIO 2 (Updated for new logic):
+        # cnnPatternWeight = 0.8
+        # CNN score (15m_bullFlag_score) = 0.1 (from mock_cnn_low_score_only)
+        # No rule-based patterns.
+        # CNN contribution = 0.1 * 0.8 = 0.08
+        # Rule contribution = 0
+        # weighted_pattern_score = 0.08
+        # strong_pattern_threshold (entry_conviction_threshold) = 0.7
+        # is_strong_pattern = 0.08 >= 0.7 -> False.
         entry_decision_s2 = await decider.should_enter(
             dataframe=mock_df_5m, symbol=test_symbol, current_strategy_id=test_strategy_id,
             trade_context=mock_trade_context,
