@@ -938,6 +938,368 @@ async def test_entry_decider_should_enter(
     mock_cnn_patterns_instance.detect_patterns_multi_timeframe.assert_called_once_with(candles_by_timeframe, symbol)
 
 
+# Imports for StrategyManager tests
+from core.strategy_manager import StrategyManager
+from typing import Dict, Any, Optional, List, Tuple # For type hinting in MockParamsManager
+
+
+class MockParamsManager:
+    def __init__(self):
+        self.params: Dict[str, Any] = {}
+        self.calls_set_param: List[Tuple[str, Any, str]] = []
+        self.calls_update_roi_sl: List[Dict[str, Any]] = []
+        self.mock_set_param = AsyncMock(side_effect=self._set_param_impl)
+        self.mock_update_strategy_roi_sl_params = AsyncMock(side_effect=self._update_strategy_roi_sl_params_impl)
+        self.mock_get_param = AsyncMock(side_effect=self._get_param_impl)
+
+    async def _set_param_impl(self, key: str, value: Any, strategy_id: str):
+        self.calls_set_param.append((key, value, strategy_id))
+        if strategy_id not in self.params:
+            self.params[strategy_id] = {"buy": {}, "sell": {}, "roi": {}, "stoploss": None, "trailing": {}}
+        # Simplistic: assume it's a buy param if not roi, stoploss, or trailing related
+        # This mock is primarily for tracking calls, not perfect state simulation.
+        if "buy" not in self.params[strategy_id]: self.params[strategy_id]["buy"] = {}
+        self.params[strategy_id]["buy"][key] = value
+        logging.info(f"MockParamsManager: Set {key} to {value} for {strategy_id}")
+
+    async def _update_strategy_roi_sl_params_impl(self, strategy_id: str, new_roi: Optional[Dict] = None,
+                                                new_stoploss: Optional[float] = None,
+                                                new_trailing_stop: Optional[float] = None,
+                                                new_trailing_only_offset_is_reached: Optional[float] = None):
+        call_args = {
+            "strategy_id": strategy_id, "new_roi": new_roi, "new_stoploss": new_stoploss,
+            "new_trailing_stop": new_trailing_stop,
+            "new_trailing_only_offset_is_reached": new_trailing_only_offset_is_reached
+        }
+        self.calls_update_roi_sl.append(call_args)
+
+        if strategy_id not in self.params:
+            self.params[strategy_id] = {"buy": {}, "sell": {}, "roi": {}, "stoploss": None, "trailing": {}}
+
+        if new_roi is not None:
+            self.params[strategy_id]['roi'] = new_roi
+        if new_stoploss is not None:
+            self.params[strategy_id]['stoploss'] = new_stoploss
+        if new_trailing_stop is not None:
+            if 'trailing' not in self.params[strategy_id]: self.params[strategy_id]['trailing'] = {}
+            self.params[strategy_id]['trailing']['value'] = new_trailing_stop
+        if new_trailing_only_offset_is_reached is not None:
+            if 'trailing' not in self.params[strategy_id]: self.params[strategy_id]['trailing'] = {}
+            self.params[strategy_id]['trailing']['offset'] = new_trailing_only_offset_is_reached
+        logging.info(f"MockParamsManager: Updated ROI/SL/Trailing for {strategy_id}")
+
+    async def _get_param_impl(self, category: str, strategy_id: str = None, param_name: str = None):
+        # This is a simplified get_param for basic support if needed by StrategyManager internally.
+        # The primary test focus is on set_param and update_strategy_roi_sl_params.
+        if strategy_id and strategy_id in self.params:
+            if param_name:
+                return self.params[strategy_id].get("buy", {}).get(param_name) or \
+                       self.params[strategy_id].get("sell", {}).get(param_name)
+            return self.params[strategy_id] # Return whole strategy dict if no specific param_name
+        return None
+
+    # Expose AsyncMocks for assertion
+    def set_param(self, key: str, value: Any, strategy_id: str):
+        return self.mock_set_param(key=key, value=value, strategy_id=strategy_id)
+
+    def update_strategy_roi_sl_params(self, strategy_id: str, new_roi: Optional[Dict] = None,
+                                      new_stoploss: Optional[float] = None,
+                                      new_trailing_stop: Optional[float] = None,
+                                      new_trailing_only_offset_is_reached: Optional[float] = None):
+        return self.mock_update_strategy_roi_sl_params(
+            strategy_id=strategy_id, new_roi=new_roi, new_stoploss=new_stoploss,
+            new_trailing_stop=new_trailing_stop,
+            new_trailing_only_offset_is_reached=new_trailing_only_offset_is_reached
+        )
+
+    def get_param(self, category: str, strategy_id: str = None, param_name: str = None):
+        return self.mock_get_param(category=category, strategy_id=strategy_id, param_name=param_name)
+
+
+class TestStrategyManager:
+    @pytest.mark.asyncio
+    async def test_mutate_strategy_updates_params_manager_correctly(self):
+        mock_params_manager = MockParamsManager()
+        # db_path=None is okay because mutate_strategy doesn't use the DB.
+        strategy_manager = StrategyManager(db_path=None)
+        strategy_manager.params_manager = mock_params_manager # Inject mock
+
+        test_strategy_id = "DUOAI_Strategy"
+        mock_proposal = {
+            "strategyId": test_strategy_id,
+            "adjustments": {
+                "parameterChanges": {"emaPeriod": 30, "rsiThreshold": 70},
+                "roi": {0: 0.15, 30: 0.10, 90: 0.05},
+                "stoploss": -0.12,
+                "trailingStop": {"value": 0.03, "offset": 0.006}
+            },
+            "confidence": 0.95,
+            "rationale": "Test mutation proposal"
+        }
+
+        result = await strategy_manager.mutate_strategy(test_strategy_id, mock_proposal)
+        assert result is True
+
+        # Verify set_param calls
+        mock_params_manager.mock_set_param.assert_any_call(key="emaPeriod", value=30, strategy_id=test_strategy_id)
+        mock_params_manager.mock_set_param.assert_any_call(key="rsiThreshold", value=70, strategy_id=test_strategy_id)
+        assert mock_params_manager.mock_set_param.call_count == 2
+
+        # Verify update_strategy_roi_sl_params call
+        mock_params_manager.mock_update_strategy_roi_sl_params.assert_called_once_with(
+            strategy_id=test_strategy_id,
+            new_roi={0: 0.15, 30: 0.10, 90: 0.05},
+            new_stoploss=-0.12,
+            new_trailing_stop=0.03,
+            new_trailing_only_offset_is_reached=0.006
+        )
+
+    @pytest.mark.asyncio
+    async def test_mutate_strategy_no_changes_returns_false(self):
+        mock_params_manager = MockParamsManager()
+        strategy_manager = StrategyManager(db_path=None)
+        strategy_manager.params_manager = mock_params_manager
+
+        test_strategy_id = "DUOAI_Strategy_NoChange"
+        mock_proposal_no_actionable_changes = {
+            "strategyId": test_strategy_id,
+            "adjustments": {
+                # No parameterChanges, roi, stoploss, or trailingStop
+            },
+            "confidence": 0.90,
+            "rationale": "Test no changes proposal"
+        }
+
+        result = await strategy_manager.mutate_strategy(test_strategy_id, mock_proposal_no_actionable_changes)
+        assert result is False
+        mock_params_manager.mock_set_param.assert_not_called()
+        mock_params_manager.mock_update_strategy_roi_sl_params.assert_not_called()
+
+        # Test with empty adjustments
+        mock_proposal_empty_adjustments = {
+            "strategyId": test_strategy_id,
+            "adjustments": {}, # Empty
+            "confidence": 0.90,
+            "rationale": "Test empty adjustments"
+        }
+        result_empty = await strategy_manager.mutate_strategy(test_strategy_id, mock_proposal_empty_adjustments)
+        assert result_empty is False
+        mock_params_manager.mock_set_param.assert_not_called() # Still not called
+        mock_params_manager.mock_update_strategy_roi_sl_params.assert_not_called() # Still not called
+
+
+    @pytest.mark.asyncio
+    async def test_mutate_strategy_invalid_proposal_returns_false(self):
+        mock_params_manager = MockParamsManager()
+        strategy_manager = StrategyManager(db_path=None)
+        strategy_manager.params_manager = mock_params_manager
+
+        test_strategy_id = "DUOAI_Strategy_Invalid"
+
+        # Test with None proposal
+        result_none = await strategy_manager.mutate_strategy(test_strategy_id, None)
+        assert result_none is False
+
+        # Test with empty proposal dict
+        result_empty = await strategy_manager.mutate_strategy(test_strategy_id, {})
+        assert result_empty is False
+
+        # Test with mismatched strategyId
+        mock_proposal_wrong_id = {
+            "strategyId": "DifferentStrategy",
+            "adjustments": {"parameterChanges": {"emaPeriod": 10}}
+        }
+        result_wrong_id = await strategy_manager.mutate_strategy(test_strategy_id, mock_proposal_wrong_id)
+        assert result_wrong_id is False
+
+        mock_params_manager.mock_set_param.assert_not_called()
+        mock_params_manager.mock_update_strategy_roi_sl_params.assert_not_called()
+
+
+# Helper function to extract JSON blocks from prompt string (adapted from core/prompt_builder.py test)
+def extract_json_block_from_prompt(prompt_text: str, start_marker: str, end_marker: Optional[str] = None) -> Optional[Dict[str, Any]]:
+    """
+    Extracts a JSON block from a given text, identified by start and optional end markers.
+    """
+    try:
+        # Ensure start_marker is treated as a literal string for splitting
+        split_after_start = prompt_text.split(start_marker, 1)
+        if len(split_after_start) < 2:
+            # logging.error(f"Start marker '{start_marker}' not found in prompt.")
+            return None
+
+        relevant_text_part = split_after_start[1]
+
+        # If an end_marker is provided and found, split by it
+        if end_marker:
+            split_before_end = relevant_text_part.split(end_marker, 1)
+            if len(split_before_end) < 2: # End marker not found after start marker
+                # This might be okay if the JSON block is the last part of the prompt
+                json_str = relevant_text_part.strip()
+            else:
+                json_str = split_before_end[0].strip()
+        else:
+            # Otherwise, assume the JSON string goes to the end of the text (or before next section)
+            # This requires careful selection of start_marker or assumes JSON is at the end.
+            json_str = relevant_text_part.strip()
+
+        return json.loads(json_str)
+    except json.JSONDecodeError as e:
+        # logging.error(f"JSONDecodeError for block starting with '{start_marker}': {e}")
+        # logging.error(f"Problematic JSON string part: {json_str[:300]}...") # Log more context
+        return None
+    except Exception as e:
+        # logging.error(f"An unexpected error occurred in extract_json_block: {e}")
+        return None
+
+
+# Imports for PromptBuilder tests
+from core.prompt_builder import PromptBuilder
+# pandas (pd) and numpy (np) are already imported. json is also available.
+
+class TestPromptBuilder:
+    @pytest.mark.asyncio
+    async def test_generate_prompt_with_complete_data(self):
+        builder = PromptBuilder()
+
+        # Create mock candles_by_timeframe
+        mock_candles = {
+            '5m': pd.DataFrame({
+                'open': [10, 11, 12, 11.5, 12.55],
+                'high': [10.5, 11.5, 12.5, 12, 13.01],
+                'low': [9.5, 10.5, 11.5, 11, 12.02],
+                'close': [11, 12, 11.5, 12.5, 12.88],
+                'volume': [100, 120, 110, 130, 90.5],
+                'rsi': [50, 55, 60, 58, 62.12],
+                'macd': [0.1, 0.12, 0.15, 0.13, 0.161],
+                'macdsignal': [0.09, 0.1, 0.11, 0.12, 0.132],
+                'macdhist': [0.01, 0.02, 0.04, 0.01, 0.033],
+                'bb_lowerband': [9, 10, 11, 10.5, 11.54],
+                'bb_middleband': [10, 11, 12, 11.5, 12.55],
+                'bb_upperband': [11, 12, 13, 12.5, 13.56],
+                'ema_short': [10.8, 11.2, 11.8, 11.6, 12.27],
+                'ema_long': [10.5, 10.8, 11.1, 11.3, 11.78],
+                'ema_20': [10.7, 11.1, 11.7, 11.5, 12.19],
+                'ema_100': [10.2, 10.5, 10.8, 11.0, 11.41],
+                'volume_mean_10': [110, 115, 112, 118, 110.52],
+                'volume_mean_30': [105, 110, 115, 112, 108.03],
+                'CDLMORNINGSTAR': [0, 0, 0, 0, 100],    # Active pattern
+                'CDLEVENINGSTAR': [0, 0, 0, 0, 0],     # Inactive pattern (value 0)
+                'CDLDOJI': [0, 0, 100, 0, 0],          # Pattern not on latest candle
+                'CDLHAMMER': [0,0,0,0, -100]           # Active negative pattern
+            }),
+            '1h': pd.DataFrame({
+                'open': [1200, 1210, 1205.1],
+                'high': [1250, 1220, 1215.2],
+                'low': [1190, 1200, 1200.3],
+                'close': [1210, 1205, 1212.77],
+                'volume': [1000, 1200, 1100.5],
+                'rsi': [60.3, 55.2, 58.99],
+                'ema_short': [1208, 1206, 1209.51],
+                'ema_50': [1200, 1202, 1205.02],
+                'CDLENGULFING': [0, 0, -100],          # Active pattern
+                'CDLSHOOTINGSTAR': [0,0,0]             # Inactive
+            })
+        }
+
+        # Create mock additional_context
+        mock_additional_context = {
+            'pattern_data': {
+                'cnn_predictions': {
+                    '5m_bullFlag_score': 0.92,
+                    '1h_bearTrap_score': 0.78,
+                    '5m_randomPattern_score': 0.3 # Should also be included
+                }
+            },
+            'social_sentiment_data': [
+                {
+                    "title": "TEST: BTC to the moon!", "source": "TestCryptoNews",
+                    "content": "Test content about BTC rally.", "timestamp": "2024-01-01T10:00:00Z"
+                }
+            ]
+        }
+
+        prompt_string = await builder.generate_prompt_with_data(
+            candles_by_timeframe=mock_candles,
+            symbol="TEST/USDT",
+            prompt_type="marketAnalysis",
+            current_bias=0.5,
+            current_confidence=0.6,
+            additional_context=mock_additional_context
+        )
+
+        assert prompt_string is not None
+        assert isinstance(prompt_string, str)
+
+        # Technical Indicators Assertions
+        tech_indicators_json = extract_json_block_from_prompt(prompt_string, "Latest Technical Indicators:\n", "\nDetected Candlestick Patterns:")
+        assert tech_indicators_json is not None, "Technical indicators JSON block not found or invalid."
+
+        # 5m timeframe indicators
+        assert '5m' in tech_indicators_json
+        indicators_5m = tech_indicators_json['5m']
+        latest_5m_row = mock_candles['5m'].iloc[-1]
+        expected_indicators_5m = {
+            'rsi': latest_5m_row['rsi'], 'macd': latest_5m_row['macd'],
+            'macdsignal': latest_5m_row['macdsignal'], 'macdhist': latest_5m_row['macdhist'],
+            'bb_lowerband': latest_5m_row['bb_lowerband'], 'bb_middleband': latest_5m_row['bb_middleband'],
+            'bb_upperband': latest_5m_row['bb_upperband'], 'ema_short': latest_5m_row['ema_short'],
+            'ema_long': latest_5m_row['ema_long'], 'ema_20': latest_5m_row['ema_20'],
+            'ema_100': latest_5m_row['ema_100'], 'volume_mean_10': latest_5m_row['volume_mean_10'],
+            'volume_mean_30': latest_5m_row['volume_mean_30']
+        }
+        for k, v in expected_indicators_5m.items():
+            assert k in indicators_5m, f"Indicator {k} missing for 5m"
+            assert abs(indicators_5m[k] - v) < 1e-9, f"Indicator {k} value mismatch for 5m"
+
+        # 1h timeframe indicators
+        assert '1h' in tech_indicators_json
+        indicators_1h = tech_indicators_json['1h']
+        latest_1h_row = mock_candles['1h'].iloc[-1]
+        expected_indicators_1h = {
+            'rsi': latest_1h_row['rsi'],
+            'ema_short': latest_1h_row['ema_short'], 'ema_50': latest_1h_row['ema_50']
+        }
+        for k, v in expected_indicators_1h.items():
+            assert k in indicators_1h, f"Indicator {k} missing for 1h"
+            assert abs(indicators_1h[k] - v) < 1e-9, f"Indicator {k} value mismatch for 1h"
+        assert 'macd' not in indicators_1h # Check that not all indicators are present if not in source df
+
+        # Candlestick Patterns Assertions
+        candlestick_json = extract_json_block_from_prompt(prompt_string, "Detected Candlestick Patterns:\n", "\nDetected CNN Patterns:")
+        assert candlestick_json is not None, "Candlestick patterns JSON block not found or invalid."
+
+        assert '5m' in candlestick_json
+        assert "CDLMORNINGSTAR" in candlestick_json['5m']
+        assert "CDLHAMMER" in candlestick_json['5m']
+        assert "CDLEVENINGSTAR" not in candlestick_json['5m'] # Value was 0
+        assert "CDLDOJI" not in candlestick_json['5m'] # Not on latest row
+
+        assert '1h' in candlestick_json
+        assert "CDLENGULFING" in candlestick_json['1h']
+        assert "CDLSHOOTINGSTAR" not in candlestick_json['1h'] # Value was 0
+
+        # CNN Patterns Assertions
+        cnn_patterns_json = extract_json_block_from_prompt(prompt_string, "Detected CNN Patterns:\n", "\nLatest Social Sentiment/News:")
+        assert cnn_patterns_json is not None, "CNN patterns JSON block not found or invalid."
+        expected_cnn_predictions = mock_additional_context['pattern_data']['cnn_predictions']
+        for k, v in expected_cnn_predictions.items():
+            assert k in cnn_patterns_json
+            assert cnn_patterns_json[k] == v
+
+        # Basic OHLCV Data Presence
+        assert "Latest 5 candles (condensed):" in prompt_string
+        assert "12.88" in prompt_string # From 5m close
+        assert "1212.77" in prompt_string # From 1h close
+
+        # Social Sentiment Data Presence
+        assert "Latest Social Sentiment/News:" in prompt_string
+        assert "Title: TEST: BTC to the moon!" in prompt_string
+        assert "Source: TestCryptoNews" in prompt_string
+        assert "Snippet: Test content about BTC rally." in prompt_string # Content is short, so full content
+        assert "Timestamp: 2024-01-01T10:00:00Z" in prompt_string
+
+
 # Imports for ConfidenceEngine tests
 from core.confidence_engine import ConfidenceEngine, CONFIDENCE_COOLDOWN_SECONDS
 # datetime, timedelta, os, json, asyncio, patch, logging are already imported or available via pytest.
