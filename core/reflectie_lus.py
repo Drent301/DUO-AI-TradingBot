@@ -14,7 +14,10 @@ from core.grok_reflector import GrokReflector
 from core.prompt_builder import PromptBuilder
 # Import reflectie_analyser, assuming it's in the same directory
 # If reflectie_analyser.py contains those functions directly:
-from core.reflectie_analyser import analyseReflecties, generateMutationProposal, analyzeTimeframeBias
+# from core.reflectie_analyser import analyseReflecties, generateMutationProposal, analyzeTimeframeBias # Now class methods
+from core.reflectie_analyser import ReflectieAnalyser # Import class
+from core.performance_monitor import PerformanceMonitor # Import class
+from core.params_manager import ParamsManager # For type hinting and __main__
 
 # from core.bias_reflector import BiasReflector # Nog te implementeren
 # from core.confidence_engine import ConfidenceEngine # Nog te implementeren
@@ -40,20 +43,26 @@ class ReflectieLus:
     Vertaald en geoptimaliseerd van reflectieLus.js en aiActivationEngine.js.
     """
 
-    def __init__(self):
+    def __init__(self, params_manager: ParamsManager): # Added params_manager
+        self.params_manager = params_manager
         self.gpt_reflector = GPTReflector()
         self.grok_reflector = GrokReflector()
-        self.prompt_builder = PromptBuilder() # This will fail if PromptBuilder is not defined
-        self.last_reflection_timestamps: Dict[str, float] = {} # Per token, voor AI activatie trigger
-        self.analysis_result_placeholder = {"summary": "Analysis not fully implemented"} # Placeholder
-        self.mutation_proposal_placeholder = {"action": "No mutation proposed yet"} # Placeholder
+        self.prompt_builder = PromptBuilder()
+
+        freqtrade_db_url = self.params_manager.get_param("freqtrade_db_url", default="sqlite:///tradesv3.sqlite")
+        self.performance_monitor = PerformanceMonitor(params_manager=self.params_manager, freqtrade_db_url=freqtrade_db_url)
+        self.reflectie_analyser = ReflectieAnalyser(params_manager=self.params_manager)
+
+        self.last_reflection_timestamps: Dict[str, float] = {}
+        self.analysis_result_placeholder = {"summary": "Analysis not fully implemented"}
+        self.mutation_proposal_placeholder = {"action": "No mutation proposed yet"}
 
 
         # Initialiseer logboekbestand als het niet bestaat
         if not os.path.exists(LOG_FILE):
             with open(LOG_FILE, 'w', encoding='utf-8') as f:
                 json.dump([], f)
-        logger.info(f"ReflectieLus geïnitialiseerd. Logboek: {LOG_FILE}")
+        logger.info(f"ReflectieLus geïnitialiseerd met ParamsManager. Logboek: {LOG_FILE}")
 
     async def _store_reflection(self, reflection: Dict[str, Any]) -> bool:
         """
@@ -204,9 +213,10 @@ class ReflectieLus:
         combined_confidence = ( (gpt_conf or 0) + (grok_conf or 0) ) / num_valid_results
         combined_bias = ( (gpt_bias or 0.5) + (grok_bias or 0.5) ) / num_valid_results
 
-
-        combined_reflection = f"GPT: {gpt_result.get('reflectie', 'N/A') if gpt_result else 'N/A'}
-Grok: {grok_result.get('reflectie', 'N/A') if grok_result else 'N/A'}"
+        combined_reflection = (
+            f"GPT: {gpt_result.get('reflectie', 'N/A') if gpt_result else 'N/A'}\n"
+            f"Grok: {grok_result.get('reflectie', 'N/A') if grok_result else 'N/A'}"
+        )
         combined_intentie = (gpt_result.get('intentie') if gpt_result else None) or                             (grok_result.get('intentie') if grok_result else None) or 'N/A'
         combined_emotie = (gpt_result.get('emotie') if gpt_result else None) or                           (grok_result.get('emotie') if grok_result else None) or 'N/A'
 
@@ -247,31 +257,66 @@ Grok: {grok_result.get('reflectie', 'N/A') if grok_result else 'N/A'}"
         if all_logs:
             relevant_reflections = [
                 log for log in all_logs
-                if log.get('token') == symbol and log.get('strategyId') == strategy_id
+                if log.get('token') == symbol and log.get('strategyId') == strategy_id # Ensure strategyId is also checked
             ]
 
             if relevant_reflections:
                 try:
-                    analysis_result = analyseReflecties(relevant_reflections)
-                    timeframe_bias_analysis = analyzeTimeframeBias(relevant_reflections)
+                    # Use instance methods for analysis
+                    analysis_result = await self.reflectie_analyser.analyse_reflecties(relevant_reflections)
+                    timeframe_bias_analysis = await self.reflectie_analyser.analyze_timeframe_bias(relevant_reflections)
 
-                    dummy_performance = {"winRate": 0.0, "avgProfit": 0.0, "tradeCount": 0}
-                    if 'profit_pct' in trade_context:
-                        dummy_performance['winRate'] = 1.0 if trade_context['profit_pct'] > 0 else 0.0
-                        dummy_performance['avgProfit'] = trade_context['profit_pct']
-                        dummy_performance['tradeCount'] = 1
+                    # Fetch real performance data
+                    performance_lookback_days = self.params_manager.get_param("performance_lookback_days", default=30)
+                    performance_data = await self.performance_monitor.get_strategy_performance(
+                        strategy_id=strategy_id,
+                        lookback_period_days=performance_lookback_days
+                    )
+                    if not performance_data: # Handle case where performance data might be None
+                        logger.warning(f"Geen performance data ontvangen voor {strategy_id}. Gebruik placeholder performance.")
+                        performance_data = {"winRate": 0.0, "avgProfit": 0.0, "tradeCount": 0, "totalProfit":0.0, "sharpeRatio":0.0, "maxDrawdown":1.0, "lookback_period_days": performance_lookback_days, "data_source": "placeholder_due_to_none"}
 
-                    current_strategy_params = {
-                        "id": strategy_id,
-                        "parameters": { "emaPeriod": 20, "rsiThreshold": 70 }
-                    }
-                    mutation_proposal = generateMutationProposal(
-                        current_strategy_params,
-                        combined_bias,
-                        dummy_performance,
-                        timeframe_bias_analysis
+
+                    # Fetch current strategy parameters from ParamsManager
+                    # The structure of "strategy_info" for generate_mutation_proposal needs 'id' and 'parameters'
+                    # 'parameters' should contain the learnable params like 'learned_ema_period', etc.
+                    strategy_specific_params = self.params_manager.get_param("strategies", strategy_id=strategy_id)
+                    if not strategy_specific_params or not isinstance(strategy_specific_params, dict):
+                        logger.warning(f"Kon geen strategieparameters ophalen voor {strategy_id} uit ParamsManager. Gebruik defaults voor mutatievoorstel.")
+                        # Provide a default structure if params are missing, ensuring keys used by generate_mutation_proposal exist
+                        strategy_info_for_mutation = {
+                            "id": strategy_id,
+                            "parameters": {
+                                "learned_ema_period": 20, # Default fallback
+                                "learned_rsi_threshold_buy": 30, # Default fallback
+                                "learned_rsi_threshold_sell": 70  # Default fallback
+                                # Add other expected learnable params if any
+                            }
+                        }
+                    else:
+                        strategy_info_for_mutation = {
+                            "id": strategy_id,
+                            "parameters": strategy_specific_params # Pass all strategy-specific params
+                        }
+
+                    mutation_proposal = await self.reflectie_analyser.generate_mutation_proposal(
+                        strategy_info=strategy_info_for_mutation,
+                        current_bias=combined_bias, # Using the combined_bias from current reflection cycle
+                        performance_data=performance_data,
+                        timeframe_bias_data=timeframe_bias_analysis
                     )
                     logger.info(f"Mutatievoorstel voor {symbol} ({strategy_id}): {mutation_proposal}")
+
+                    # Save the latest mutation proposal
+                    if mutation_proposal and strategy_id:
+                        proposal_file_path = os.path.join(MEMORY_DIR, f"latest_mutation_proposal_{strategy_id}.json")
+                        try:
+                            with open(proposal_file_path, 'w', encoding='utf-8') as f:
+                                json.dump(mutation_proposal, f, indent=2)
+                            logger.info(f"Mutatievoorstel opgeslagen naar: {proposal_file_path}")
+                        except Exception as e_save:
+                            logger.error(f"Fout bij opslaan mutatievoorstel naar {proposal_file_path}: {e_save}")
+
                 except Exception as e:
                     logger.error(f"Fout tijdens analyse of mutatievoorstel generatie: {e}")
                     analysis_result = {"summary": f"Analysefout: {e}"}
@@ -394,15 +439,43 @@ if __name__ == "__main__":
 
     async def run_test_reflection_loop():
         # Setup basic logging for the test
-        # Add sys import for logging handler
         import sys
         logging.basicConfig(level=logging.INFO,
                             format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
                             handlers=[logging.StreamHandler(sys.stdout)])
 
+        # Mock ParamsManager for the test
+        class MockParamsManager(ParamsManager):
+            def __init__(self):
+                self._params = self._get_default_params() # Use defaults from actual ParamsManager
+                # Override specific params for testing if needed
+                self._params["global"]["freqtrade_db_url"] = "sqlite:///tradesv3_test.sqlite" # Dummy test DB
+                self._params["global"]["performance_lookback_days"] = 7
+                # Ensure strategy section exists for DUOAI_Strategy
+                if "DUOAI_Strategy" not in self._params["strategies"]:
+                    self._params["strategies"]["DUOAI_Strategy"] = {
+                        "learned_ema_period": 20,
+                        "learned_rsi_threshold_buy": 30,
+                        "learned_rsi_threshold_sell": 70
+                    }
 
 
-        ref_lus = ReflectieLus()
+            def get_param(self, key: str, strategy_id: Optional[str] = None, default: Any = None) -> Any:
+                if strategy_id and "strategies" in self._params and strategy_id in self._params["strategies"] and key in self._params["strategies"][strategy_id]:
+                    return self._params["strategies"][strategy_id][key]
+                if "global" in self._params and key in self._params["global"]:
+                    return self._params["global"][key]
+                return default
+
+            def _get_default_params(self) -> Dict[str, Any]: # Copied from real ParamsManager for structure
+                return {
+                    "global": { "freqtrade_db_url": "sqlite:///tradesv3.sqlite", "performance_lookback_days": 30,
+                                "apply_mutation_threshold_confidence": 0.65},
+                    "strategies": { "DUOAI_Strategy": {"learned_ema_period": 10, "learned_rsi_threshold_buy": 20, "learned_rsi_threshold_sell": 80}}
+                }
+
+        mock_pm = MockParamsManager()
+        ref_lus = ReflectieLus(params_manager=mock_pm) # Pass MockParamsManager
         test_symbols = ["ETH/USDT"]
 
         mock_trade_context = {

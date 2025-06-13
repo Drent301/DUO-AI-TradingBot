@@ -107,23 +107,29 @@ class ParamsManager:
                 "hpo_pruner": "Median", # Optuna pruner: 'Median', 'None'
                 "hpo_metric_to_optimize": "val_loss", # Metric to optimize: 'val_loss', 'val_accuracy', 'val_f1', 'val_auc'
                 "hpo_direction_to_optimize": "minimize", # Direction: 'minimize' for loss, 'maximize' for acc/f1/auc
-                "regimes_to_train": ["all"] # List of market regimes to train models for (e.g., ["bull", "bear", "all"])
+                "regimes_to_train": ["all"], # List of market regimes to train models for (e.g., ["bull", "bear", "all"])
+                "apply_mutation_threshold_confidence": 0.65, # Min confidence for a mutation proposal to be applied
+                "freqtrade_db_url": "sqlite:///tradesv3.sqlite", # Path to Freqtrade database for performance tracking
+                "performance_lookback_days": 30 # Default lookback in days for performance calculation
             },
             "strategies": {
                 "DUOAI_Strategy": {
                     "entryConvictionThreshold": 0.7,
                     "exitConvictionDropTrigger": 0.4,
-                    "cnnPatternWeight": 1.0, # NIEUW: Initiële waarde voor CNN-patroon gewicht
-                    "strongPatternThreshold": 0.5, # Default threshold for strong patterns
-                    "entryRulePatternScore": 0.7, # NIEUW: Default score for a detected rule-based entry pattern
-                    "exitRulePatternScore": 0.7,  # NIEUW: Default score for a detected rule-based exit pattern
+                    "cnnPatternWeight": 1.0,
+                    "strongPatternThreshold": 0.5,
+                    "entryRulePatternScore": 0.7,
+                    "exitRulePatternScore": 0.7,
                     "preferredPairs": [],
                     "minimal_roi": {"0": 0.05, "30": 0.03, "60": 0.02, "120": 0.01},
                     "stoploss": -0.10,
                     "trailing_stop_positive": 0.005,
-                    "trailing_stop_positive_offset": 0.01
+                    "trailing_stop_positive_offset": 0.01,
+                    "learned_ema_period": 20, # Example initial value for a learnable EMA period
+                    "learned_rsi_threshold_buy": 30, # Example initial value for a learnable RSI buy threshold
+                    "learned_rsi_threshold_sell": 70 # Example initial value for a learnable RSI sell threshold
                 },
-                "DefaultPipelineRunStrategy": { # Added an entry for the default strategy
+                "DefaultPipelineRunStrategy": {
                     "entryConvictionThreshold": 0.6,
                     "exitConvictionDropTrigger": 0.3,
                     "cnnPatternWeight": 1.0,
@@ -134,7 +140,10 @@ class ParamsManager:
                     "minimal_roi": {"0": 0.04, "30": 0.02, "60": 0.01},
                     "stoploss": -0.08,
                     "trailing_stop_positive": 0.004,
-                    "trailing_stop_positive_offset": 0.008
+                    "trailing_stop_positive_offset": 0.008,
+                    "learned_ema_period": 20,
+                    "learned_rsi_threshold_buy": 30,
+                    "learned_rsi_threshold_sell": 70
                 }
             },
             "timeOfDayEffectiveness": {}
