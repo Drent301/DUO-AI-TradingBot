@@ -12,7 +12,7 @@ logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
 
 GROK_API_KEY = os.getenv('GROK_API_KEY')
-LIVE_SEARCH_API_URL = os.getenv('GROK_LIVE_SEARCH_API_URL', 'https://api.x.ai/v1/live-search') # Hypothetisch endpoint
+LIVE_SEARCH_API_URL = os.getenv('GROK_LIVE_SEARCH_API_URL', 'https://api.x.ai/v1/live-search') # TODO: Update with official endpoint when available. This is a hypothetical endpoint.
 
 # Padconfiguratie voor cache
 # __file__ is de huidige bestandsnaam. os.path.dirname haalt de map op.
