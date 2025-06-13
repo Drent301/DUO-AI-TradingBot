@@ -8,7 +8,7 @@ import numpy as np
 
 from freqtrade.strategy import IStrategy, merge_informative_pair
 from freqtrade.strategy.interface import IStrategy
-import talib.abstract as ta
+# import talib.abstract as ta # Defer import to where it's used
 import freqtrade.vendor.qtpylib.indicators as qtpylib
 from freqtrade.exchange import Exchange
 from freqtrade.persistence import Trade
@@ -57,7 +57,7 @@ class DUOAI_Strategy(IStrategy):
     # Define informative timeframes to fetch data for AI modules
     # These are required by `cnn_patterns` and `prompt_builder` for multi-timeframe context.
     # Updated to include all pairs from config.json's pair_whitelist and relevant timeframes.
-    informative_timeframes = ['1h', '4h', '1d'] # These are the timeframes to merge into base DF
+    informative_timeframes = ['1m', '5m', '15m', '1h', '4h', '1d'] # These are the timeframes to merge into base DF
 
     # Maak instanties van je AI-modules
     prompt_builder: PromptBuilder = PromptBuilder()
@@ -160,18 +160,41 @@ class DUOAI_Strategy(IStrategy):
         """
         self._load_and_apply_learned_parameters(metadata['pair']) # Load latest params
 
-        # Standaard Freqtrade/TA-Lib indicatoren
-        dataframe['rsi'] = ta.RSI(dataframe, timeperiod=14)
-        macd = ta.MACD(dataframe)
-        dataframe['macd'] = macd['macd']
-        dataframe['macdsignal'] = macd['macdsignal']
-        dataframe['macdhist'] = macd['macdhist']
-        bollinger = qtpylib.bollinger_bands(qtpylib.typical_price(dataframe), window=20, stds=2)
-        dataframe['bb_lowerband'] = bollinger['lower']
-        dataframe['bb_middleband'] = bollinger['mid']
-        dataframe['bb_upperband'] = bollinger['upper']
-        dataframe['ema_20'] = ta.EMA(dataframe, timeperiod=20)
-        dataframe['volume_mean_20'] = dataframe['volume'].rolling(20).mean()
+        try:
+            import talib.abstract as ta
+            # Standaard Freqtrade/TA-Lib indicatoren
+            dataframe['rsi'] = ta.RSI(dataframe, timeperiod=14)
+            macd = ta.MACD(dataframe)
+            dataframe['macd'] = macd['macd']
+            dataframe['macdsignal'] = macd['macdsignal']
+            dataframe['macdhist'] = macd['macdhist']
+            # Bollinger Bands in Freqtrade often use qtpylib, which might use talib or numpy internally
+            # ta.TYPPRICE is used by qtpylib.bollinger_bands if not given a series directly.
+            # If qtpylib.typical_price itself calls ta.TYPPRICE, it needs talib.
+            # For now, assume qtpylib parts are less problematic or handled if TA-Lib is missing.
+            # The main direct TA-Lib calls are RSI, MACD, EMA.
+            # bollinger = qtpylib.bollinger_bands(qtpylib.typical_price(dataframe), window=20, stds=2)
+            # To make bollinger_bands more robust if ta.TYPPRICE fails due to missing talib:
+            try:
+                typical_price_series = ta.TYPPRICE(dataframe) # This requires 'high', 'low', 'close'
+            except Exception: # Could be AttributeError if ta is None, or other talib issues
+                logger.warning("TA-Lib (ta.TYPPRICE) not available for Bollinger Bands typical price. Using 'close'.")
+                typical_price_series = dataframe['close'] # Fallback
+
+            bollinger = qtpylib.bollinger_bands(typical_price_series, window=20, stds=2)
+            dataframe['bb_lowerband'] = bollinger['lower']
+            dataframe['bb_middleband'] = bollinger['mid']
+            dataframe['bb_upperband'] = bollinger['upper']
+
+            dataframe['ema_10'] = ta.EMA(dataframe, timeperiod=10)
+            dataframe['ema_25'] = ta.EMA(dataframe, timeperiod=25)
+            dataframe['ema_50'] = ta.EMA(dataframe, timeperiod=50)
+        except ImportError:
+            logger.warning("DUOAI_Strategy: TA-Lib module not found. Skipping TA-Lib based indicators (RSI, MACD, EMA, BBands via TYPPRICE).")
+        except Exception as e_ta_pop:
+            logger.error(f"DUOAI_Strategy: Error calculating TA-Lib indicators: {e_ta_pop}. Skipping.")
+
+        dataframe['volume_mean_20'] = dataframe['volume'].rolling(20).mean() # Numpy based, should be fine
 
         # --- Merge informative timeframes into the main dataframe ---
         # This uses `self.informative_pairs` to tell Freqtrade which (pair, timeframe)
@@ -198,47 +221,49 @@ class DUOAI_Strategy(IStrategy):
                 logger.debug(f"Skipping indicator calculation for {info_tf} as '{prefix}_close' is not in dataframe.")
                 continue
 
-            # RSI
-            dataframe[f'{prefix}_rsi'] = ta.RSI(dataframe[f'{prefix}_close'], timeperiod=14)
+            # try:
+            #     import talib.abstract as ta
+            #     # RSI
+            #     dataframe[f'{prefix}_rsi'] = ta.RSI(dataframe[f'{prefix}_close'], timeperiod=14)
 
-            # MACD
-            # Note: ta.MACD expects a series, not a dataframe.
-            # We also need to ensure the output columns are prefixed.
-            macd_inf = ta.MACD(dataframe[f'{prefix}_close'])
-            dataframe[f'{prefix}_macd'] = macd_inf['macd']
-            dataframe[f'{prefix}_macdsignal'] = macd_inf['macdsignal']
-            dataframe[f'{prefix}_macdhist'] = macd_inf['macdhist']
+            #     # MACD
+            #     macd_inf = ta.MACD(dataframe[f'{prefix}_close'])
+            #     dataframe[f'{prefix}_macd'] = macd_inf['macd']
+            #     dataframe[f'{prefix}_macdsignal'] = macd_inf['macdsignal']
+            #     dataframe[f'{prefix}_macdhist'] = macd_inf['macdhist']
 
-            # Bollinger Bands
-            # qtpylib.bollinger_bands requires a dataframe and column name for typical_price calculation,
-            # or we can pass the series directly.
-            # For simplicity, we'll use typical_price if open, high, low, close are available for the timeframe.
-            # Otherwise, we'll fall back to using just '{prefix}_close'.
-            # However, merge_informative_pair by default only merges 'date', 'open', 'high', 'low', 'close', 'volume'.
-            # So, we can rely on these columns being present if the informative timeframe itself was successfully merged.
+            #     # Bollinger Bands for informative TFs
+            #     try:
+            #         inf_typical_price_series = ta.TYPPRICE(
+            #             dataframe[f'{prefix}_open'],
+            #             dataframe[f'{prefix}_high'],
+            #             dataframe[f'{prefix}_low'],
+            #             dataframe[f'{prefix}_close']
+            #         )
+            #     except Exception: # Handles if ta is None or specific columns missing for TYPPRICE
+            #         logger.warning(f"TA-Lib (ta.TYPPRICE) not available for informative Bollinger Bands on {info_tf}. Using '{prefix}_close'.")
+            #         inf_typical_price_series = dataframe[f'{prefix}_close'] # Fallback
 
-            # Create a temporary dataframe for qtpylib.typical_price if needed, or pass series directly
-            # For Bollinger Bands, qtpylib.typical_price needs open, high, low, close.
-            # Let's assume these are merged as {prefix}_open, {prefix}_high, {prefix}_low, {prefix}_close
+            #     bollinger_inf = qtpylib.bollinger_bands(inf_typical_price_series, window=20, stds=2)
+            #     dataframe[f'{prefix}_bb_lowerband'] = bollinger_inf['lower']
+            #     dataframe[f'{prefix}_bb_middleband'] = bollinger_inf['mid']
+            #     dataframe[f'{prefix}_bb_upperband'] = bollinger_inf['upper']
 
-            # Check for all necessary columns for typical_price
-            required_ohlc_cols = [f'{prefix}_open', f'{prefix}_high', f'{prefix}_low', f'{prefix}_close']
-            if all(col in dataframe.columns for col in required_ohlc_cols):
-                typical_price_inf_series = qtpylib.typical_price(dataframe, candle_type=prefix) # Pass prefix for candle type
+            #     # EMA
+            #     dataframe[f'{prefix}_ema_10'] = ta.EMA(dataframe[f'{prefix}_close'], timeperiod=10)
+            #     dataframe[f'{prefix}_ema_25'] = ta.EMA(dataframe[f'{prefix}_close'], timeperiod=25)
+            #     dataframe[f'{prefix}_ema_50'] = ta.EMA(dataframe[f'{prefix}_close'], timeperiod=50)
+            # except ImportError:
+            #     logger.warning(f"DUOAI_Strategy: TA-Lib module not found during informative TF processing for {info_tf}. Skipping TA-Lib indicators.")
+            # except Exception as e_ta_info:
+            #     logger.error(f"DUOAI_Strategy: Error calculating TA-Lib indicators for informative TF {info_tf}: {e_ta_info}. Skipping.")
+            logger.warning(f"DUOAI_Strategy: TA-Lib dependent indicators for informative timeframe {info_tf} are temporarily disabled.")
+
+            # Volume Mean (e.g., volume_mean_20) - Numpy based
+            if f'{prefix}_volume' in dataframe.columns:
+                dataframe[f'{prefix}_volume_mean_20'] = dataframe[f'{prefix}_volume'].rolling(window=20).mean()
             else:
-                logger.warning(f"Typical price for {info_tf} cannot be calculated due to missing OHLC columns. Falling back to '{prefix}_close' for Bollinger Bands.")
-                typical_price_inf_series = dataframe[f'{prefix}_close'] # Fallback
-
-            bollinger_inf = qtpylib.bollinger_bands(typical_price_inf_series, window=20, stds=2)
-            dataframe[f'{prefix}_bb_lowerband'] = bollinger_inf['lower']
-            dataframe[f'{prefix}_bb_middleband'] = bollinger_inf['mid']
-            dataframe[f'{prefix}_bb_upperband'] = bollinger_inf['upper']
-
-            # EMA (e.g., ema_20)
-            dataframe[f'{prefix}_ema_20'] = ta.EMA(dataframe[f'{prefix}_close'], timeperiod=20)
-
-            # Volume Mean (e.g., volume_mean_20)
-            # Check if the volume column (e.g., '{prefix}_volume') exists
+                logger.debug(f"Skipping volume mean calculation for {info_tf} as '{prefix}_volume' is not in dataframe.")
             if f'{prefix}_volume' in dataframe.columns:
                 dataframe[f'{prefix}_volume_mean_20'] = dataframe[f'{prefix}_volume'].rolling(window=20).mean()
             else:

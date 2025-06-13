@@ -12,7 +12,7 @@ from core.bitvavo_executor import BitvavoExecutor
 from core.backtester import Backtester
 from core.params_manager import ParamsManager # Moved to top
 from core.cnn_patterns import CNNPatterns # Moved to top
-import talib.abstract as ta
+# import talib.abstract as ta # Defer import to where it's used
 import dotenv
 import shutil
 
@@ -24,108 +24,61 @@ from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_sc
 """
 Handles the pre-training pipeline for CNN models based on historical market data.
 """
+import torch # Ensure torch is imported if used for type hints or operations
+from sklearn.preprocessing import MinMaxScaler # Ensure MinMaxScaler is imported
+from typing import TYPE_CHECKING # For forward declaration of CNNPatterns
+
+if TYPE_CHECKING:
+    from core.cnn_patterns import CNNPatterns # Forward declaration for type hint
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
 
-# Sentinel object for constructor arguments
+# Sentinel object for constructor arguments (if used by other methods, keep; otherwise can be removed if only __init__ changes)
 _SENTINEL = object()
 
-# PyTorch Imports
-import torch
-import torch.nn as nn
-import optuna
-import torch.optim as optim
-from torch.utils.data import DataLoader, TensorDataset
 
 MEMORY_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'memory')
 PRETRAIN_LOG_FILE = os.path.join(MEMORY_DIR, 'pre_train_log.json')
 TIME_EFFECTIVENESS_FILE = os.path.join(MEMORY_DIR, 'time_effectiveness.json')
-MODELS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'data', 'models')
+# MODELS_DIR is now defined in __init__ based on config or default user_data
 MARKET_REGIMES_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'data', 'market_regimes.json')
 
 os.makedirs(MEMORY_DIR, exist_ok=True)
-os.makedirs(MODELS_DIR, exist_ok=True)
+# os.makedirs(MODELS_DIR, exist_ok=True) # MODELS_DIR creation moved to __init__
 os.makedirs(os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'data'), exist_ok=True)
 
-class SimpleCNN(nn.Module):
-    def __init__(self,
-                 input_channels: int,
-                 num_classes: int,
-                 sequence_length: int,
-                 num_conv_layers: int = 2,
-                 filters_per_layer: list = [16, 32],
-                 kernel_sizes_per_layer: list = [3, 3],
-                 strides_per_layer: list = [1, 1],
-                 padding_per_layer: list = [1, 1],
-                 pooling_types_per_layer: list = ['max', 'max'],
-                 pooling_kernel_sizes_per_layer: list = [2, 2],
-                 pooling_strides_per_layer: list = [2, 2],
-                 use_batch_norm: bool = False,
-                 dropout_rate: float = 0.0):
-        super(SimpleCNN, self).__init__()
-        self.input_channels = input_channels
-        self.num_classes = num_classes
-        self.sequence_length = sequence_length
-        param_lists = {
-            "filters_per_layer": filters_per_layer, "kernel_sizes_per_layer": kernel_sizes_per_layer,
-            "strides_per_layer": strides_per_layer, "padding_per_layer": padding_per_layer,
-            "pooling_types_per_layer": pooling_types_per_layer,
-            "pooling_kernel_sizes_per_layer": pooling_kernel_sizes_per_layer,
-            "pooling_strides_per_layer": pooling_strides_per_layer
-        }
-        for name, p_list in param_lists.items():
-            if len(p_list) != num_conv_layers:
-                raise ValueError(f"Length of '{name}' ({len(p_list)}) must match 'num_conv_layers' ({num_conv_layers}).")
-        self.conv_blocks = nn.ModuleList()
-        current_channels = input_channels
-        for i in range(num_conv_layers):
-            block_layers = []
-            block_layers.append(nn.Conv1d(in_channels=current_channels, out_channels=filters_per_layer[i], kernel_size=kernel_sizes_per_layer[i], stride=strides_per_layer[i], padding=padding_per_layer[i]))
-            if use_batch_norm: block_layers.append(nn.BatchNorm1d(filters_per_layer[i]))
-            block_layers.append(nn.ReLU())
-            if pooling_types_per_layer[i] and pooling_types_per_layer[i].lower() != 'none':
-                pool_kernel, pool_stride = pooling_kernel_sizes_per_layer[i], pooling_strides_per_layer[i]
-                if pooling_types_per_layer[i].lower() == 'max': block_layers.append(nn.MaxPool1d(kernel_size=pool_kernel, stride=pool_stride))
-                elif pooling_types_per_layer[i].lower() == 'avg': block_layers.append(nn.AvgPool1d(kernel_size=pool_kernel, stride=pool_stride))
-            self.conv_blocks.append(nn.Sequential(*block_layers)); current_channels = filters_per_layer[i]
-        with torch.no_grad():
-            dummy_x = torch.randn(1, self.input_channels, self.sequence_length)
-            for block in self.conv_blocks: dummy_x = block(dummy_x)
-            fc_input_features = dummy_x.view(dummy_x.size(0), -1).shape[1]
-        self.dropout_layer = nn.Dropout(dropout_rate) if dropout_rate > 0.0 else None
-        self.fc = nn.Linear(fc_input_features, num_classes)
-    def forward(self, x):
-        for block in self.conv_blocks: x = block(x)
-        x = x.view(x.size(0), -1)
-        if self.dropout_layer: x = self.dropout_layer(x)
-        x = self.fc(x); return x
-
 class PreTrainer:
-    def __init__(self, params_manager=None, bitvavo_executor=_SENTINEL, cnn_pattern_detector=_SENTINEL):
-        # 1. Handle ParamsManager
-        if params_manager is None:
-            self.params_manager = ParamsManager()
-            logger.info("ParamsManager niet meegegeven, nieuwe instance geïnitialiseerd in PreTrainer.")
-        else:
-            self.params_manager = params_manager
-            logger.info("ParamsManager meegegeven en gebruikt in PreTrainer.")
+    def __init__(self, config: Dict[str, Any]):
+        self.config = config
+        self.params_manager = ParamsManager() # Initialize ParamsManager, potentially pass config if needed
+        logger.info("ParamsManager initialized in PreTrainer.")
 
-        # 2. Handle BitvavoExecutor
-        if bitvavo_executor is not _SENTINEL:
-            self.bitvavo_executor = bitvavo_executor
-            logger.info(f"BitvavoExecutor {'meegegeven en gebruikt' if bitvavo_executor is not None else 'meegegeven als None en gebruikt'} in PreTrainer.")
-        else:
-            self.bitvavo_executor = None
-            logger.warning("BitvavoExecutor niet expliciet meegegeven aan PreTrainer, self.bitvavo_executor is ingesteld op None.")
+        # BitvavoExecutor and CNNPatternDetector might be needed by other methods.
+        # For now, initialize them as None or based on config if specified.
+        # This part depends on how much of the old functionality is retained vs. replaced by the new `pretrain` flow.
+        # For the specific subtask, only config is mandatory for __init__.
+        self.bitvavo_executor: Optional[BitvavoExecutor] = None
+        if self.config.get('exchange', {}).get('name', '').lower() == 'bitvavo':
+             # Attempt to initialize if API keys might be in config or .env
+            try:
+                self.bitvavo_executor = BitvavoExecutor(params_manager=self.params_manager) # Pass params_manager
+                logger.info("BitvavoExecutor initialized in PreTrainer.")
+            except ValueError as e:
+                logger.warning(f"PreTrainer: BitvavoExecutor could not be initialized: {e}. Live data fetching might be unavailable.")
 
-        # 3. Handle CNNPatternDetector
-        if cnn_pattern_detector is not _SENTINEL:
-            self.cnn_pattern_detector = cnn_pattern_detector
-            logger.info(f"CNNPatternDetector {'meegegeven en gebruikt' if cnn_pattern_detector is not None else 'meegegeven als None en gebruikt'} in PreTrainer.")
-        else:
-            self.cnn_pattern_detector = None
-            logger.warning("CNNPatternDetector niet expliciet meegegeven aan PreTrainer, self.cnn_pattern_detector is ingesteld op None.")
+        # CNNPatterns might be passed or instantiated if PreTrainer methods rely on it directly
+        # For the new `pretrain` method, cnn_patterns_instance is passed as an argument.
+        self.cnn_pattern_detector: Optional[CNNPatterns] = None # Placeholder for now.
+
+        # Define models_dir, e.g., user_data/models relative to the project root
+        self.models_dir = self.config.get("user_data_dir", "user_data") + "/models/cnn_pretrainer" # More specific subdirectory
+
+        try:
+            os.makedirs(self.models_dir, exist_ok=True)
+            logger.info(f"PreTrainer initialized. Models will be saved in: {os.path.abspath(self.models_dir)}")
+        except Exception as e:
+            logger.error(f"Could not create models directory {self.models_dir}: {e}")
 
         # Load market regimes (remains the same)
         self.market_regimes = {}
@@ -140,13 +93,58 @@ class PreTrainer:
             logger.error(f"Fout bij laden/parsen {MARKET_REGIMES_FILE}: {e}.")
             self.market_regimes = {}
 
-        # 4. Initialize Backtester with potentially provided or newly initialized components
-        self.backtester = Backtester(
-            params_manager=self.params_manager,
-            cnn_pattern_detector=self.cnn_pattern_detector,
-            bitvavo_executor=self.bitvavo_executor
-        )
-        logger.info("Backtester geïnitialiseerd in PreTrainer met geconfigureerde componenten.")
+        # Initialize Backtester - this might need adjustment based on what PreTrainer's role becomes.
+        # If PreTrainer is purely for model training, backtesting might be separate.
+        # For now, keeping it to see if it causes issues with the new __init__.
+        # self.backtester = Backtester(
+        #     params_manager=self.params_manager,
+        #     cnn_pattern_detector=self.cnn_pattern_detector, # This would require cnn_pattern_detector to be initialized
+        #     bitvavo_executor=self.bitvavo_executor
+        # )
+        # logger.info("Backtester (potentially) initialized in PreTrainer.")
+
+
+    def pretrain(self, features_df: pd.DataFrame, scaler: MinMaxScaler,
+                 pair: str, timeframe: str, cnn_patterns_instance: 'CNNPatterns'):
+        """
+        Main method to perform pre-training of a CNN model. (Placeholder)
+        """
+        logger.info(f"PreTrainer.pretrain placeholder called for {pair} - {timeframe}")
+
+        if features_df is None or features_df.empty:
+            logger.error("Features DataFrame is None or empty. Skipping pre-training.")
+            return
+
+        logger.info(f"Received features of shape: {features_df.shape}")
+        logger.info(f"Scaler details: Min: {scaler.min_[:5] if scaler.min_ is not None else 'N/A'}..., Scale: {scaler.scale_[:5] if scaler.scale_ is not None else 'N/A'}...") # Print first 5 for brevity
+
+        # Placeholder logic as defined in the subtask
+        sequence_length = self.config.get('hyperparameters', {}).get('sequence_length', 30) # Example: get from config
+        logger.info(f"Using sequence_length: {sequence_length}")
+
+        num_features = features_df.shape[1]
+        logger.info(f"Number of features for CNN input: {num_features}")
+
+        # TODO: Actual pre-training logic would involve:
+        # 1. Reshaping data into sequences (X).
+        # 2. Defining/generating labels (Y).
+        # 3. Instantiating the CNN model (e.g., using cnn_patterns_instance.SimpleCNN or a similar class).
+        #    model = cnn_patterns_instance.SimpleCNN(input_channels=num_features, num_classes=2, sequence_length=sequence_length) # Example
+        # 4. Defining optimizer and loss function.
+        # 5. Running the training loop.
+        # 6. Saving the trained model and the scaler.
+
+        pair_tf_models_dir = os.path.join(self.models_dir, pair.replace('/', '_'), timeframe)
+        os.makedirs(pair_tf_models_dir, exist_ok=True)
+
+        model_save_path = os.path.join(pair_tf_models_dir, f"cnn_model_placeholder_{pair.replace('/', '_')}_{timeframe}.pth")
+        scaler_save_path = os.path.join(pair_tf_models_dir, f"scaler_placeholder_{pair.replace('/', '_')}_{timeframe}.json")
+
+        logger.info(f"Placeholder: Model would be saved to {model_save_path}")
+        logger.info(f"Placeholder: Scaler would be saved to {scaler_save_path}")
+
+        logger.info(f"Placeholder: Pre-training logic for {pair} - {timeframe} completed.")
+
 
     def _get_cache_dir(self, symbol: str, timeframe: str) -> str:
         # ... (as before) ...
@@ -445,18 +443,29 @@ class PreTrainer:
 
         # Ensure technical indicators are calculated first (already seems to be the case)
         # self.cnn_pattern_detector is now initialized in the constructor
-        if 'rsi' not in dataframe.columns: dataframe['rsi'] = ta.RSI(dataframe)
-        if 'macd' not in dataframe.columns:
-            macd_df = ta.MACD(dataframe)
-            dataframe['macd'] = macd_df['macd']
-            dataframe['macdsignal'] = macd_df['macdsignal']
-            dataframe['macdhist'] = macd_df['macdhist']
-        if 'bb_middleband' not in dataframe.columns:
-            from freqtrade.vendor.qtpylib.indicators import bollinger_bands
-            bollinger = bollinger_bands(ta.TYPPRICE(dataframe), window=20, stds=2)
-            dataframe['bb_lowerband'] = bollinger['lower']
-            dataframe['bb_middleband'] = bollinger['mid']
-            dataframe['bb_upperband'] = bollinger['upper']
+        try:
+            import talib.abstract as ta
+            if 'rsi' not in dataframe.columns: dataframe['rsi'] = ta.RSI(dataframe)
+            if 'macd' not in dataframe.columns:
+                macd_df = ta.MACD(dataframe)
+                dataframe['macd'] = macd_df['macd']
+                dataframe['macdsignal'] = macd_df['macdsignal']
+                dataframe['macdhist'] = macd_df['macdhist']
+            if 'bb_middleband' not in dataframe.columns:
+                # This Freqtrade import might also fail if FREQTRADE_AVAILABLE is False.
+                # However, prepare_training_data is part of the older PreTrainer logic,
+                # not directly called by the new --pretrain-cnn path yet.
+                # For now, focus on TA-Lib import.
+                from freqtrade.vendor.qtpylib.indicators import bollinger_bands
+                bollinger = bollinger_bands(ta.TYPPRICE(dataframe), window=20, stds=2)
+                dataframe['bb_lowerband'] = bollinger['lower']
+                dataframe['bb_middleband'] = bollinger['mid']
+                dataframe['bb_upperband'] = bollinger['upper']
+        except ImportError:
+            logger.warning("TA-Lib module not found in PreTrainer.prepare_training_data. Skipping TA-Lib based indicators (RSI, MACD, Bollinger Bands using TYPPRICE).")
+        except Exception as e_ta:
+            logger.error(f"Error calculating TA-Lib indicators in PreTrainer.prepare_training_data: {e_ta}. Skipping them.")
+
 
         label_column_name = f"{pattern_type}_label"
         dataframe[label_column_name] = 0 # Initialize label column
@@ -1307,27 +1316,26 @@ if __name__ == "__main__":
 
         # Validate Backtest Results File (Backtesting runs on "all" model by default)
         assert os.path.exists(backtest_results_path), f"Backtest results file MISSING: {backtest_results_path}"
-            with open(backtest_results_path, 'r') as f:
-                try:
-                    backtest_log_entries = json.load(f)
-                    assert isinstance(backtest_log_entries, list) and len(backtest_log_entries) > 0, "Backtest log is empty or not a list."
-                    print(f"SUCCESS: Backtest results file created and contains {len(backtest_log_entries)} entries.")
-                    # Further checks on backtest content can be added if needed, e.g., ensuring it used the HPO "all" model.
-                    # For now, existence and basic format is checked.
-                    first_bt_entry = backtest_log_entries[0]
-                    assert first_bt_entry['architecture_key'] == test_arch_key, f"Backtest ran with {first_bt_entry['architecture_key']} instead of {test_arch_key}"
-                    # If HPO was run for 'all' regime, the backtester might use a model like 'default_simple_hpo_all'
-                    # This depends on how Backtester.load_model constructs the filename.
-                    # Current test setup for backtesting in PreTrainer passes `current_arch_key_for_bt` (which is `test_arch_key`)
-                    # and `regime_filter="all"`. The Backtester needs to correctly interpret this to find the HPO-All model.
-                    # For now, we assume it uses the base key and the backtester's loading logic handles finding the HPO version.
-                    print(f"Backtest entry seems OK, used architecture key: {first_bt_entry['architecture_key']}")
+        with open(backtest_results_path, 'r') as f:
+            try:
+                backtest_log_entries = json.load(f)
+                assert isinstance(backtest_log_entries, list) and len(backtest_log_entries) > 0, "Backtest log is empty or not a list."
+                print(f"SUCCESS: Backtest results file created and contains {len(backtest_log_entries)} entries.")
+                # Further checks on backtest content can be added if needed, e.g., ensuring it used the HPO "all" model.
+                # For now, existence and basic format is checked.
+                first_bt_entry = backtest_log_entries[0]
+                assert first_bt_entry['architecture_key'] == test_arch_key, f"Backtest ran with {first_bt_entry['architecture_key']} instead of {test_arch_key}"
+                # If HPO was run for 'all' regime, the backtester might use a model like 'default_simple_hpo_all'
+                # This depends on how Backtester.load_model constructs the filename.
+                # Current test setup for backtesting in PreTrainer passes `current_arch_key_for_bt` (which is `test_arch_key`)
+                # and `regime_filter="all"`. The Backtester needs to correctly interpret this to find the HPO-All model.
+                # For now, we assume it uses the base key and the backtester's loading logic handles finding the HPO version.
+                print(f"Backtest entry seems OK, used architecture key: {first_bt_entry['architecture_key']}")
 
-                except json.JSONDecodeError:
-                    assert False, f"FAILURE: Could not decode JSON from backtest results file {backtest_results_path}."
-        else:
-            assert False, f"FAILURE: Backtest results file {backtest_results_path} not found."
-
+            except json.JSONDecodeError:
+                assert False, f"FAILURE: Could not decode JSON from backtest results file {backtest_results_path}."
+        # The assert above will handle the "file not found" case by raising an AssertionError.
+        # An else block for an assert is not standard.
 
         # --- Optional: Test SimpleCNN Custom Architecture Instantiation (already present, keep) ---
         print("\n--- Testing SimpleCNN Custom Architecture Instantiation (original test) ---")

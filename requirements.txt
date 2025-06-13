@@ -1,4 +1,4 @@
-# freqtrade
+freqtrade
 ccxt
 ta
 # pandas-ta
@@ -17,3 +17,4 @@ optuna>=3.0.0
 # TA-Lib - Installation attempted, but failed due to C library / Python wrapper compatibility issues.
 # Requires manual resolution or a different C library source / Python wrapper version.
 # TA-Lib
+torch
