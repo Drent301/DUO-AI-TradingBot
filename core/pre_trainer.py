@@ -116,23 +116,16 @@ class PreTrainer:
             self.bitvavo_executor = bitvavo_executor
             logger.info(f"BitvavoExecutor {'meegegeven en gebruikt' if bitvavo_executor is not None else 'meegegeven als None en gebruikt'} in PreTrainer.")
         else:
-            logger.info("BitvavoExecutor niet meegegeven, poging tot initialisatie nieuwe instance.")
-            try:
-                self.bitvavo_executor = BitvavoExecutor()
-                logger.info("Nieuwe BitvavoExecutor instance succesvol geïnitialiseerd in PreTrainer.")
-            except ValueError as e:
-                logger.error(f"Fout bij initialiseren nieuwe BitvavoExecutor: {e}. API keys mogelijk niet ingesteld. self.bitvavo_executor is None.")
-                self.bitvavo_executor = None
+            self.bitvavo_executor = None
+            logger.warning("BitvavoExecutor niet expliciet meegegeven aan PreTrainer, self.bitvavo_executor is ingesteld op None.")
 
         # 3. Handle CNNPatternDetector
         if cnn_pattern_detector is not _SENTINEL:
             self.cnn_pattern_detector = cnn_pattern_detector
             logger.info(f"CNNPatternDetector {'meegegeven en gebruikt' if cnn_pattern_detector is not None else 'meegegeven als None en gebruikt'} in PreTrainer.")
         else:
-            logger.info("CNNPatternDetector niet meegegeven, initialisatie nieuwe instance met self.params_manager.")
-            # CNNPatterns now requires params_manager in its constructor
-            self.cnn_pattern_detector = CNNPatterns(params_manager=self.params_manager)
-            logger.info("Nieuwe CNNPatternDetector instance succesvol geïnitialiseerd in PreTrainer.")
+            self.cnn_pattern_detector = None
+            logger.warning("CNNPatternDetector niet expliciet meegegeven aan PreTrainer, self.cnn_pattern_detector is ingesteld op None.")
 
         # Load market regimes (remains the same)
         self.market_regimes = {}
