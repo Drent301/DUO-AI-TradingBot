@@ -68,30 +68,84 @@ class PromptBuilder:
                 final_prompt_parts.append(f"\n--- Timeframe: {tf} --- (No data provided)")
 
         # Technical Indicators Section
-        primary_indicators = [
+        primary_indicators = [ # These are typically always checked if present
             'rsi', 'macd', 'macdsignal', 'macdhist',
-            'bb_lowerband', 'bb_middleband', 'bb_upperband',
-            'ema_short', 'ema_long'
+            'bb_upperband', 'bb_middleband', 'bb_lowerband',
+            # Specific EMAs like ema_short, ema_long are explicitly listed
+            # if they have fixed meanings in the strategy.
+            # Dynamic EMAs (ema_*) will be caught by the loop below.
         ]
+        all_timeframe_candlestick_patterns = {}
+
         for tf, df in candles_by_timeframe.items():
             if not df.empty:
                 latest_row = df.iloc[-1]
                 indicators_for_tf = {}
+                candlestick_patterns_for_tf = []
+
+                # Populate primary indicators
                 for indicator_col in primary_indicators:
                     if indicator_col in df.columns and pd.notna(latest_row[indicator_col]):
                         indicators_for_tf[indicator_col] = latest_row[indicator_col]
 
-                # Handle indicators with variable names like 'volume_mean_20'
+                # Dynamically find all ema_* and volume_mean_* columns
                 for col_name in df.columns:
-                    if col_name.startswith('volume_mean') and pd.notna(latest_row[col_name]):
+                    if (col_name.startswith('ema_') or col_name.startswith('volume_mean_')) and \
+                       pd.notna(latest_row[col_name]):
                         indicators_for_tf[col_name] = latest_row[col_name]
+
+                    # Candlestick patterns
+                    if col_name.startswith('CDL') and latest_row[col_name] != 0 and pd.notna(latest_row[col_name]):
+                        candlestick_patterns_for_tf.append(col_name)
+
 
                 if indicators_for_tf:
                     all_timeframe_indicators[tf] = indicators_for_tf
 
+                if candlestick_patterns_for_tf:
+                    all_timeframe_candlestick_patterns[tf] = candlestick_patterns_for_tf
+
         if all_timeframe_indicators:
             final_prompt_parts.append("\nLatest Technical Indicators:")
             final_prompt_parts.append(json.dumps(all_timeframe_indicators, indent=2, default=str))
+
+        if all_timeframe_candlestick_patterns:
+            final_prompt_parts.append("\nDetected Candlestick Patterns:")
+            final_prompt_parts.append(json.dumps(all_timeframe_candlestick_patterns, indent=2, default=str))
+
+        # CNN Patterns Section
+        if additional_context:
+            cnn_predictions = additional_context.get('pattern_data', {}).get('cnn_predictions')
+            if cnn_predictions: # If it's a non-empty dict
+                final_prompt_parts.append("\nDetected CNN Patterns:")
+                final_prompt_parts.append(json.dumps(cnn_predictions, indent=2, default=str))
+
+            # Social Sentiment Data Section
+            if additional_context and 'social_sentiment_data' in additional_context: # Check key existence first
+                social_sentiment_data = additional_context.get('social_sentiment_data')
+                if isinstance(social_sentiment_data, list):
+                    final_prompt_parts.append("\nLatest Social Sentiment/News:")
+                    if not social_sentiment_data: # Empty list
+                        final_prompt_parts.append("  No recent social sentiment/news items found.")
+                    else:
+                        for i, item in enumerate(social_sentiment_data):
+                            title = item.get('title', 'N/A')
+                            source = item.get('source', 'N/A')
+                            content = item.get('content')
+                            if not content:
+                                content = item.get('description', 'N/A')
+
+                            content_snippet = (content[:147] + "...") if len(content) > 150 else content
+                            timestamp = item.get('timestamp', item.get('publishedAt', 'N/A'))
+
+                            final_prompt_parts.append(f"  --- Item {i+1} ---")
+                            final_prompt_parts.append(f"  Title: {title}")
+                            final_prompt_parts.append(f"  Source: {source}")
+                            final_prompt_parts.append(f"  Timestamp: {timestamp}")
+                            final_prompt_parts.append(f"  Snippet: {content_snippet}")
+                elif social_sentiment_data is not None: # Data is present but not a list, and not None
+                    final_prompt_parts.append("\nLatest Social Sentiment/News: (Data provided in unexpected format)")
+            # If 'social_sentiment_data' is not in additional_context or is None, this whole block is skipped.
 
 
         final_prompt = "\n".join(final_prompt_parts)
@@ -102,65 +156,215 @@ class PromptBuilder:
 async def test_prompt_builder():
     builder = PromptBuilder()
     mock_candles = {
-        '5m': object(), # In a real test, this would be a DataFrame
-        '1h': object()  # In a real test, this would be a DataFrame
+        '5m': pd.DataFrame({
+            'open': [10, 11, 12, 11.5, 12.5],
+            'high': [10.5, 11.5, 12.5, 12, 13],
+            'low': [9.5, 10.5, 11.5, 11, 12],
+            'close': [11, 12, 11.5, 12.5, 12.8],
+            'volume': [100, 120, 110, 130, 90],
+            'rsi': [50, 55, 60, 58, 62.1],
+            'macd': [0.1, 0.12, 0.15, 0.13, 0.16],
+            'macdsignal': [0.09, 0.1, 0.11, 0.12, 0.13],
+            'macdhist': [0.01, 0.02, 0.04, 0.01, 0.03],
+            'bb_lowerband': [9, 10, 11, 10.5, 11.5],
+            'bb_middleband': [10, 11, 12, 11.5, 12.5],
+            'bb_upperband': [11, 12, 13, 12.5, 13.5],
+            'ema_short': [10.8, 11.2, 11.8, 11.6, 12.2], # Explicitly named
+            'ema_long': [10.5, 10.8, 11.1, 11.3, 11.7],  # Explicitly named
+            'ema_20': [10.7, 11.1, 11.7, 11.5, 12.1],    # Dynamic
+            'ema_100': [10.2, 10.5, 10.8, 11.0, 11.4],   # Dynamic
+            'volume_mean_10': [110, 115, 112, 118, 110.5],
+            'volume_mean_30': [105, 110, 115, 112, 108.0],
+            'CDLMORNINGSTAR': [0, 0, 0, 0, 100], # Active pattern
+            'CDLDOJI': [0, 0, 0, 0, 0],        # Inactive pattern
+            'CDLHAMMER': [0, 100, 0, 0, 0]      # Pattern not on latest candle
+        }),
+        '1h': pd.DataFrame({
+            'open': [1200, 1210, 1205],
+            'high': [1250, 1220, 1215],
+            'low': [1190, 1200, 1200],
+            'close': [1210, 1205, 1212.7],
+            'volume': [1000, 1200, 1100],
+            'rsi': [60.3, 55.2, 58.9],
+            'ema_short': [1208, 1206, 1209.5], # Explicitly named
+            'ema_50': [1200, 1202, 1205.0],    # Dynamic
+            'CDLENGULFING': [0, 0, -100],      # Active pattern
+            'CDLSHOOTINGSTAR': [0,0,0]
+        })
     }
-    # Simulate DataFrames for to_string()
-    # import pandas as pd # Already imported at the top
-    mock_candles['5m'] = pd.DataFrame({
-        'open': [10, 11, 12, 11.5, 12.5],
-        'high': [10.5, 11.5, 12.5, 12, 13],
-        'low': [9.5, 10.5, 11.5, 11, 12],
-        'close': [11, 12, 11.5, 12.5, 12.8], # Last close 12.8
-        'volume': [100, 120, 110, 130, 90],
-        'rsi': [50, 55, 60, 58, 62.1],
-        'macd': [0.1, 0.12, 0.15, 0.13, 0.16],
-        'macdsignal': [0.09, 0.1, 0.11, 0.12, 0.13],
-        'macdhist': [0.01, 0.02, 0.04, 0.01, 0.03],
-        'bb_lowerband': [9, 10, 11, 10.5, 11.5],
-        'bb_middleband': [10, 11, 12, 11.5, 12.5],
-        'bb_upperband': [11, 12, 13, 12.5, 13.5],
-        'ema_short': [10.8, 11.2, 11.8, 11.6, 12.2],
-        'ema_long': [10.5, 10.8, 11.1, 11.3, 11.7],
-        'volume_mean_10': [110, 115, 112, 118, 110.5] # Last value 110.5
-    })
-    # Add data for 1h timeframe as well
-    mock_candles['1h'] = pd.DataFrame({
-        'open': [1200, 1210, 1205],
-        'high': [1250, 1220, 1215],
-        'low': [1190, 1200, 1200],
-        'close': [1210, 1205, 1212.7], # Last close 1212.7
-        'volume': [1000, 1200, 1100],
-        'rsi': [60.3, 55.2, 58.9],
-        'ema_short': [1208, 1206, 1209.5],
-        # This one intentionally has fewer indicators
-    })
 
+    mock_additional_context = {
+        'pattern_data': {
+            'cnn_predictions': {
+                '5m_bullFlag_score': 0.92,
+                '1h_bearTrap_score': 0.78,
+                '5m_randomPattern_score': 0.3
+            }
+        },
+        "current_trade": {"pair": "BTC/USDT", "profit_pct": 5.2, "open_reason": "EMA cross"},
+        "social_sentiment_data": [
+            {
+                "title": "BTC to the moon! Analysts predict $100k by EOY.",
+                "source": "CryptoNewsDaily",
+                "content": "A new report from top market analysts suggests that Bitcoin (BTC) is poised for a significant rally, potentially reaching $100,000 by the end of the year. This optimistic outlook is fueled by increased institutional adoption and positive regulatory news. However, some caution that market volatility remains a concern.",
+                "timestamp": "2023-10-27T10:30:00Z"
+            },
+            {
+                "title": "Ethereum DevCon highlights scalability solutions.",
+                "source": "ETHWorld",
+                "description": "The recent Ethereum Developer Conference (DevCon) showcased several promising layer-2 scalability solutions. These advancements aim to address network congestion and high gas fees, paving the way for wider adoption of decentralized applications (dApps).", # Using description here
+                "publishedAt": "2023-10-26T15:00:00Z" # Using publishedAt here
+            },
+            {
+                "title": "Old Tweet, No Content", # No content/description
+                "source": "AncientScrolls",
+                "timestamp": "2020-01-01T00:00:00Z"
+            }
+        ]
+    }
 
-    prompt_ma = await builder.generate_prompt_with_data(mock_candles, "BTC/USDT", "marketAnalysis")
+    prompt_ma = await builder.generate_prompt_with_data(
+        mock_candles,
+        "BTC/USDT",
+        "marketAnalysis",
+        additional_context=mock_additional_context
+    )
     logger.info(f"--- Market Analysis Prompt ---\n{prompt_ma}\n")
 
-    # Assertions for the new technical indicators section
-    assert "Latest Technical Indicators:" in prompt_ma, "Missing 'Latest Technical Indicators:' section title"
-    assert '"5m": {' in prompt_ma, "Missing '5m' timeframe key in JSON"
-    assert '"1h": {' in prompt_ma, "Missing '1h' timeframe key in JSON"
-    assert '"rsi": 62.1' in prompt_ma, "Missing/incorrect rsi for 5m"
-    assert '"macd": 0.16' in prompt_ma, "Missing/incorrect macd for 5m"
-    assert '"volume_mean_10": 110.5' in prompt_ma, "Missing/incorrect volume_mean_10 for 5m"
-    assert '"close": 12.8' not in prompt_ma, "OHLC data should not be in the JSON indicator block"
-    assert '"rsi": 58.9' in prompt_ma, "Missing/incorrect rsi for 1h"
-    assert '"ema_short": 1209.5' in prompt_ma, "Missing/incorrect ema_short for 1h"
-    assert '"macd":' not in prompt_ma.split('"1h": {')[1], "MACD should not be in 1h data as it was not provided"
+    # Assertions for Technical Indicators
+    assert "Latest Technical Indicators:" in prompt_ma
+    assert '"5m": {' in prompt_ma
+    assert '"rsi": 62.1' in prompt_ma
+    assert '"macd": 0.16' in prompt_ma
+    assert '"ema_short": 12.2' in prompt_ma # Explicit
+    assert '"ema_long": 11.7' in prompt_ma  # Explicit
+    assert '"ema_20": 12.1' in prompt_ma    # Dynamic
+    assert '"ema_100": 11.4' in prompt_ma   # Dynamic
+    assert '"volume_mean_10": 110.5' in prompt_ma
+    assert '"volume_mean_30": 108.0' in prompt_ma
+    assert '"1h": {' in prompt_ma
+    assert '"rsi": 58.9' in prompt_ma
+    assert '"ema_short": 1209.5' in prompt_ma # Explicit
+    assert '"ema_50": 1205.0' in prompt_ma    # Dynamic
+    assert '"macd":' not in prompt_ma.split('"1h": {')[1].split('}')[0] # MACD not in 1h
 
+    # Assertions for Candlestick Patterns
+    assert "Detected Candlestick Patterns:" in prompt_ma
+
+    # Helper function to extract JSON blocks robustly
+    def extract_json_block(prompt_text, start_marker, end_marker=None):
+        try:
+            after_start_marker = prompt_text.split(start_marker, 1)[1]
+            # If an end_marker is provided and found, split by it
+            if end_marker and end_marker in after_start_marker:
+                json_str = after_start_marker.split(end_marker, 1)[0].strip()
+            else:
+                # Otherwise, assume the JSON string goes to the end of the text (or before next section)
+                json_str = after_start_marker.strip()
+            return json.loads(json_str)
+        except IndexError: # start_marker not found
+            logger.error(f"Start marker '{start_marker}' not found in prompt.")
+            return None
+        except json.JSONDecodeError as e:
+            logger.error(f"JSONDecodeError for block starting with '{start_marker}': {e}")
+            logger.error(f"Problematic JSON string part: {json_str[:200]}...") # Print more context
+            return None
+
+    candlestick_data = extract_json_block(prompt_ma, "Detected Candlestick Patterns:\n", "\nDetected CNN Patterns:")
+    assert candlestick_data is not None, "Failed to parse candlestick data"
+    assert "5m" in candlestick_data
+    assert "CDLMORNINGSTAR" in candlestick_data["5m"]
+    assert "CDLDOJI" not in candlestick_data["5m"]
+    assert "CDLHAMMER" not in candlestick_data["5m"]
+    assert "1h" in candlestick_data
+    assert "CDLENGULFING" in candlestick_data["1h"]
+    assert "CDLSHOOTINGSTAR" not in candlestick_data["1h"]
+
+    # Assertions for CNN Patterns
+    assert "Detected CNN Patterns:" in prompt_ma
+    # Assuming CNN patterns section is the last one with JSON, or followed by non-JSON content.
+    # If another section could follow, its start marker would be the end_marker here.
+    cnn_data = extract_json_block(prompt_ma, "Detected CNN Patterns:\n", "\nLatest Social Sentiment/News:")
+    assert cnn_data is not None, "Failed to parse CNN data"
+    assert cnn_data['5m_bullFlag_score'] == 0.92
+    assert cnn_data['1h_bearTrap_score'] == 0.78
+    assert cnn_data['5m_randomPattern_score'] == 0.3
+
+    # Assertions for Social Sentiment Data
+    assert "Latest Social Sentiment/News:" in prompt_ma
+    assert "Title: BTC to the moon!" in prompt_ma
+    assert "Source: CryptoNewsDaily" in prompt_ma
+    # Corrected Snippet Assertion 1
+    assert "Snippet: A new report from top market analysts suggests that Bitcoin (BTC) is poised for a significant rally, potentially reaching $100,000 by the end of th..." in prompt_ma
+    assert "Timestamp: 2023-10-27T10:30:00Z" in prompt_ma
+    assert "Title: Ethereum DevCon highlights scalability solutions." in prompt_ma
+    assert "Source: ETHWorld" in prompt_ma
+    # Corrected Snippet Assertion 2
+    assert "Snippet: The recent Ethereum Developer Conference (DevCon) showcased several promising layer-2 scalability solutions. These advancements aim to address netw..." in prompt_ma
+    assert "Timestamp: 2023-10-26T15:00:00Z" in prompt_ma # Check alias for timestamp
+    assert "Title: Old Tweet, No Content" in prompt_ma
+    assert "Snippet: N/A" in prompt_ma # Check fallback for missing content/description
 
     logger.info("Assertions for Market Analysis prompt passed.")
 
+    # Test riskManagement prompt to ensure context is still handled, including social sentiment
+    mock_rm_context = {
+        "entry_price": 2000,
+        "current_profit_pct": 2.1,
+        'pattern_data': {
+            'cnn_predictions': {'5m_headAndShoulders_score': 0.85}
+        },
+        "social_sentiment_data": [ # Add sentiment to RM test as well
+            {
+                "title": "Market Correction Imminent?",
+                "source": "BearishTimes",
+                "content": "Several indicators point towards a potential market correction in the short term. Investors are advised to exercise caution.",
+                "timestamp": "2023-10-28T09:00:00Z"
+            }
+        ]
+    }
     prompt_rm = await builder.generate_prompt_with_data(
         mock_candles, "ETH/USDT", "riskManagement",
         current_bias=0.6, current_confidence=0.75,
-        additional_context={"entry_price": 2000, "current_profit_pct": 2.1}
+        additional_context=mock_rm_context
     )
     logger.info(f"--- Risk Management Prompt ---\n{prompt_rm}\n")
+    assert "Prompt Type: Risk Management Assessment" in prompt_rm # Corrected variable from prompt_ma to prompt_rm
+    assert "Entry price: 2000" in prompt_rm
+    assert "Current profit pct: 2.1" in prompt_rm
+    assert "Detected CNN Patterns:" in prompt_rm
+    assert '"5m_headAndShoulders_score": 0.85' in prompt_rm
+    assert "Latest Social Sentiment/News:" in prompt_rm # Check sentiment in RM prompt
+    assert "Title: Market Correction Imminent?" in prompt_rm
+
+    logger.info("Assertions for Risk Management prompt passed.")
+
+    # Test with empty social_sentiment_data list
+    empty_sentiment_context = {**mock_additional_context, "social_sentiment_data": []}
+    prompt_empty_sentiment = await builder.generate_prompt_with_data(
+        mock_candles, "BTC/USDT", "marketAnalysis", additional_context=empty_sentiment_context
+    )
+    assert "Latest Social Sentiment/News:" in prompt_empty_sentiment
+    assert "No recent social sentiment/news items found." in prompt_empty_sentiment
+    logger.info("Assertion for empty social sentiment data passed.")
+
+    # Test with social_sentiment_data being None (should not print the section or error)
+    none_sentiment_context = {key: val for key, val in mock_additional_context.items() if key != 'social_sentiment_data'}
+    prompt_none_sentiment = await builder.generate_prompt_with_data(
+        mock_candles, "BTC/USDT", "marketAnalysis", additional_context=none_sentiment_context
+    )
+    assert "Latest Social Sentiment/News:" not in prompt_none_sentiment
+    logger.info("Assertion for None social sentiment data passed.")
+
+
+    prompt_rm_no_sentiment = await builder.generate_prompt_with_data( # Renamed this variable
+        mock_candles, "ETH/USDT", "riskManagement", # Use renamed variable
+        current_bias=0.6, current_confidence=0.75,
+        additional_context={"entry_price": 2000, "current_profit_pct": 2.1} # No sentiment data here
+    )
+    logger.info(f"--- Risk Management Prompt (No Sentiment) ---\n{prompt_rm_no_sentiment}\n")
+    assert "Latest Social Sentiment/News:" not in prompt_rm_no_sentiment
+    logger.info("Assertion for Risk Management prompt with no sentiment data passed.")
 
 if __name__ == '__main__':
     logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
