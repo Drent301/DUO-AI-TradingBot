@@ -85,13 +85,6 @@ class ReflectieLus:
             logger.warning(f'[StoreReflection] Fout bij opslaan: {e}')
             return False
 
-    def _get_time_since_last_reflection(self, token: str) -> float:
-        """
-        Geeft de tijd (in milliseconden) sinds de laatste reflectie voor een token.
-        Vertaald van getTimeSinceLast in aiActivationEngine.js.
-        """
-        return (datetime.now().timestamp() * 1000) - self.last_reflection_timestamps.get(token, 0)
-
     def _update_last_reflection_timestamp(self, token: str):
         """
         Update het timestamp van de laatste reflectie voor een token.
