@@ -13,3 +13,4 @@ python-dotenv
 requests
 pytest
 pytest-asyncio
+optuna>=3.0.0

@@ -48,6 +48,7 @@ class ParamsManager:
                 "data_fetch_pairs": ["ETH/USDT", "ETH/BTC", "LSK/BTC", "ZEN/BTC", "ETH/EUR"],
                 "data_fetch_timeframes": ["1h", "4h"],
                 "patterns_to_train": ["bullFlag", "bearishEngulfing"],
+                "gold_standard_data_path": "", # Path to gold standard data CSVs
                 "pattern_labeling_configs": {
                     "bullFlag": {
                         "future_N_candles": 20,
@@ -97,7 +98,16 @@ class ParamsManager:
                 "backtest_hold_duration_candles": 20,
                 "backtest_initial_capital": 1000.0,
                 "backtest_stake_pct_capital": 0.1,
-                "default_strategy_id": "DefaultPipelineRunStrategy" # Added default strategy ID
+                "default_strategy_id": "DefaultPipelineRunStrategy", # Added default strategy ID
+
+                # Hyperparameter Optimization (HPO) settings
+                "perform_hyperparameter_optimization": False, # Whether to run HPO
+                "hpo_num_trials": 20, # Number of HPO trials to run (e.g., 10-50)
+                "hpo_sampler": "TPE",   # Optuna sampler: 'TPE', 'Random'
+                "hpo_pruner": "Median", # Optuna pruner: 'Median', 'None'
+                "hpo_metric_to_optimize": "val_loss", # Metric to optimize: 'val_loss', 'val_accuracy', 'val_f1', 'val_auc'
+                "hpo_direction_to_optimize": "minimize", # Direction: 'minimize' for loss, 'maximize' for acc/f1/auc
+                "regimes_to_train": ["all"] # List of market regimes to train models for (e.g., ["bull", "bear", "all"])
             },
             "strategies": {
                 "DUOAI_Strategy": {
