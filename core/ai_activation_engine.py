@@ -254,9 +254,10 @@ class AIActivationEngine:
             current_bias=current_bias, # Calculated in activate_ai
             current_confidence=learned_confidence, # Calculated in activate_ai
             mode=mode,
-            # These are new parameters to be added to ReflectieLus.process_reflection_cycle in plan step 3
             prompt_type=prompt_type, # Use the determined prompt_type
-            pattern_data=pattern_data
+            pattern_data=pattern_data,
+            bias_reflector_instance=bias_reflector_instance, # Pass through
+            confidence_engine_instance=confidence_engine_instance # Pass through
         )
 
         # The original activate_ai returned reflectie_log_entry.

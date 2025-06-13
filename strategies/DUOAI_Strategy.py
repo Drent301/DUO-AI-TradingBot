@@ -19,6 +19,7 @@ from core.grok_reflector import GrokReflector
 from core.prompt_builder import PromptBuilder
 from core.cnn_patterns import CNNPatterns
 from core.reflectie_lus import ReflectieLus
+from core.ai_activation_engine import AIActivationEngine # Added import
 from core.bias_reflector import BiasReflector
 from core.confidence_engine import ConfidenceEngine
 from core.entry_decider import EntryDecider
@@ -65,6 +66,7 @@ class DUOAI_Strategy(IStrategy):
     grok_reflector: GrokReflector = GrokReflector()
     cnn_patterns: CNNPatterns = CNNPatterns()
     reflectie_lus: ReflectieLus = ReflectieLus()
+    ai_activation_engine: AIActivationEngine # Added instance variable type hint
     bias_reflector: BiasReflector = BiasReflector()
     confidence_engine: ConfidenceEngine = ConfidenceEngine()
     entry_decider: EntryDecider = EntryDecider()
@@ -94,6 +96,9 @@ class DUOAI_Strategy(IStrategy):
         # _load_and_apply_learned_parameters will be called again in populate_indicators.
         initial_pair_for_params = self.config_pair_whitelist[0] if self.config_pair_whitelist else 'default'
         self._load_and_apply_learned_parameters(initial_pair_for_params)
+
+        # Initialize AIActivationEngine
+        self.ai_activation_engine = AIActivationEngine(reflectie_lus_instance=self.reflectie_lus)
         logger.info(f"DUOAI_Strategy geïnitialiseerd.")
 
     def _get_all_relevant_candles_for_ai(self, pair: str) -> Dict[str, pd.DataFrame]:
@@ -483,14 +488,15 @@ class DUOAI_Strategy(IStrategy):
             # We don't return here, as performance update should still happen.
         else: # Only run reflection if data is available
             asyncio.create_task(
-                self.reflectie_lus.process_reflection_cycle(
-                    symbol=pair,
+                self.ai_activation_engine.activate_ai(
+                    trigger_type='trade_closed',
+                    token=pair,
                     candles_by_timeframe=candles_by_timeframe_for_reflect,
                     strategy_id=self.name,
                     trade_context=trade_data,
-                    current_bias=self.bias_reflector.get_bias_score(pair, self.name),
-                    current_confidence=self.confidence_engine.get_confidence_score(pair, self.name),
-                    mode=self.config.get('runmode', 'live')
+                    mode=self.config.get('runmode', 'live'),
+                    bias_reflector_instance=self.bias_reflector,
+                    confidence_engine_instance=self.confidence_engine
                 )
             )
 

@@ -15,9 +15,9 @@ from core.prompt_builder import PromptBuilder
 # Import reflectie_analyser, assuming it's in the same directory
 # If reflectie_analyser.py contains those functions directly:
 from core.reflectie_analyser import analyseReflecties, generateMutationProposal, analyzeTimeframeBias
+from core.bias_reflector import BiasReflector
+from core.confidence_engine import ConfidenceEngine
 
-# from core.bias_reflector import BiasReflector # Nog te implementeren
-# from core.confidence_engine import ConfidenceEngine # Nog te implementeren
 # from core.entry_decider import EntryDecider # Nog te implementeren
 # from core.exit_optimizer import ExitOptimizer # Nog te implementeren
 import dotenv # Toegevoegd voor de __main__ sectie
@@ -102,7 +102,9 @@ class ReflectieLus:
         current_confidence: float = 0.5, # Huidige confidence van de strategie
         mode: str = 'live', # 'live', 'dry_run', 'backtest', 'pretrain'
         prompt_type: str = 'marketAnalysis',
-        pattern_data: Optional[Dict[str, Any]] = None
+        pattern_data: Optional[Dict[str, Any]] = None,
+        bias_reflector_instance: Optional[BiasReflector] = None, # New
+        confidence_engine_instance: Optional[ConfidenceEngine] = None # New
     ) -> Optional[Dict[str, Any]]:
         """
         Verwerkt een enkele reflectiecyclus voor een gegeven symbool.
@@ -190,9 +192,38 @@ Grok: {grok_result.get('reflectie', 'N/A') if grok_result else 'N/A'}"
         }
         await self._store_reflection(reflection_log_entry)
         self._update_last_reflection_timestamp(symbol)
-        logger.info(f"[ReflectieCyclus] Reflectiecyclus voltooid voor {symbol} ({strategy_id}).")
+        logger.info(f"[ReflectieCyclus] Reflectiecyclus voltooid voor {symbol} ({strategy_id}). Log opgeslagen.")
 
-        # 5. Verdere Analyse & Aanpassing (via reflectie_analyser en andere modules)
+        # 5. Update Bias and Confidence based on reflection results
+        if bias_reflector_instance:
+            trade_profit_pct = trade_context.get('profit_pct') # Can be None
+            try:
+                await bias_reflector_instance.update_bias(
+                    token=symbol,
+                    strategy_id=strategy_id,
+                    new_ai_bias=reflection_log_entry['combined_bias'],
+                    confidence=reflection_log_entry['combined_confidence'],
+                    trade_result_pct=trade_profit_pct
+                )
+                logger.info(f"[ReflectieCyclus] Called BiasReflector.update_bias for {symbol}/{strategy_id}")
+            except Exception as e:
+                logger.error(f"[ReflectieCyclus] Error calling BiasReflector.update_bias for {symbol}/{strategy_id}: {e}")
+
+        if confidence_engine_instance:
+            trade_profit_pct = trade_context.get('profit_pct') # Can be None
+            try:
+                await confidence_engine_instance.update_confidence(
+                    token=symbol,
+                    strategy_id=strategy_id,
+                    ai_reported_confidence=reflection_log_entry['combined_confidence'],
+                    trade_result_pct=trade_profit_pct
+                )
+                logger.info(f"[ReflectieCyclus] Called ConfidenceEngine.update_confidence for {symbol}/{strategy_id}")
+            except Exception as e:
+                logger.error(f"[ReflectieCyclus] Error calling ConfidenceEngine.update_confidence for {symbol}/{strategy_id}: {e}")
+
+        # 6. Verdere Analyse & Aanpassing (via reflectie_analyser en andere modules)
+        logger.info(f"[ReflectieCyclus] Starten van verdere analyse voor {symbol} ({strategy_id}).")
         all_logs = []
         if os.path.exists(LOG_FILE) and os.path.getsize(LOG_FILE) > 0:
             try:
