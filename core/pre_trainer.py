@@ -9,7 +9,9 @@ import pandas as pd
 import numpy as np
 import asyncio
 from core.bitvavo_executor import BitvavoExecutor
-from core.backtester import Backtester # Added Backtester import
+from core.backtester import Backtester
+from core.params_manager import ParamsManager # Moved to top
+from core.cnn_patterns import CNNPatterns # Moved to top
 import talib.abstract as ta
 import dotenv
 import shutil
@@ -25,6 +27,9 @@ Handles the pre-training pipeline for CNN models based on historical market data
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
+
+# Sentinel object for constructor arguments
+_SENTINEL = object()
 
 # PyTorch Imports
 import torch
@@ -97,21 +102,39 @@ class SimpleCNN(nn.Module):
         x = self.fc(x); return x
 
 class PreTrainer:
-    def __init__(self, params_manager=None):
-        # ... (constructor as before, including CNNPatterns init) ...
+    def __init__(self, params_manager=None, bitvavo_executor=_SENTINEL, cnn_pattern_detector=_SENTINEL):
+        # 1. Handle ParamsManager
         if params_manager is None:
-            from core.params_manager import ParamsManager
             self.params_manager = ParamsManager()
-            logger.info("ParamsManager niet meegegeven, standaard initialisatie gebruikt in PreTrainer.")
+            logger.info("ParamsManager niet meegegeven, nieuwe instance geïnitialiseerd in PreTrainer.")
         else:
             self.params_manager = params_manager
-        try:
-            self.bitvavo_executor = BitvavoExecutor()
-            logger.info("BitvavoExecutor geïnitialiseerd in PreTrainer.")
-        except ValueError as e:
-            logger.error(f"Fout bij initialiseren BitvavoExecutor: {e}. API keys mogelijk niet ingesteld.")
-            self.bitvavo_executor = None
+            logger.info("ParamsManager meegegeven en gebruikt in PreTrainer.")
 
+        # 2. Handle BitvavoExecutor
+        if bitvavo_executor is not _SENTINEL:
+            self.bitvavo_executor = bitvavo_executor
+            logger.info(f"BitvavoExecutor {'meegegeven en gebruikt' if bitvavo_executor is not None else 'meegegeven als None en gebruikt'} in PreTrainer.")
+        else:
+            logger.info("BitvavoExecutor niet meegegeven, poging tot initialisatie nieuwe instance.")
+            try:
+                self.bitvavo_executor = BitvavoExecutor()
+                logger.info("Nieuwe BitvavoExecutor instance succesvol geïnitialiseerd in PreTrainer.")
+            except ValueError as e:
+                logger.error(f"Fout bij initialiseren nieuwe BitvavoExecutor: {e}. API keys mogelijk niet ingesteld. self.bitvavo_executor is None.")
+                self.bitvavo_executor = None
+
+        # 3. Handle CNNPatternDetector
+        if cnn_pattern_detector is not _SENTINEL:
+            self.cnn_pattern_detector = cnn_pattern_detector
+            logger.info(f"CNNPatternDetector {'meegegeven en gebruikt' if cnn_pattern_detector is not None else 'meegegeven als None en gebruikt'} in PreTrainer.")
+        else:
+            logger.info("CNNPatternDetector niet meegegeven, initialisatie nieuwe instance met self.params_manager.")
+            # CNNPatterns now requires params_manager in its constructor
+            self.cnn_pattern_detector = CNNPatterns(params_manager=self.params_manager)
+            logger.info("Nieuwe CNNPatternDetector instance succesvol geïnitialiseerd in PreTrainer.")
+
+        # Load market regimes (remains the same)
         self.market_regimes = {}
         try:
             if os.path.exists(MARKET_REGIMES_FILE):
@@ -124,18 +147,13 @@ class PreTrainer:
             logger.error(f"Fout bij laden/parsen {MARKET_REGIMES_FILE}: {e}.")
             self.market_regimes = {}
 
-        from core.cnn_patterns import CNNPatterns
-        self.cnn_pattern_detector = CNNPatterns()
-        logger.info("PreTrainer geïnitialiseerd met CNNPatterns detector.")
-
-        # Initialize Backtester
+        # 4. Initialize Backtester with potentially provided or newly initialized components
         self.backtester = Backtester(
             params_manager=self.params_manager,
             cnn_pattern_detector=self.cnn_pattern_detector,
             bitvavo_executor=self.bitvavo_executor
         )
-        logger.info("Backtester geïnitialiseerd in PreTrainer.")
-
+        logger.info("Backtester geïnitialiseerd in PreTrainer met geconfigureerde componenten.")
 
     def _get_cache_dir(self, symbol: str, timeframe: str) -> str:
         # ... (as before) ...
@@ -433,10 +451,7 @@ class PreTrainer:
             return dataframe
 
         # Ensure technical indicators are calculated first (already seems to be the case)
-        if not hasattr(self, 'cnn_pattern_detector'):
-            from core.cnn_patterns import CNNPatterns
-            self.cnn_pattern_detector = CNNPatterns()
-            logger.info("CNNPatterns detector geïnitialiseerd in prepare_training_data.")
+        # self.cnn_pattern_detector is now initialized in the constructor
         if 'rsi' not in dataframe.columns: dataframe['rsi'] = ta.RSI(dataframe)
         if 'macd' not in dataframe.columns:
             macd_df = ta.MACD(dataframe)
