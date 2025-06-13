@@ -186,6 +186,63 @@ class DUOAI_Strategy(IStrategy):
                 else:
                     logger.debug(f"Informative dataframe for {pair_to_merge} on {informative_tf_to_merge} is empty. Skipping merge for {metadata['pair']}.")
 
+        # --- Calculate indicators for merged informative timeframes ---
+        for info_tf in self.informative_timeframes: # e.g., '1h', '4h', '1d'
+            if info_tf == self.timeframe: # Should not happen if logic is correct, but good check
+                continue
+
+            prefix = f"{info_tf}" # Standard Freqtrade prefix for merged columns
+
+            # Check if the primary column (e.g., '{prefix}_close') exists before proceeding
+            if f'{prefix}_close' not in dataframe.columns:
+                logger.debug(f"Skipping indicator calculation for {info_tf} as '{prefix}_close' is not in dataframe.")
+                continue
+
+            # RSI
+            dataframe[f'{prefix}_rsi'] = ta.RSI(dataframe[f'{prefix}_close'], timeperiod=14)
+
+            # MACD
+            # Note: ta.MACD expects a series, not a dataframe.
+            # We also need to ensure the output columns are prefixed.
+            macd_inf = ta.MACD(dataframe[f'{prefix}_close'])
+            dataframe[f'{prefix}_macd'] = macd_inf['macd']
+            dataframe[f'{prefix}_macdsignal'] = macd_inf['macdsignal']
+            dataframe[f'{prefix}_macdhist'] = macd_inf['macdhist']
+
+            # Bollinger Bands
+            # qtpylib.bollinger_bands requires a dataframe and column name for typical_price calculation,
+            # or we can pass the series directly.
+            # For simplicity, we'll use typical_price if open, high, low, close are available for the timeframe.
+            # Otherwise, we'll fall back to using just '{prefix}_close'.
+            # However, merge_informative_pair by default only merges 'date', 'open', 'high', 'low', 'close', 'volume'.
+            # So, we can rely on these columns being present if the informative timeframe itself was successfully merged.
+
+            # Create a temporary dataframe for qtpylib.typical_price if needed, or pass series directly
+            # For Bollinger Bands, qtpylib.typical_price needs open, high, low, close.
+            # Let's assume these are merged as {prefix}_open, {prefix}_high, {prefix}_low, {prefix}_close
+
+            # Check for all necessary columns for typical_price
+            required_ohlc_cols = [f'{prefix}_open', f'{prefix}_high', f'{prefix}_low', f'{prefix}_close']
+            if all(col in dataframe.columns for col in required_ohlc_cols):
+                typical_price_inf_series = qtpylib.typical_price(dataframe, candle_type=prefix) # Pass prefix for candle type
+            else:
+                logger.warning(f"Typical price for {info_tf} cannot be calculated due to missing OHLC columns. Falling back to '{prefix}_close' for Bollinger Bands.")
+                typical_price_inf_series = dataframe[f'{prefix}_close'] # Fallback
+
+            bollinger_inf = qtpylib.bollinger_bands(typical_price_inf_series, window=20, stds=2)
+            dataframe[f'{prefix}_bb_lowerband'] = bollinger_inf['lower']
+            dataframe[f'{prefix}_bb_middleband'] = bollinger_inf['mid']
+            dataframe[f'{prefix}_bb_upperband'] = bollinger_inf['upper']
+
+            # EMA (e.g., ema_20)
+            dataframe[f'{prefix}_ema_20'] = ta.EMA(dataframe[f'{prefix}_close'], timeperiod=20)
+
+            # Volume Mean (e.g., volume_mean_20)
+            # Check if the volume column (e.g., '{prefix}_volume') exists
+            if f'{prefix}_volume' in dataframe.columns:
+                dataframe[f'{prefix}_volume_mean_20'] = dataframe[f'{prefix}_volume'].rolling(window=20).mean()
+            else:
+                logger.debug(f"Skipping volume mean calculation for {info_tf} as '{prefix}_volume' is not in dataframe.")
 
         # Haal bias en confidence op (van AI-modules) en voeg toe aan dataframe
         current_bias = self.bias_reflector.get_bias_score(metadata['pair'], self.name)
