@@ -8,7 +8,8 @@ from datetime import datetime
 from typing import List, Dict, Any, Tuple, Optional
 import pandas as pd
 import numpy as np
-import talib # Voor candlestick patronen die TA-Lib biedt
+# import talib # Defer import to where it's used, to allow module loading if TA-Lib is not installed
+from sklearn.preprocessing import MinMaxScaler
 
 # PyTorch Imports
 import torch
@@ -104,6 +105,115 @@ class CNNPatterns:
             'bearishEngulfing': {'input_channels': 12, 'num_classes': 2}
         }
         logger.info("CNNPatterns geïnitialiseerd. Modellen worden on-demand geladen via predict_pattern_score.")
+
+    def prepare_cnn_features(self, dataframe: pd.DataFrame, timeframe: str, pair_name: str) -> Tuple[Optional[pd.DataFrame], Optional[MinMaxScaler]]:
+        """
+        Prepares the full feature set for CNN model training/evaluation.
+        This includes base OHLCV, all indicators from populate_indicators,
+        TA-Lib candlestick patterns, and price-action features.
+        The data is then scaled using MinMaxScaler.
+        """
+        # IMPORTANT: This method might be operating in a simplified data mode.
+        # Due to potential TA-Lib/freqtrade installation issues blocking the full
+        # DUOAI_Strategy.populate_indicators pipeline in some execution contexts (like pre-training),
+        # the input 'dataframe' may sometimes only contain basic OHLCV data or a limited set of indicators.
+        # For full feature richness (all strategy indicators from base and informative timeframes),
+        # the input 'dataframe' should ideally be the output of DUOAI_Strategy.populate_indicators.
+        # This method attempts to generate TA-Lib candlestick patterns if TA-Lib is available,
+        # alongside price-action features.
+        try:
+            logger.debug(f"Starting CNN feature preparation for {pair_name} on {timeframe}. Initial df shape: {dataframe.shape}")
+
+            required_ohlcv_columns = ['open', 'high', 'low', 'close', 'volume']
+            if not all(col in dataframe.columns for col in required_ohlcv_columns):
+                logger.error(f"Essential OHLCV columns ({required_ohlcv_columns}) not found in input dataframe for {pair_name} on {timeframe}. Cannot prepare features.")
+                return None, None
+
+            # Ensure 'date' is index or dropped before feature engineering that might add it back.
+            df_processed = dataframe.copy()
+            if 'date' in df_processed.columns:
+                # If 'date' is just a regular column, we might want to set it as index
+                # or drop it if it's not the main datetime index from Freqtrade.
+                # For now, assume 'date' column if present is redundant or will be handled.
+                # It's safer to drop it if it's not the actual index Freqtrade uses.
+                # Freqtrade dataframes usually have 'date' as the primary index.
+                # If it's a column, it might be from a reset_index().
+                # Let's ensure we work with the index for date reference if needed, and drop 'date' column.
+                pass # Assuming 'date' is already the index as per Freqtrade standard.
+
+            # 1. Isolate base OHLCV for helper functions that expect clean data
+            # We need to be careful if the input 'dataframe' already contains prefixed columns from merged TFs.
+            # The helper functions should operate on the *original* OHLCV for the *base timeframe* of this dataframe.
+            base_ohlcv_df = pd.DataFrame({
+                'open': dataframe['open'],
+                'high': dataframe['high'],
+                'low': dataframe['low'],
+                'close': dataframe['close'],
+                'volume': dataframe['volume']
+            })
+            base_ohlcv_df.index = dataframe.index # Preserve original index
+
+            # 2. Generate TA-Lib candlestick pattern features (conditionally)
+            candlestick_features_df = pd.DataFrame(index=dataframe.index) # Default to empty
+            try:
+                # talib is imported at the top of the file. If that failed, this won't run.
+                # If it succeeded, but _get_talib_candlestick_patterns has an issue, it should handle it.
+                # This try-except is more for the case where the talib import itself at the top level might have failed
+                # and the execution somehow reached here, or if we want to be extra cautious.
+                # The primary check should be the global import of talib.
+                if 'talib' not in sys.modules: # Check if talib was successfully imported globally
+                    raise ImportError("talib module was not successfully imported at the file level.")
+
+                candlestick_features_df = _get_talib_candlestick_patterns(base_ohlcv_df)
+                logger.debug(f"Candlestick features generated. Shape: {candlestick_features_df.shape}")
+            except ImportError:
+                logger.warning("TA-Lib module not found or failed to import. Skipping TA-Lib candlestick pattern generation.")
+            except Exception as e_talib: # Catch other potential errors from _get_talib_candlestick_patterns
+                logger.error(f"Error generating TA-Lib candlestick patterns: {e_talib}. Proceeding without them.", exc_info=True)
+
+
+            # 3. Generate price-action features
+            price_action_features_df = _get_price_action_features(base_ohlcv_df)
+            logger.debug(f"Price-action features generated. Shape: {price_action_features_df.shape}")
+
+            # 4. Concatenate all features
+            # Ensure indices align for concatenation. They should if base_ohlcv_df preserved index.
+            features_df = pd.concat([df_processed, candlestick_features_df, price_action_features_df], axis=1)
+            logger.debug(f"Features concatenated. Shape: {features_df.shape}")
+
+            # 5. Data Cleaning & Preparation for Scaling
+            if 'date' in features_df.columns: # Drop 'date' column if it exists after concat
+                features_df.drop(columns=['date'], inplace=True, errors='ignore')
+
+            features_df_numeric = features_df.select_dtypes(include=np.number)
+            logger.debug(f"Numeric features selected. Shape: {features_df_numeric.shape}")
+
+            # Handle NaNs: bfill, then ffill, then 0.0
+            features_df_numeric.fillna(method='bfill', inplace=True)
+            features_df_numeric.fillna(method='ffill', inplace=True)
+            features_df_numeric.fillna(0.0, inplace=True)
+
+            # Drop columns that are still all NaN (if any, though unlikely after fillna(0.0))
+            features_df_numeric.dropna(axis=1, how='all', inplace=True)
+            logger.debug(f"NaNs handled. Shape after potential all-NaN column drop: {features_df_numeric.shape}")
+
+            if features_df_numeric.empty:
+                logger.warning(f"No numeric features remaining for {pair_name} on {timeframe} after cleaning. Cannot proceed.")
+                return None, None
+
+            # 6. Normalization
+            scaler = MinMaxScaler()
+            scaled_features_np = scaler.fit_transform(features_df_numeric)
+            scaled_features_df = pd.DataFrame(scaled_features_np,
+                                              columns=features_df_numeric.columns,
+                                              index=features_df_numeric.index)
+            logger.info(f"CNN features prepared and scaled for {pair_name} on {timeframe}. Final shape: {scaled_features_df.shape}, Features: {list(scaled_features_df.columns)}")
+
+            return scaled_features_df, scaler
+
+        except Exception as e:
+            logger.error(f"Error during CNN feature preparation for {pair_name} on {timeframe}: {e}", exc_info=True)
+            return None, None
 
     def _load_cnn_models_and_scalers(self, symbol: str, timeframe: str, arch_key_to_load: Optional[str] = None):
         symbol_underscore = symbol.replace('/', '_')
@@ -379,13 +489,37 @@ class CNNPatterns:
         if len(candles) < 30: return False; return False
 
     def detect_candlestick_patterns(self, candles_df: pd.DataFrame) -> Dict[str, bool]:
-        patterns = {};
+        patterns = {}
         if len(candles_df) < 1: return {}
-        open_, high_, low_, close_ = candles_df['open'].astype(float), candles_df['high'].astype(float), candles_df['low'].astype(float), candles_df['close'].astype(float)
-        try: patterns['CDLDOJI'] = bool(talib.CDLDOJI(open_, high_, low_, close_).iloc[-1] != 0) if len(candles_df) >= talib.CDLDOJI.lookback else False
-        except Exception: patterns['CDLDOJI'] = False
-        try: patterns['CDLENGULFING'] = bool(talib.CDLENGULFING(open_, high_, low_, close_).iloc[-1] != 0) if len(candles_df) >= talib.CDLENGULFING.lookback else False # Example
-        except Exception: patterns['CDLENGULFING'] = False
+
+        try:
+            import talib # Local import for this method
+            open_, high_, low_, close_ = candles_df['open'].astype(float), candles_df['high'].astype(float), candles_df['low'].astype(float), candles_df['close'].astype(float)
+
+            # Example for CDLDOJI
+            try:
+                if len(candles_df) >= talib.CDLDOJI.lookback:
+                    patterns['CDLDOJI'] = bool(talib.CDLDOJI(open_, high_, low_, close_).iloc[-1] != 0)
+                else:
+                    patterns['CDLDOJI'] = False
+            except Exception as e_doji:
+                logger.debug(f"Could not calculate CDLDOJI: {e_doji}")
+                patterns['CDLDOJI'] = False
+
+            # Example for CDLENGULFING
+            try:
+                if len(candles_df) >= talib.CDLENGULFING.lookback:
+                    patterns['CDLENGULFING'] = bool(talib.CDLENGULFING(open_, high_, low_, close_).iloc[-1] != 0)
+                else:
+                    patterns['CDLENGULFING'] = False
+            except Exception as e_engulf:
+                logger.debug(f"Could not calculate CDLENGULFING: {e_engulf}")
+                patterns['CDLENGULFING'] = False
+
+        except ImportError:
+            logger.warning("TA-Lib module not found in detect_candlestick_patterns. Returning empty patterns.")
+            return {} # Return empty if talib itself cannot be imported
+
         return {k: v for k, v in patterns.items() if v is True}
 
     def _detect_engulfing(self, candles: List[Dict[str, Any]], direction: str = "any") -> str or bool: # Added direction
@@ -544,3 +678,90 @@ class CNNPatterns:
 
         logger.debug(f"Patroondetectie resultaat voor {symbol}: {json.dumps(all_patterns, indent=2, default=str)}")
         return all_patterns
+
+# --- Helper Functions for Feature Engineering ---
+
+def _get_talib_candlestick_patterns(dataframe: pd.DataFrame) -> pd.DataFrame:
+    """
+    Calculates a wide range of TA-Lib candlestick patterns.
+    Input: Freqtrade OHLCV DataFrame (base timeframe).
+    Output: DataFrame with candlestick pattern signals (0, 100, -100).
+    """
+    candlestick_features = pd.DataFrame(index=dataframe.index)
+
+    try:
+        import talib
+    except ImportError:
+        logger.warning("TA-Lib module not found within _get_talib_candlestick_patterns. No TA-Lib candlestick patterns will be generated.")
+        return candlestick_features # Return empty DataFrame
+
+    # List of all TA-Lib candlestick pattern functions
+    talib_pattern_functions = [
+        'CDL2CROWS', 'CDL3BLACKCROWS', 'CDL3INSIDE', 'CDL3LINESTRIKE', 'CDL3OUTSIDE',
+        'CDL3STARSINSOUTH', 'CDL3WHITESOLDIERS', 'CDLABANDONEDBABY', 'CDLADVANCEBLOCK',
+        'CDLBELTHOLD', 'CDLBREAKAWAY', 'CDLCLOSINGMARUBOZU', 'CDLCONCEALBABYSWALL',
+        'CDLCOUNTERATTACK', 'CDLDARKCLOUDCOVER', 'CDLDOJI', 'CDLDOJISTAR',
+        'CDLDRAGONFLYDOJI', 'CDLENGULFING', 'CDLEVENINGDOJISTAR', 'CDLEVENINGSTAR',
+        'CDLGAPSIDESIDEWHITE', 'CDLGRAVESTONEDOJI', 'CDLHAMMER', 'CDLHANGINGMAN',
+        'CDLHARAMI', 'CDLHARAMICROSS', 'CDLHIGHWAVE', 'CDLHIKKAKE', 'CDLHIKKAKEMOD',
+        'CDLHOMINGPIGEON', 'CDLIDENTICAL3CROWS', 'CDLINNECK', 'CDLINVERTEDHAMMER',
+        'CDLKICKING', 'CDLKICKINGBYLENGTH', 'CDLLADDERBOTTOM', 'CDLLONGLEGGEDDOJI',
+        'CDLLONGLINE', 'CDLMARUBOZU', 'CDLMATCHINGLOW', 'CDLMATHOLD',
+        'CDLMORNINGDOJISTAR', 'CDLMORNINGSTAR', 'CDLONNECK', 'CDLPIERCING',
+        'CDLRICKSHAWMAN', 'CDLRISEFALL3METHODS', 'CDLSEPARATINGLINES', 'CDLSHOOTINGSTAR',
+        'CDLSHORTLINE', 'CDLSPINNINGTOP', 'CDLSTALLEDPATTERN', 'CDLSTICKSANDWICH',
+        'CDLTAKURI', 'CDLTASUKIGAP', 'CDLTHRUSTING', 'CDLTRISTAR', 'CDLUNIQUE3RIVER',
+        'CDLUPSIDEGAP2CROWS', 'CDLXSIDEGAP3METHODS'
+    ]
+
+    df_open = dataframe['open']
+    df_high = dataframe['high']
+    df_low = dataframe['low']
+    df_close = dataframe['close']
+
+    for pattern_name in talib_pattern_functions:
+        try:
+            pattern_function = getattr(talib, pattern_name)
+            # Check lookback period to avoid errors on short dataframes
+            lookback = pattern_function.lookback
+            if len(dataframe) >= lookback:
+                result = pattern_function(df_open, df_high, df_low, df_close)
+                candlestick_features[f'cdl_{pattern_name}'] = result
+            else:
+                # Not enough data, fill with 0 (neutral)
+                candlestick_features[f'cdl_{pattern_name}'] = 0
+        except Exception as e:
+            logger.warning(f"Could not calculate TA-Lib pattern {pattern_name}: {e}. Filling with 0.")
+            candlestick_features[f'cdl_{pattern_name}'] = 0
+
+    return candlestick_features
+
+def _get_price_action_features(dataframe: pd.DataFrame) -> pd.DataFrame:
+    """
+    Calculates basic price-action features from OHLCV data.
+    Input: Freqtrade OHLCV DataFrame (base timeframe).
+    Output: DataFrame with price-action features.
+    """
+    pa_features = pd.DataFrame(index=dataframe.index)
+
+    open_price = dataframe['open']
+    high_price = dataframe['high']
+    low_price = dataframe['low']
+    close_price = dataframe['close']
+
+    pa_features['pa_body_size'] = abs(close_price - open_price)
+    pa_features['pa_upper_wick'] = high_price - np.maximum(open_price, close_price)
+    pa_features['pa_lower_wick'] = np.minimum(open_price, close_price) - low_price
+
+    epsilon = 1e-6 # To avoid division by zero
+    pa_features['pa_wick_to_body_ratio_upper'] = pa_features['pa_upper_wick'] / (pa_features['pa_body_size'] + epsilon)
+    pa_features['pa_wick_to_body_ratio_lower'] = pa_features['pa_lower_wick'] / (pa_features['pa_body_size'] + epsilon)
+
+    pa_features['pa_price_change_pct_1'] = close_price.pct_change(1).fillna(0.0) * 100
+    pa_features['pa_price_change_pct_5'] = close_price.pct_change(5).fillna(0.0) * 100
+
+    pa_features['pa_hl_range'] = high_price - low_price
+    pa_features['pa_oc_range'] = abs(open_price - close_price) # Same as body_size, could be removed for redundancy
+                                                            # but kept for explicit feature name.
+
+    return pa_features
