@@ -197,19 +197,36 @@ class ParamsManager:
             logger.info(f"Globale leerbare parameter '{key}' bijgewerkt naar: {value}")
         await self._save_params()
 
-    async def update_strategy_roi_sl_params(self, strategy_id: str, new_roi: Dict[str, float], new_stoploss: float, new_trailing_stop_positive: float, new_trailing_stop_positive_offset: float):
+    async def update_strategy_roi_sl_params(self,
+                                        strategy_id: str,
+                                        new_roi: Optional[Dict[str, float]] = None, # Made optional for flexibility
+                                        new_stoploss: Optional[float] = None, # Made optional for flexibility
+                                        new_trailing_stop: Optional[float] = None,
+                                        new_trailing_only_offset_is_reached: Optional[float] = None):
         """Werkt ROI, Stoploss en Trailing Stop parameters voor een strategie bij."""
         if "strategies" not in self._params: self._params["strategies"] = {}
         if strategy_id not in self._params["strategies"]: self._params["strategies"][strategy_id] = {}
 
-        self._params["strategies"][strategy_id]["minimal_roi"] = new_roi
-        self._params["strategies"][strategy_id]["stoploss"] = new_stoploss
-        self._params["strategies"][strategy_id]["trailing_stop_positive"] = new_trailing_stop_positive
-        self._params["strategies"][strategy_id]["trailing_stop_positive_offset"] = new_trailing_stop_positive_offset
-        self._params["strategies"][strategy_id]["last_mutated"] = datetime.now().isoformat()
+        changes_made = False
+        if new_roi is not None:
+            self._params["strategies"][strategy_id]["minimal_roi"] = new_roi
+            changes_made = True
+        if new_stoploss is not None:
+            self._params["strategies"][strategy_id]["stoploss"] = new_stoploss
+            changes_made = True
+        if new_trailing_stop is not None:
+            self._params["strategies"][strategy_id]["trailing_stop_positive"] = new_trailing_stop
+            changes_made = True
+        if new_trailing_only_offset_is_reached is not None:
+            self._params["strategies"][strategy_id]["trailing_stop_positive_offset"] = new_trailing_only_offset_is_reached
+            changes_made = True
 
-        await self._save_params()
-        logger.info(f"ROI/SL parameters voor strategie '{strategy_id}' bijgewerkt.")
+        if changes_made:
+            self._params["strategies"][strategy_id]["last_mutated"] = datetime.now().isoformat()
+            await self._save_params()
+            logger.info(f"ROI/SL/Trailing parameters voor strategie '{strategy_id}' bijgewerkt.")
+        else:
+            logger.info(f"Geen ROI/SL/Trailing parameters om bij te werken voor strategie '{strategy_id}'.")
 
     async def update_time_effectiveness(self, data: Dict[int, float]):
         """Werkt tijd-van-dag effectiviteit data bij."""
@@ -294,9 +311,13 @@ if __name__ == "__main__":
         # Test ROI/SL update
         new_roi = {"0": 0.06, "60": 0.03}
         new_sl = -0.12
-        new_tsp = 0.008
-        new_tspo = 0.015
-        await params_manager.update_strategy_roi_sl_params(test_strategy_id, new_roi, new_sl, new_tsp, new_tspo)
+        # Update the call to update_strategy_roi_sl_params to reflect the new signature
+        # Old call: await params_manager.update_strategy_roi_sl_params(test_strategy_id, new_roi, new_sl, new_tsp, new_tspo)
+        await params_manager.update_strategy_roi_sl_params(strategy_id=test_strategy_id,
+                                                            new_roi=new_roi,
+                                                            new_stoploss=new_sl,
+                                                            new_trailing_stop=0.008,  # Example value
+                                                            new_trailing_only_offset_is_reached=0.015) # Example value
 
         updated_strategy_params = params_manager.get_param("minimal_roi", test_strategy_id)
         print(f"Updated ROI for {test_strategy_id}: {updated_strategy_params}")
