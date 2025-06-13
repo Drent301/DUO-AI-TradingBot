@@ -1,5 +1,7 @@
 import asyncio
 import logging
+from typing import Optional, Any, Dict, List, Tuple, Union
+import pandas as pd # Added for type hint
 
 logger = logging.getLogger(__name__)
 
@@ -10,12 +12,12 @@ class PromptBuilder:
 
     async def generate_prompt_with_data(
         self,
-        candles_by_timeframe: dict,
+        candles_by_timeframe: Dict[str, pd.DataFrame],
         symbol: str,
         prompt_type: str,
         current_bias: float = 0.5,
         current_confidence: float = 0.5,
-        additional_context: dict = None
+        additional_context: Optional[Dict[str, Any]] = None
     ) -> str:
         """
         Generates a detailed prompt for AI analysis based on provided market data and context.

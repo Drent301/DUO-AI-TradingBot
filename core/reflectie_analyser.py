@@ -2,7 +2,7 @@
 import json
 import logging
 import os
-from typing import Dict, Any, List, Optional
+from typing import Dict, Any, List, Optional, Tuple, Union
 from datetime import datetime
 import numpy as np # Voor gemiddelde
 import asyncio # Voor async helper functies

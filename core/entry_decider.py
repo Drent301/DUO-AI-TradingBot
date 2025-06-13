@@ -1,6 +1,6 @@
 # core/entry_decider.py
 import logging
-from typing import Dict, Any, Optional
+from typing import Dict, Any, Optional, List, Tuple
 import asyncio
 import pandas as pd
 import numpy as np

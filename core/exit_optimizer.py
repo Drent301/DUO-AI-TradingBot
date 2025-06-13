@@ -1,6 +1,6 @@
 # core/exit_optimizer.py
 import logging
-from typing import Dict, Any, Optional
+from typing import Dict, Any, Optional, List, Tuple, Union
 import asyncio
 import pandas as pd
 import numpy as np

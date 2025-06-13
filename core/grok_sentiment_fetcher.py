@@ -2,7 +2,7 @@
 import os
 import json
 import logging
-from typing import Dict, Any, List, Optional
+from typing import Dict, Any, List, Optional, Tuple, Union
 import requests
 from datetime import datetime, timedelta
 import asyncio # Nodig voor de async main-test

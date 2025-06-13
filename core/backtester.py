@@ -6,6 +6,7 @@ import numpy as np
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 import asyncio
+from typing import Optional, Any, Dict, List
 
 from core.params_manager import ParamsManager
 from core.cnn_patterns import CNNPatterns
@@ -160,7 +161,7 @@ class Backtester:
 
         return dataframe
 
-    async def run_backtest(self, symbol: str, timeframe: str, pattern_type: str, architecture_key: str, sequence_length: int):
+    async def run_backtest(self, symbol: str, timeframe: str, pattern_type: str, architecture_key: str, sequence_length: int) -> Optional[Dict[str, Any]]:
         logger.info(f"Starting backtest for {symbol} ({timeframe}), pattern: {pattern_type}, arch: {architecture_key}")
 
         global_params = self.params_manager.get_global_params()
@@ -454,7 +455,7 @@ class Backtester:
         self._save_backtest_results(backtest_run_results)
         return backtest_run_results
 
-    def _save_backtest_results(self, result_entry: dict):
+    def _save_backtest_results(self, result_entry: Dict[str, Any]):
         results = []
         if BACKTEST_RESULTS_FILE.exists():
             try:

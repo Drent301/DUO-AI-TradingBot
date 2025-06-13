@@ -2,7 +2,7 @@
 import logging
 import os
 import json
-from typing import Dict, Any, List, Optional # Added Optional
+from typing import Dict, Any, List, Optional, Tuple, Union # Added Optional, Tuple, Union
 from datetime import datetime, timedelta
 from datetime import datetime as dt
 import pandas as pd
@@ -54,13 +54,13 @@ class SimpleCNN(nn.Module):
                  num_classes: int,
                  sequence_length: int,
                  num_conv_layers: int = 2,
-                 filters_per_layer: list = [16, 32],
-                 kernel_sizes_per_layer: list = [3, 3],
-                 strides_per_layer: list = [1, 1],
-                 padding_per_layer: list = [1, 1],
-                 pooling_types_per_layer: list = ['max', 'max'],
-                 pooling_kernel_sizes_per_layer: list = [2, 2],
-                 pooling_strides_per_layer: list = [2, 2],
+                 filters_per_layer: List[int] = [16, 32],
+                 kernel_sizes_per_layer: List[int] = [3, 3],
+                 strides_per_layer: List[int] = [1, 1],
+                 padding_per_layer: List[int] = [1, 1],
+                 pooling_types_per_layer: List[str] = ['max', 'max'],
+                 pooling_kernel_sizes_per_layer: List[int] = [2, 2],
+                 pooling_strides_per_layer: List[int] = [2, 2],
                  use_batch_norm: bool = False,
                  dropout_rate: float = 0.0):
         super(SimpleCNN, self).__init__()
@@ -102,29 +102,29 @@ class SimpleCNN(nn.Module):
         x = self.fc(x); return x
 
 class PreTrainer:
-    def __init__(self, params_manager=None, bitvavo_executor=_SENTINEL, cnn_pattern_detector=_SENTINEL):
+    def __init__(self, params_manager: Optional[ParamsManager] = None, bitvavo_executor: Optional[BitvavoExecutor] = _SENTINEL, cnn_pattern_detector: Optional[CNNPatterns] = _SENTINEL):
         # 1. Handle ParamsManager
         if params_manager is None:
-            self.params_manager = ParamsManager()
+            self.params_manager: ParamsManager = ParamsManager()
             logger.info("ParamsManager niet meegegeven, nieuwe instance geïnitialiseerd in PreTrainer.")
         else:
-            self.params_manager = params_manager
+            self.params_manager: ParamsManager = params_manager
             logger.info("ParamsManager meegegeven en gebruikt in PreTrainer.")
 
         # 2. Handle BitvavoExecutor
         if bitvavo_executor is not _SENTINEL:
-            self.bitvavo_executor = bitvavo_executor
+            self.bitvavo_executor: Optional[BitvavoExecutor] = bitvavo_executor
             logger.info(f"BitvavoExecutor {'meegegeven en gebruikt' if bitvavo_executor is not None else 'meegegeven als None en gebruikt'} in PreTrainer.")
         else:
-            self.bitvavo_executor = None
+            self.bitvavo_executor: Optional[BitvavoExecutor] = None
             logger.warning("BitvavoExecutor niet expliciet meegegeven aan PreTrainer, self.bitvavo_executor is ingesteld op None.")
 
         # 3. Handle CNNPatternDetector
         if cnn_pattern_detector is not _SENTINEL:
-            self.cnn_pattern_detector = cnn_pattern_detector
+            self.cnn_pattern_detector: Optional[CNNPatterns] = cnn_pattern_detector
             logger.info(f"CNNPatternDetector {'meegegeven en gebruikt' if cnn_pattern_detector is not None else 'meegegeven als None en gebruikt'} in PreTrainer.")
         else:
-            self.cnn_pattern_detector = None
+            self.cnn_pattern_detector: Optional[CNNPatterns] = None
             logger.warning("CNNPatternDetector niet expliciet meegegeven aan PreTrainer, self.cnn_pattern_detector is ingesteld op None.")
 
         # Load market regimes (remains the same)
@@ -143,8 +143,8 @@ class PreTrainer:
         # 4. Initialize Backtester with potentially provided or newly initialized components
         self.backtester = Backtester(
             params_manager=self.params_manager,
-            cnn_pattern_detector=self.cnn_pattern_detector,
-            bitvavo_executor=self.bitvavo_executor
+            cnn_pattern_detector=self.cnn_pattern_detector, # Type hint for Backtester param needs to be Optional
+            bitvavo_executor=self.bitvavo_executor # Type hint for Backtester param needs to be Optional
         )
         logger.info("Backtester geïnitialiseerd in PreTrainer met geconfigureerde componenten.")
 
@@ -973,9 +973,9 @@ class PreTrainer:
 
     def _log_pretrain_activity(self, model_type: str, data_size: int, model_path_saved: str, scaler_params_path_saved: str,
                              regime_name: Optional[str] = None, # Added regime_name
-                             best_val_loss: float = None, best_val_accuracy: float = None,
-                             best_val_precision: float = None, best_val_recall: float = None,
-                             best_val_f1: float = None, auc: float = None,
+                             best_val_loss: Optional[float] = None, best_val_accuracy: Optional[float] = None,
+                             best_val_precision: Optional[float] = None, best_val_recall: Optional[float] = None,
+                             best_val_f1: Optional[float] = None, auc: Optional[float] = None,
                              cv_results: Optional[dict] = None):
         entry = {"timestamp": datetime.now().isoformat(), "model_type": model_type, "regime_name": regime_name, "data_size": data_size,
                  "status": "completed_pytorch_training", "model_path_saved": model_path_saved,
@@ -1017,7 +1017,7 @@ class PreTrainer:
         except Exception as e: logger.error(f"Fout bij opslaan tijd-van-dag effectiviteit: {e}")
         return result_dict
 
-    async def run_pretraining_pipeline(self, strategy_id: str, params_manager=None):
+    async def run_pretraining_pipeline(self, strategy_id: str, params_manager: Optional[ParamsManager] = None):
         # ... (implementation as before) ...
         logger.info(f"Start pre-training pipeline voor strategie: {strategy_id}...")
         if params_manager: self.params_manager = params_manager

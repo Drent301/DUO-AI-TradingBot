@@ -3,7 +3,7 @@ import os
 import json
 import logging
 import re
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, List, Tuple, Union
 import asyncio # Nodig voor de async main-test
 
 import requests
@@ -39,7 +39,7 @@ class GrokReflector:
         """
         confidence: Optional[float] = None
         intentie: Optional[str] = None
-        emotie: Optional[Optional[str]] = None # Dubbele Optional door type hinting voor None
+        emotie: Optional[str] = None
         reflectie: str = text.strip()
 
         conf_match = re.search(r"confidence[:=]\s*(\d+(\.\d+)?)", text, re.IGNORECASE)

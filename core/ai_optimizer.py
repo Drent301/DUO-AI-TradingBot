@@ -19,9 +19,9 @@ except ImportError as e:
     # Define placeholders if imports fail, to allow basic structure testing
     PreTrainer = None
     StrategyManager = None
-    def analyse_reflecties(*args, **kwargs): return {}
-    def generate_mutation_proposal(*args, **kwargs): return None
-    def analyze_timeframe_bias(*args, **kwargs): return 0.5
+    def analyse_reflecties(*args: Any, **kwargs: Any) -> Dict[str, Any]: return {}
+    def generate_mutation_proposal(*args: Any, **kwargs: Any) -> Optional[Dict[str, Any]]: return None
+    def analyze_timeframe_bias(*args: Any, **kwargs: Any) -> float: return 0.5
 
 
 logger = logging.getLogger(__name__)

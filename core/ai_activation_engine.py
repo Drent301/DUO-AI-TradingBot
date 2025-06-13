@@ -4,7 +4,7 @@ import asyncio
 import os
 import json
 from datetime import datetime, timedelta
-from typing import Dict, Any, Optional, List
+from typing import Dict, Any, Optional, List, Tuple
 import pandas as pd
 import numpy as np # For mock data generation in test
 import dotenv # Added for __main__
@@ -35,7 +35,7 @@ class AIActivationEngine:
     Vertaald en geoptimaliseerd van aiActivationEngine.js.
     """
 
-    def __init__(self, reflectie_lus_instance: ReflectieLus):
+    def __init__(self, reflectie_lus_instance: Optional[ReflectieLus]):
         try:
             self.prompt_builder = PromptBuilder()
         except Exception as e:
@@ -166,43 +166,51 @@ CNN_DETECTION_THRESHOLD = 0.7 # Class constant for CNN detection threshold
         current_bias = bias_reflector_instance.get_bias_score(token, strategy_id) if bias_reflector_instance else 0.5
         learned_confidence = confidence_engine_instance.get_confidence_score(token, strategy_id) if confidence_engine_instance else 0.5
 
-        pattern_data = await self.cnn_patterns_detector.detect_patterns_multi_timeframe(candles_by_timeframe, token)
+        pattern_data = None
+        if self.cnn_patterns_detector:
+            pattern_data = await self.cnn_patterns_detector.detect_patterns_multi_timeframe(candles_by_timeframe, token)
 
         # These are the patterns specifically analyzed by CNN models
-        cnn_specific_pattern_keys = self.cnn_patterns_detector.get_all_detectable_pattern_keys()
-        total_possible_patterns = len(cnn_specific_pattern_keys)
+        cnn_specific_pattern_keys = []
+        if self.cnn_patterns_detector:
+            cnn_specific_pattern_keys = self.cnn_patterns_detector.get_all_detectable_pattern_keys()
 
+        total_possible_patterns = len(cnn_specific_pattern_keys)
         pattern_score_val = 0.0
-        if total_possible_patterns > 0:
+
+        if total_possible_patterns > 0 and pattern_data:
             cnn_detected_count = 0
-            if pattern_data and pattern_data.get('cnn_predictions'):
+            cnn_predictions = pattern_data.get('cnn_predictions')
+            if cnn_predictions: # Ensure cnn_predictions is not None
                 # Iterate through the patterns that have dedicated CNN models
                 for cnn_pattern_key in cnn_specific_pattern_keys:
                     # Check if this CNN pattern was detected with high confidence on any timeframe
                     pattern_detected_on_any_tf = False
-                    for prediction_key, score in pattern_data['cnn_predictions'].items():
+                    for prediction_key, score in cnn_predictions.items():
                         # prediction_key might be like "5m_bullFlag_score" or "1h_bearishEngulfing_score"
                         # We check if the cnn_pattern_key (e.g., "bullFlag") is part of the prediction_key
                         # and ends with "_score"
-                        if f"_{cnn_pattern_key}_score" in prediction_key and prediction_key.endswith("_score"):
-                            if score >= self.CNN_DETECTION_THRESHOLD: # Use class constant
+                        if isinstance(prediction_key, str) and f"_{cnn_pattern_key}_score" in prediction_key and prediction_key.endswith("_score"):
+                            # Ensure score is not None before comparison
+                            if score is not None and score >= AIActivationEngine.CNN_DETECTION_THRESHOLD:
                                 pattern_detected_on_any_tf = True
                                 break  # Found for this cnn_pattern_key, move to next
                     if pattern_detected_on_any_tf:
                         cnn_detected_count += 1
 
-            pattern_score_val = cnn_detected_count / total_possible_patterns
-        else:
-            # This case handles when there are no CNN-specific patterns defined.
-            # Could also log a warning if this is unexpected.
+            if total_possible_patterns > 0: # Avoid division by zero if somehow it became 0 after check
+                pattern_score_val = cnn_detected_count / total_possible_patterns
+        elif not pattern_data:
+            logger.info("Pattern data is None (likely due to cnn_patterns_detector issue), pattern_score_val is 0.")
+        else: # This means total_possible_patterns is 0
             logger.info("No CNN-specific patterns defined for detection, pattern_score_val is 0.")
 
         trigger_data = {
             "patternScore": pattern_score_val,
-            "volumeSpike": pattern_data.get('context', {}).get('volume_spike', False),
+            "volumeSpike": pattern_data.get('context', {}).get('volume_spike', False) if pattern_data else False,
             "learned_confidence": learned_confidence,
             "time_since_last_reflection": self._get_time_since_last_reflection(token),
-            "profit_metric": trade_context.get('profit_pct', 0.0) if trade_context else 0.0
+            "profit_metric": trade_context.get('profit_pct', 0.0) if trade_context is not None else 0.0
         }
 
         if not await self._should_trigger_ai(trigger_data, token, mode):
@@ -420,16 +428,20 @@ if __name__ == "__main__":
         # Test 'cnn_pattern_detected'
         print("\nActiveren AI voor een 'cnn_pattern_detected' trigger...")
         cnn_context = {"pattern_name": "bull_flag_5m", "confidence": 0.92}
-        cnn_reflection = await engine.activate_ai(
-            trigger_type='cnn_pattern_detected',
-            token=test_token,
-            candles_by_timeframe=mock_candles_by_timeframe,
-            strategy_id=test_strategy_id,
-            trade_context=cnn_context,
-            mode='live', # Or any mode that allows triggering
-            bias_reflector_instance=mock_bias_reflector,
-            confidence_engine_instance=mock_confidence_engine
-        )
+        # Mock _should_trigger_ai to return True for this specific test case
+        with patch.object(engine, '_should_trigger_ai', new_callable=AsyncMock, return_value=True) as mock_trigger_cnn:
+            cnn_reflection = await engine.activate_ai(
+                trigger_type='cnn_pattern_detected',
+                token=test_token,
+                candles_by_timeframe=mock_candles_by_timeframe,
+                strategy_id=test_strategy_id,
+                trade_context=cnn_context,
+                mode='live',
+                bias_reflector_instance=mock_bias_reflector,
+                confidence_engine_instance=mock_confidence_engine
+            )
+            assert mock_trigger_cnn.called, "Mocked _should_trigger_ai was not called for CNN pattern."
+
         if cnn_reflection:
             assert mock_reflectie_lus.last_prompt_type == 'pattern_analysis', \
                 f"Incorrect prompt_type for cnn_pattern_detected: {mock_reflectie_lus.last_prompt_type}"
@@ -437,24 +449,26 @@ if __name__ == "__main__":
             assert mock_reflectie_lus.last_trade_context.get("pattern_name") == "bull_flag_5m", "Trade context not passed correctly for cnn_pattern_detected"
             print(f"Resultaat CNN Pattern Reflectie: OK (prompt_type='{mock_reflectie_lus.last_prompt_type}')")
         else:
-            print("CNN Pattern Reflectie niet getriggerd / geen resultaat. Test FAILED.")
-            # This might fail if _should_trigger_ai is strict; adjust trigger_data or mock _should_trigger_ai if needed for this test
-            # For now, we assume it can trigger.
-            assert False, "CNN Pattern reflection was not triggered."
+            print("CNN Pattern Reflectie niet getriggerd / geen resultaat (even with forced trigger). Test FAILED.")
+            assert False, "CNN Pattern reflection was not triggered despite _should_trigger_ai being mocked to True."
 
         # Test unknown trigger type
         print("\nActiveren AI voor een onbekende trigger type ('unknown_signal')...")
         unknown_context = {"detail": "some_random_event"}
-        unknown_reflection = await engine.activate_ai(
-            trigger_type='unknown_signal', # An unknown trigger
-            token=test_token,
-            candles_by_timeframe=mock_candles_by_timeframe,
-            strategy_id=test_strategy_id,
-            trade_context=unknown_context,
-            mode='live',
-            bias_reflector_instance=mock_bias_reflector,
-            confidence_engine_instance=mock_confidence_engine
-        )
+        # Mock _should_trigger_ai to return True for this specific test case
+        with patch.object(engine, '_should_trigger_ai', new_callable=AsyncMock, return_value=True) as mock_trigger_unknown:
+            unknown_reflection = await engine.activate_ai(
+                trigger_type='unknown_signal', # An unknown trigger
+                token=test_token,
+                candles_by_timeframe=mock_candles_by_timeframe,
+                strategy_id=test_strategy_id,
+                trade_context=unknown_context,
+                mode='live',
+                bias_reflector_instance=mock_bias_reflector,
+                confidence_engine_instance=mock_confidence_engine
+            )
+            assert mock_trigger_unknown.called, "Mocked _should_trigger_ai was not called for unknown signal."
+
         if unknown_reflection:
             assert mock_reflectie_lus.last_prompt_type == 'general_analysis', \
                 f"Incorrect prompt_type for unknown_signal: {mock_reflectie_lus.last_prompt_type}"
@@ -462,9 +476,8 @@ if __name__ == "__main__":
             assert mock_reflectie_lus.last_trade_context.get("detail") == "some_random_event", "Trade context not passed correctly for unknown_signal"
             print(f"Resultaat Onbekend Signaal Reflectie: OK (prompt_type='{mock_reflectie_lus.last_prompt_type}')")
         else:
-            print("Onbekend Signaal Reflectie niet getriggerd / geen resultaat. Test FAILED.")
-            # This might fail if _should_trigger_ai is strict.
-            assert False, "Unknown signal reflection was not triggered."
+            print("Onbekend Signaal Reflectie niet getriggerd / geen resultaat (even with forced trigger). Test FAILED.")
+            assert False, "Unknown signal reflection was not triggered despite _should_trigger_ai being mocked to True."
 
         # Logging is now handled by ReflectieLus, so REFLECTIE_LOG_FILE check here might be redundant
         # or should point to wherever ReflectieLus logs, if different.
@@ -522,10 +535,15 @@ if __name__ == "__main__":
 
         # Explicitly set the threshold on the instance for this test, mirroring class constant
         # This ensures the test uses the intended value even if class structure changes.
-        engine.CNN_DETECTION_THRESHOLD = 0.7
+        # engine.CNN_DETECTION_THRESHOLD = 0.7 # This was an instance variable, but the code uses AIActivationEngine.CNN_DETECTION_THRESHOLD
+        # To test with a specific threshold, it's better to patch the class attribute if it's used directly,
+        # or ensure the instance attribute is used if that's the design.
+        # The code in activate_ai uses `AIActivationEngine.CNN_DETECTION_THRESHOLD`.
 
         calculated_pattern_score = None
-        with patch.object(engine, '_should_trigger_ai', new_callable=AsyncMock, return_value=False) as mock_should_trigger:
+        # Patch the class constant for the duration of this specific test logic if necessary.
+        with patch.object(AIActivationEngine, 'CNN_DETECTION_THRESHOLD', 0.7), \
+             patch.object(engine, '_should_trigger_ai', new_callable=AsyncMock, return_value=False) as mock_should_trigger:
             await engine.activate_ai(
                 trigger_type='test_pattern_score_trigger',
                 token='TEST/PATTERNSCORE',

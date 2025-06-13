@@ -4,7 +4,7 @@ import logging
 import os
 import json
 from datetime import datetime, timedelta
-from typing import Dict, Any, List, Optional
+from typing import Dict, Any, List, Optional, Tuple, Union
 import pandas as pd # Voor het verwerken van Freqtrade DataFrames
 import numpy as np # Toegevoegd voor mock data generatie
 
@@ -151,17 +151,41 @@ class ReflectieLus:
             logger.error(f"[ReflectieCyclus] Geen AI-reflectie ontvangen van GPT of Grok voor {symbol}.")
             return None
 
-        # Handle cases where one or both results might be None or empty
-        gpt_conf = gpt_result.get('confidence', 0) if gpt_result else 0
-        grok_conf = grok_result.get('confidence', 0) if grok_result else 0
-        gpt_bias = gpt_result.get('bias', 0.5) if gpt_result else 0.5 # Assuming bias is a float, default to neutral
-        grok_bias = grok_result.get('bias', 0.5) if grok_result else 0.5
+        # New logic for combined_confidence and combined_bias
+        reported_confidences = []
+        reported_biases = []
 
-        num_valid_results = sum(1 for res in [gpt_result, grok_result] if res and res.get('confidence') is not None)
-        if num_valid_results == 0: num_valid_results = 1 # Avoid division by zero if both fail
+        # Process GPT result
+        if gpt_result:
+            gpt_confidence = gpt_result.get('confidence')
+            if gpt_confidence is not None:
+                reported_confidences.append(gpt_confidence)
+            gpt_bias_val = gpt_result.get('bias')
+            if gpt_bias_val is not None:
+                reported_biases.append(gpt_bias_val)
 
-        combined_confidence = ( (gpt_conf or 0) + (grok_conf or 0) ) / num_valid_results
-        combined_bias = ( (gpt_bias or 0.5) + (grok_bias or 0.5) ) / num_valid_results
+        # Process Grok result
+        if grok_result:
+            grok_confidence = grok_result.get('confidence')
+            if grok_confidence is not None:
+                reported_confidences.append(grok_confidence)
+            grok_bias_val = grok_result.get('bias')
+            if grok_bias_val is not None:
+                reported_biases.append(grok_bias_val)
+
+        # Calculate combined_confidence
+        num_valid_confidences = len(reported_confidences)
+        if num_valid_confidences > 0:
+            combined_confidence = sum(reported_confidences) / num_valid_confidences
+        else:
+            combined_confidence = 0.0
+
+        # Calculate combined_bias
+        num_valid_biases = len(reported_biases)
+        if num_valid_biases > 0:
+            combined_bias = sum(reported_biases) / num_valid_biases
+        else:
+            combined_bias = 0.5
 
 
         combined_reflection = f"GPT: {gpt_result.get('reflectie', 'N/A') if gpt_result else 'N/A'}

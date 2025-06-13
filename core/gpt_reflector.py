@@ -3,7 +3,7 @@ import os
 import json
 import logging
 import re
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, List, Tuple, Union
 import asyncio # Added for asyncio.to_thread
 
 import requests

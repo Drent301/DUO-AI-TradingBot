@@ -2,7 +2,7 @@
 import json
 import logging
 import os
-from typing import Dict, Any, Optional
+from typing import Dict, Any, Optional, List, Tuple, Union
 import asyncio
 from datetime import datetime
 
@@ -211,7 +211,7 @@ class ParamsManager:
         await self._save_params()
         logger.info(f"ROI/SL parameters voor strategie '{strategy_id}' bijgewerkt.")
 
-    async def update_time_effectiveness(self, data: Dict[int, float]):
+    async def update_time_effectiveness(self, data: Dict[str, float]):
         """Werkt tijd-van-dag effectiviteit data bij."""
         # Global parameter, stored at the root of the params structure
         self._params["timeOfDayEffectiveness"] = data

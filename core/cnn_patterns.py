@@ -5,7 +5,7 @@ from sklearn.preprocessing import MinMaxScaler
 import json
 import sys
 from datetime import datetime
-from typing import List, Dict, Any, Tuple, Optional
+from typing import List, Dict, Any, Tuple, Optional, Union
 import pandas as pd
 import numpy as np
 import talib # Voor candlestick patronen die TA-Lib biedt
@@ -23,13 +23,13 @@ class SimpleCNN(nn.Module):
                  num_classes: int,
                  sequence_length: int,
                  num_conv_layers: int = 2,
-                 filters_per_layer: list = [16, 32],
-                 kernel_sizes_per_layer: list = [3, 3],
-                 strides_per_layer: list = [1, 1],
-                 padding_per_layer: list = [1, 1],
-                 pooling_types_per_layer: list = ['max', 'max'],
-                 pooling_kernel_sizes_per_layer: list = [2, 2],
-                 pooling_strides_per_layer: list = [2, 2],
+                 filters_per_layer: List[int] = [16, 32],
+                 kernel_sizes_per_layer: List[int] = [3, 3],
+                 strides_per_layer: List[int] = [1, 1],
+                 padding_per_layer: List[int] = [1, 1],
+                 pooling_types_per_layer: List[str] = ['max', 'max'],
+                 pooling_kernel_sizes_per_layer: List[int] = [2, 2],
+                 pooling_strides_per_layer: List[int] = [2, 2],
                  use_batch_norm: bool = False,
                  dropout_rate: float = 0.0):
         super(SimpleCNN, self).__init__()
@@ -354,7 +354,7 @@ class CNNPatterns:
         avg_volume_recent = self._mean([c.get('volume', 0) for c in candles[-20:-1] if c is not None])
         return last_candle['close'] > resistance_level and current_volume > avg_volume_recent * 1.5
 
-    def detect_ema_cross(self, candles: List[Dict[str, Any]], short_period: int = 12, long_period: int = 26) -> str or bool:
+    def detect_ema_cross(self, candles: List[Dict[str, Any]], short_period: int = 12, long_period: int = 26) -> Union[str, bool]:
         if len(candles) < max(short_period, long_period): return False
         closes = np.array([c['close'] for c in candles if c is not None])
         if len(closes) < max(short_period, long_period): return False
@@ -379,7 +379,7 @@ class CNNPatterns:
         if len(candles) < 30: return False; return False
 
     def detect_candlestick_patterns(self, candles_df: pd.DataFrame) -> Dict[str, bool]:
-        patterns = {};
+        patterns: Dict[str, bool] = {}
         if len(candles_df) < 1: return {}
         open_, high_, low_, close_ = candles_df['open'].astype(float), candles_df['high'].astype(float), candles_df['low'].astype(float), candles_df['close'].astype(float)
         try: patterns['CDLDOJI'] = bool(talib.CDLDOJI(open_, high_, low_, close_).iloc[-1] != 0) if len(candles_df) >= talib.CDLDOJI.lookback else False
@@ -388,7 +388,7 @@ class CNNPatterns:
         except Exception: patterns['CDLENGULFING'] = False
         return {k: v for k, v in patterns.items() if v is True}
 
-    def _detect_engulfing(self, candles: List[Dict[str, Any]], direction: str = "any") -> str or bool: # Added direction
+    def _detect_engulfing(self, candles: List[Dict[str, Any]], direction: str = "any") -> Union[str, bool]: # Added direction
         if len(candles) < 2: return False
         prev, curr = candles[-2], candles[-1]
         if prev is None or curr is None: return False
@@ -402,14 +402,14 @@ class CNNPatterns:
         return False
 
     # ... (rest of the pattern detection methods from the original file, simplified for brevity if they were very long) ...
-    def _detect_morning_evening_star(self, candles: List[Dict[str, Any]]) -> str or bool:
+    def _detect_morning_evening_star(self, candles: List[Dict[str, Any]]) -> Union[str, bool]:
         if len(candles) < 3: return False; a,b,c = candles[-3:]; body = lambda x: abs(x['close']-x['open'])
         if None in [a,b,c] or body(a) < 1e-9: return False
         bullish = a['close'] < a['open'] and body(b) < (body(a)/2) and c['close'] > c['open'] and c['close'] > ((a['open']+a['close'])/2)
         bearish = a['close'] > a['open'] and body(b) < (body(a)/2) and c['close'] < c['open'] and c['close'] < ((a['open']+a['close'])/2)
         return "morningStar" if bullish else ("eveningStar" if bearish else False)
 
-    def _detect_three_white_soldiers(self, candles: List[Dict[str, Any]]) -> str or bool:
+    def _detect_three_white_soldiers(self, candles: List[Dict[str, Any]]) -> Union[str, bool]:
         if len(candles) < 3: return False; a,b,c = candles[-3:]; body_perc = lambda x: abs(x['close']-x['open'])/(x['high']-x['low']+1e-9)
         if None in [a,b,c]: return False
         if all(x['close'] > x['open'] for x in [a,b,c]) and \
@@ -418,7 +418,7 @@ class CNNPatterns:
            all(body_perc(x) > 0.6 for x in [a,b,c]): return "threeWhiteSoldiers"
         return False
 
-    def _detect_three_black_crows(self, candles: List[Dict[str, Any]]) -> str or bool:
+    def _detect_three_black_crows(self, candles: List[Dict[str, Any]]) -> Union[str, bool]:
         if len(candles) < 3: return False; a,b,c = candles[-3:]; body_perc = lambda x: abs(x['close']-x['open'])/(x['high']-x['low']+1e-9)
         if None in [a,b,c]: return False
         if all(x['close'] < x['open'] for x in [a,b,c]) and \
