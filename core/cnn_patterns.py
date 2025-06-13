@@ -3,6 +3,8 @@ import logging
 import os
 from sklearn.preprocessing import MinMaxScaler
 import json
+import sys
+from datetime import datetime
 from typing import List, Dict, Any, Tuple, Optional
 import pandas as pd
 import numpy as np
@@ -260,6 +262,13 @@ class CNNPatterns:
         except Exception as e:
             logger.error(f"Fout bij CNN-voorspelling voor '{model_key}': {e}")
             return 0.0
+
+    def get_all_detectable_pattern_keys(self) -> List[str]:
+        """
+        Returns a list of all pattern keys that the CNN models can detect.
+        These keys correspond to the names of the trained models.
+        """
+        return list(self.pattern_model_meta_info.keys())
 
     # --- Helperfuncties voor dataverwerking (uitbreiding van Freqtrade DF naar 'candles' dicts) ---
     def _dataframe_to_candles(self, dataframe: pd.DataFrame) -> List[Dict[str, Any]]:
@@ -546,9 +555,18 @@ if __name__ == "__main__":
         logger.info(f"bearishEngulfing score: {score_bear}")
         assert 0.0 <= score_bear <= 1.0, "Bearish engulfing score out of range."
 
+        logger.info("Testing get_all_detectable_pattern_keys...")
+        pattern_keys = cnn_detector.get_all_detectable_pattern_keys()
+        logger.info(f"Detected pattern keys: {pattern_keys}")
+        expected_keys = ['bullFlag', 'bearishEngulfing']
+        assert sorted(pattern_keys) == sorted(expected_keys), \
+            f"Pattern keys {pattern_keys} do not match expected {expected_keys}"
+        logger.info("get_all_detectable_pattern_keys test passed.")
+
         logger.info("CNNPatterns test completed.")
 
     if original_params_manager: # Restore original if it was monkeypatched
         sys.modules['core.params_manager'] = original_params_manager
 
+    import asyncio # Ensure asyncio is imported before use
     asyncio.run(test_cnn_patterns_loading_and_prediction())
