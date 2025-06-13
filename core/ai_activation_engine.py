@@ -82,6 +82,7 @@ class AIActivationEngine:
                 if sentiment_items:
                     logger.info(f"Sentiment items found for {symbol}: {len(sentiment_items)}. Incrementing trigger score.")
                     score += 1 # Increment score by 1 if sentiment items are found
+                    trigger_data['fetched_sentiment_items'] = sentiment_items # Store fetched items
                 else:
                     logger.info(f"No sentiment items found for {symbol}.")
             except Exception as e:
@@ -218,14 +219,18 @@ class AIActivationEngine:
 
         # Prepare trade_context for ReflectieLus
         # It already contains trade_context passed to activate_ai.
-        # We need to add trigger_type and pattern_data.
+        # We need to add trigger_type, pattern_data, and potentially sentiment_data.
         extended_trade_context = {
             **(trade_context or {}),
             "trigger_type": trigger_type, # Pass the original trigger_type
-            # pattern_data is already computed and available in this scope
         }
 
-        logger.info(f"[AI-ACTIVATION] Delegating to ReflectieLus for {token} ({trigger_type}).")
+        sentiment_data_for_prompt = trigger_data.get('fetched_sentiment_items')
+        if sentiment_data_for_prompt:
+            extended_trade_context['social_sentiment_data'] = sentiment_data_for_prompt
+            logger.info(f"Added {len(sentiment_data_for_prompt)} sentiment items to extended_trade_context for {token}.")
+
+        logger.info(f"[AI-ACTIVATION] Delegating to ReflectieLus for {token} ({trigger_type}). Context keys: {list(extended_trade_context.keys())}")
 
         # Determine prompt_type based on trigger_type
         prompt_type_mapping = {
