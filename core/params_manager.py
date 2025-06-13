@@ -42,7 +42,62 @@ class ParamsManager:
             "global": {
                 "maxTradeRiskPct": 0.02,
                 "slippageTolerancePct": 0.001,
-                "cooldownDurationSeconds": 300
+                "cooldownDurationSeconds": 300,
+                "data_fetch_start_date_str": "2020-01-01",
+                "data_fetch_end_date_str": "",
+                "data_fetch_pairs": ["ETH/USDT", "ETH/BTC", "LSK/BTC", "ZEN/BTC", "ETH/EUR"],
+                "data_fetch_timeframes": ["1h", "4h"],
+                "patterns_to_train": ["bullFlag", "bearishEngulfing"],
+                "pattern_labeling_configs": {
+                    "bullFlag": {
+                        "future_N_candles": 20,
+                        "profit_threshold_pct": 0.02,
+                        "loss_threshold_pct": -0.01
+                    },
+                    "bearishEngulfing": {
+                        "future_N_candles": 20,
+                        "profit_threshold_pct": 0.02,
+                        "loss_threshold_pct": -0.01
+                    }
+                },
+                "current_cnn_architecture_key": "default_simple",
+                "cnn_architecture_configs": {
+                    "default_simple": {
+                        "num_conv_layers": 2,
+                        "filters_per_layer": [16, 32],
+                        "kernel_sizes_per_layer": [3, 3],
+                        "strides_per_layer": [1, 1],
+                        "padding_per_layer": [1, 1],
+                        "pooling_types_per_layer": ["max", "max"],
+                        "pooling_kernel_sizes_per_layer": [2, 2],
+                        "pooling_strides_per_layer": [2, 2],
+                        "use_batch_norm": False,
+                        "dropout_rate": 0.0
+                    },
+                    "deeper_with_batchnorm": {
+                        "num_conv_layers": 3,
+                        "filters_per_layer": [16, 32, 64],
+                        "kernel_sizes_per_layer": [3, 3, 3],
+                        "strides_per_layer": [1, 1, 1],
+                        "padding_per_layer": [1, 1, 1],
+                        "pooling_types_per_layer": ["max", "max", "max"],
+                        "pooling_kernel_sizes_per_layer": [2, 2, 2],
+                        "pooling_strides_per_layer": [2, 2, 2],
+                        "use_batch_norm": True,
+                        "dropout_rate": 0.25
+                    }
+                },
+                "perform_cross_validation": True,
+                "cv_num_splits": 5,
+                "perform_backtesting": True,
+                "backtest_start_date_str": "2023-06-01",
+                "backtest_entry_threshold": 0.7,
+                "backtest_take_profit_pct": 0.05,
+                "backtest_stop_loss_pct": 0.02,
+                "backtest_hold_duration_candles": 20,
+                "backtest_initial_capital": 1000.0,
+                "backtest_stake_pct_capital": 0.1,
+                "default_strategy_id": "DefaultPipelineRunStrategy" # Added default strategy ID
             },
             "strategies": {
                 "DUOAI_Strategy": {
@@ -57,6 +112,19 @@ class ParamsManager:
                     "stoploss": -0.10,
                     "trailing_stop_positive": 0.005,
                     "trailing_stop_positive_offset": 0.01
+                },
+                "DefaultPipelineRunStrategy": { # Added an entry for the default strategy
+                    "entryConvictionThreshold": 0.6,
+                    "exitConvictionDropTrigger": 0.3,
+                    "cnnPatternWeight": 1.0,
+                    "strongPatternThreshold": 0.6,
+                    "entryRulePatternScore": 0.6,
+                    "exitRulePatternScore": 0.6,
+                    "preferredPairs": [],
+                    "minimal_roi": {"0": 0.04, "30": 0.02, "60": 0.01},
+                    "stoploss": -0.08,
+                    "trailing_stop_positive": 0.004,
+                    "trailing_stop_positive_offset": 0.008
                 }
             },
             "timeOfDayEffectiveness": {}
