@@ -262,70 +262,107 @@ class ExitOptimizer:
 
         ai_recommended_sl_pct: Optional[float] = None
         highest_confidence_for_sl = 0.0
-        sl_keyword_mentioned = False
+        sl_keyword_mentioned_in_any_response = False
 
-        # Define a list of regex patterns, from more specific to more general
-        # Keywords: stop loss, stoploss, sl, s.l, trailing stop, tsl, trailing_stop
-        # Units: %, pct, percent
-        # Structure: keyword [connector] value [unit]
+        # Regex to find the specific JSON object for recommended_sl_percentage
+        json_object_pattern = re.compile(r"(\{\s*\"recommended_sl_percentage\"\s*:\s*\d+(?:\.\d+)?\s*\})")
+
+        # Regex patterns for fallback (existing logic)
         sl_regex_patterns = [
-            # Specific: "stop loss at 2.5%", "SL:3%", "trailing_stop_of_1.5pct"
             re.compile(r"(?:stop(?:[-_\s]?loss)?|s(?:[-_\s]?l)?|trailing(?:[-_\s]?stop)?|tsl)\s*(?:at|is|to|of|should be|[:])?\s*(\d+(?:\.\d+)?)\s*(?:%|pct|percent)\b", re.IGNORECASE),
-            # General: "5 % stop loss", "value percent trailing stop" - value first
             re.compile(r"(\d+(?:\.\d+)?)\s*(?:%|pct|percent)\s*(?:stop(?:[-_\s]?loss)?|s(?:[-_\s]?l)?|trailing(?:[-_\s]?stop)?|tsl)\b", re.IGNORECASE),
-            # Broader, just number near keyword, hoping unit is implied or contextually clear (less reliable)
             re.compile(r"(?:stop(?:[-_\s]?loss)?|s(?:[-_\s]?l)?|trailing(?:[-_\s]?stop)?|tsl)\s*.*?\s*(\d+(?:\.\d+)?)\b", re.IGNORECASE),
         ]
         sl_keyword_regex = re.compile(r"\b(?:stop(?:[-_\s]?loss)?|s(?:[-_\s]?l)?|trailing(?:[-_\s]?stop)?|tsl)\b", re.IGNORECASE)
-
 
         for i, resp in enumerate([gpt_response, grok_response]):
             ai_name = "GPT" if i == 0 else "Grok"
             reflection = resp.get('reflectie', '')
             resp_confidence = resp.get('confidence', 0.0) or 0.0
+            parsed_sl_value_for_this_response = None
+            sl_parsed_via_json = False
 
-            if sl_keyword_regex.search(reflection):
-                sl_keyword_mentioned = True
+            if sl_keyword_regex.search(reflection): # Check if any SL keyword is mentioned, for generic logging later
+                sl_keyword_mentioned_in_any_response = True
 
-            if resp_confidence > 0.55: # Threshold for considering SL advice
-                parsed_sl_value_for_this_response = None
+            if resp_confidence <= 0.55: # Threshold for considering SL advice at all
+                logger.debug(f"[{ai_name}] AI response confidence {resp_confidence:.2f} too low for SL parsing. Skipping.")
+                continue
+
+            # 1. Attempt JSON parsing first
+            json_match = json_object_pattern.search(reflection)
+            if json_match:
+                json_str = json_match.group(1)
+                try:
+                    sl_data = json.loads(json_str)
+                    if "recommended_sl_percentage" in sl_data:
+                        sl_value_raw = sl_data["recommended_sl_percentage"]
+                        if isinstance(sl_value_raw, (float, int)):
+                            sl_value_float = float(sl_value_raw) / 100.0  # Convert X.Y to 0.0X Y
+
+                            if 0.001 <= sl_value_float <= 0.50:  # 0.1% to 50%
+                                logger.info(f"[{ai_name}] Successfully parsed SL via JSON: {sl_value_float:.2%} (raw: {sl_value_raw}). Confidence: {resp_confidence:.2f}.")
+                                if resp_confidence > highest_confidence_for_sl:
+                                    parsed_sl_value_for_this_response = sl_value_float
+                                    highest_confidence_for_sl = resp_confidence
+                                    sl_parsed_via_json = True # Mark as successfully parsed by JSON
+                                else:
+                                    logger.info(f"[{ai_name}] JSON SL value {sl_value_float:.2%} not used due to lower confidence than current best ({highest_confidence_for_sl:.2f}).")
+                            else:
+                                logger.warning(f"[{ai_name}] JSON SL value {sl_value_float:.2%} (raw: {sl_value_raw}) is outside reasonable range (0.1%-50%). Not used. Reflection: '{reflection}'")
+                        else:
+                            logger.warning(f"[{ai_name}] JSON 'recommended_sl_percentage' value '{sl_value_raw}' is not a valid number. Reflection: '{reflection}'")
+                    else:
+                        logger.warning(f"[{ai_name}] Found JSON object but 'recommended_sl_percentage' key is missing. JSON: '{json_str}'. Reflection: '{reflection}'")
+                except json.JSONDecodeError as e:
+                    logger.warning(f"[{ai_name}] Failed to decode JSON string '{json_str}' for SL parsing: {e}. Reflection: '{reflection}'")
+            else:
+                logger.info(f"[{ai_name}] No specific SL JSON object found in reflection. Will attempt regex parsing.")
+
+            # 2. Fallback to Regex Parsing if JSON parsing was not successful for this response
+            if not sl_parsed_via_json:
+                logger.info(f"[{ai_name}] Attempting regex fallback for SL parsing.")
                 for pattern_idx, sl_regex in enumerate(sl_regex_patterns):
                     sl_match = sl_regex.search(reflection)
                     if sl_match:
                         try:
                             sl_value_str = sl_match.group(1)
-                            sl_value_float = float(sl_value_str) / 100.0 # Convert to percentage
+                            sl_value_float = float(sl_value_str) / 100.0
 
-                            # Sanity checks for the parsed SL percentage
-                            if 0.001 <= sl_value_float <= 0.50: # e.g., 0.1% to 50%
-                                logger.info(f"[{ai_name}] Parsed SL value: {sl_value_float:.2%} from reflection: '{reflection}' using regex pattern #{pattern_idx+1}. Confidence: {resp_confidence:.2f}")
-                                # Prioritize based on confidence and if it's a better (more confident) recommendation
+                            if 0.001 <= sl_value_float <= 0.50:
+                                logger.info(f"[{ai_name}] Parsed SL via REGEX: {sl_value_float:.2%} from pattern #{pattern_idx+1}. Confidence: {resp_confidence:.2f}.")
                                 if resp_confidence > highest_confidence_for_sl:
                                     parsed_sl_value_for_this_response = sl_value_float
                                     highest_confidence_for_sl = resp_confidence
+                                    # No sl_parsed_via_json = True here
+                                else:
+                                     logger.info(f"[{ai_name}] Regex SL value {sl_value_float:.2%} not used due to lower confidence than current best ({highest_confidence_for_sl:.2f}).")
                                 break # Found a match with this regex, no need to try others for this response
                             else:
-                                logger.warning(f"[{ai_name}] Parsed SL value {sl_value_float:.2%} is outside reasonable range (0.1%-50%). Ignored. Reflection: '{reflection}'")
+                                logger.warning(f"[{ai_name}] Regex parsed SL value {sl_value_float:.2%} is outside reasonable range. Ignored. Reflection: '{reflection}'")
                         except ValueError:
-                            logger.warning(f"[{ai_name}] Kon SL percentage niet parsen (ValueError) uit '{sl_match.group(1)}' in reflectie: '{reflection}'")
+                            logger.warning(f"[{ai_name}] Could not parse SL percentage (ValueError) from regex match '{sl_match.group(1)}' in reflection: '{reflection}'")
                         except Exception as e:
-                            logger.error(f"[{ai_name}] Onverwachte fout bij parsen SL uit '{sl_match.group(1)}': {e}. Reflectie: '{reflection}'")
+                            logger.error(f"[{ai_name}] Unexpected error parsing SL from regex match '{sl_match.group(1)}': {e}. Reflection: '{reflection}'")
 
-                if parsed_sl_value_for_this_response is not None:
-                    # If this response yields a valid SL and has higher confidence, it becomes the current best
-                     ai_recommended_sl_pct = parsed_sl_value_for_this_response
-            else:
-                logger.debug(f"[{ai_name}] AI response confidence {resp_confidence:.2f} not high enough for SL parsing, or no SL value found.")
+            if parsed_sl_value_for_this_response is not None and (resp_confidence == highest_confidence_for_sl):
+                # If this response yields a valid SL and has the highest confidence so far (or equal, choosing the latest one)
+                ai_recommended_sl_pct = parsed_sl_value_for_this_response
+                logger.info(f"[{ai_name}] Setting AI recommended SL to {ai_recommended_sl_pct:.2%} based on this response (Confidence: {resp_confidence:.2f}, Parsed via JSON: {sl_parsed_via_json}).")
+
 
         if ai_recommended_sl_pct is None:
-            if sl_keyword_mentioned:
-                logger.warning(f"[ExitOptimizer] AI mentioned stop-loss keywords but a specific percentage could not be parsed reliably from responses for {symbol}.")
+            if sl_keyword_mentioned_in_any_response:
+                logger.warning(f"[ExitOptimizer] AI mentioned stop-loss keywords but a specific percentage could not be parsed reliably (JSON or Regex) from responses for {symbol}.")
             else:
-                logger.info(f"[ExitOptimizer] Geen AI-advies voor SL-optimalisatie (geen SL percentage geparsed) voor {symbol}.")
+                logger.info(f"[ExitOptimizer] No AI advice for SL optimization (no SL percentage parsed, or no keywords mentioned) for {symbol}.")
+            logger.warning(f"[ExitOptimizer] AI mentioned stop-loss keywords but a specific percentage could not be parsed reliably (JSON or Regex) from responses for {symbol}.")
+            else:
+                logger.info(f"[ExitOptimizer] No AI advice for SL optimization (no SL percentage parsed, or no keywords mentioned) for {symbol}.")
             return None
 
         # If ai_recommended_sl_pct has a value, proceed with logic
-        logger.info(f"[ExitOptimizer] Hoogst vertrouwd AI-aanbevolen SL: {ai_recommended_sl_pct:.2%} (confidence: {highest_confidence_for_sl:.2f}) voor {symbol}.")
+        logger.info(f"[ExitOptimizer] Highest confidence AI-recommended SL: {ai_recommended_sl_pct:.2%} (final confidence for this SL: {highest_confidence_for_sl:.2f}) for {symbol}.")
 
         # Fetch SL adjustment parameters
         sl_bias_impact_factor = self.params_manager.get_param("slBiasImpactFactor", strategy_id=current_strategy_id, default=0.2)
@@ -688,173 +725,141 @@ if __name__ == "__main__":
         optimizer.cnn_patterns_detector.detect_patterns_multi_timeframe = lambda *args, **kwargs: default_cnn_mock_data.copy()
 
 
-        # --- Test optimize_trailing_stop_loss (ensure it still runs with centralized param mock) ---
+        # --- Test optimize_trailing_stop_loss ---
         print("\n--- Test ExitOptimizer (optimize_trailing_stop_loss) ---")
-        # This part mostly tests SL parsing, ensure param mock doesn't break it.
         # The mock_params_get_for_tests provides defaults for SL params.
-        # We can add specific overrides for SL params if a test requires it.
+        optimizer.params_manager.get_param = mock_params_get_for_tests # Ensure general mock is active
 
-        # Example: Temporarily override one SL param for a specific SL test case
-        def mock_params_get_sl_test_override(key, strategy_id=None, default=None):
-            if key == "slMinOffset":
-                return 0.009 # Override for this specific test
-            return mock_params_get_for_tests(key, strategy_id, default) # Fallback to general mock
-
+        # Structure for SL test cases:
+        # (test_name, gpt_reflection, gpt_confidence, grok_reflection, grok_confidence, expected_sl_pct_after_parsing_and_confidence_selection)
+        # expected_sl_pct is the value like 0.025 for 2.5%
         sl_test_cases = [
-            ("Adviseer stop loss op 2.5% voor deze trade.", 0.8, 0.025),
-            ("Consider a stop-loss of 1.5 percent.", 0.7, 0.015),
-            # ... (other SL test cases can remain the same)
-            ("My analysis suggests a stop loss of 0.8 %.", 0.9, 0.008), # This will be clamped by slMinOffset (0.005 or 0.009)
+            # Existing Regex Tests (should still pass, potentially via fallback)
+            ("Regex_GPT_HighConf", "Adviseer stop loss op 2.5% voor deze trade.", 0.8, "No SL opinion.", 0.5, 0.025),
+            ("Regex_Grok_HighConf", "No SL opinion.", 0.5, "Consider a stop-loss of 1.5 percent.", 0.7, 0.015),
+            ("Regex_Both_GPTWins", "Trailing stop should be 2pct", 0.9, "SL at 5%", 0.8, 0.02),
+            ("Regex_Both_GrokWins", "SL at 5%", 0.8, "Trailing stop should be 2.2pct", 0.9, 0.022),
+            ("Regex_NoClearRecommendation", "No clear SL recommendation.", 0.6, "Definitely use a stop loss strategy.", 0.9, None),
+            ("Regex_ValueOutOfRangeLow", "The sl is 0.05 %", 0.7, "No opinion", 0.5, None), # 0.0005, too low
+            ("Regex_ValueOutOfRangeHigh", "Suggesting a stoploss of 60%.", 0.8, "No opinion", 0.5, None), # 0.60, too high
+
+            # New JSON Tests
+            ("JSON_GPT_Success", 'Explanation... {"recommended_sl_percentage": 3.5} ...more text', 0.85, "Regex SL: 2%", 0.7, 0.035),
+            ("JSON_Grok_Success", "Regex SL: 5%", 0.7, 'Text then {"recommended_sl_percentage": 4.2} and more text', 0.82, 0.042),
+            ("JSON_Both_GPTWins", 'GPT says {"recommended_sl_percentage": 2.8}', 0.9, 'Grok says {"recommended_sl_percentage": 3.0}', 0.88, 0.028),
+            ("JSON_Both_GrokWins", 'GPT says {"recommended_sl_percentage": 2.8}', 0.88, 'Grok says {"recommended_sl_percentage": 3.0}', 0.9, 0.030),
+
+            ("JSON_GPT_Malformed_Fallback_Grok_JSON", 'GPT has malformed {"recommended_sl_percentage": 2.5 ...', 0.8, 'Grok good: {"recommended_sl_percentage": 2.2}', 0.85, 0.022),
+            ("JSON_GPT_Malformed_Fallback_Grok_Regex", 'GPT has malformed {"recommended_sl_percentage": 2.5 ...', 0.8, 'Grok regex SL 2.3%', 0.85, 0.023),
+
+            ("JSON_GPT_Valid_Grok_Malformed_Fallback_GPT_JSON", 'GPT good: {"recommended_sl_percentage": 2.9}', 0.85, 'Grok malformed {"recommended_sl_percentage": 2.5 ...', 0.8, 0.029),
+            ("JSON_GPT_Regex_Grok_Malformed_Fallback_GPT_Regex", 'GPT regex SL 2.8%', 0.85, 'Grok malformed {"recommended_sl_percentage": 2.5 ...', 0.8, 0.028),
+
+            ("JSON_MissingKey_GPT_Fallback_Regex", 'GPT has {"some_other_key": 2.5}', 0.8, "Grok SL is 1.8%", 0.75, 0.018), # GPT JSON fails, Grok Regex wins
+            ("JSON_MissingKey_Grok_Fallback_GPT_JSON", 'GPT good: {"recommended_sl_percentage": 3.3}', 0.85, 'Grok has {"another_key": 2.0}', 0.8, 0.033), # Grok JSON fails, GPT JSON wins
+
+            ("JSON_ValueOutOfRange_GPT_Fallback_Grok_JSON", '{"recommended_sl_percentage": 0.01}', 0.8, 'Grok good: {"recommended_sl_percentage": 2.7}', 0.75, 0.027), # GPT JSON value too low
+            ("JSON_ValueOutOfRange_Grok_Fallback_GPT_Regex", "GPT regex says SL 3.9%", 0.78, '{"recommended_sl_percentage": 75.0}', 0.8, 0.039), # Grok JSON value too high
+
+            ("JSON_GPT_LowerConf_Grok_JSON_Wins", 'GPT: {"recommended_sl_percentage": 2.0}', 0.7, 'Grok: {"recommended_sl_percentage": 2.5}', 0.8, 0.025),
+            ("JSON_GPT_LowerConf_Grok_Regex_Wins", 'GPT: {"recommended_sl_percentage": 2.0}', 0.7, 'Grok regex SL 2.5%', 0.8, 0.025),
+            ("Regex_GPT_LowerConf_Grok_JSON_Wins", 'GPT regex SL 2.0%', 0.7, 'Grok: {"recommended_sl_percentage": 2.5}', 0.8, 0.025),
         ]
 
-        for idx, (reflection_text, confidence, expected_sl_pct) in enumerate(sl_test_cases):
-            print(f"\n--- SL Test Case #{idx + 1}: Reflection: '{reflection_text}', Confidence: {confidence} ---")
+        original_gpt_ask_sl_temp = optimizer.gpt_reflector.ask_ai
+        original_grok_ask_sl_temp = optimizer.grok_reflector.ask_grok
 
-            # Decide which param mock to use for this SL test iteration
-            if expected_sl_pct == 0.008: # The case we want to test with overridden slMinOffset
-                optimizer.params_manager.get_param = mock_params_get_sl_test_override
-                current_sl_min_offset = 0.009
-            else:
-                optimizer.params_manager.get_param = mock_params_get_for_tests # Use general mock
-                current_sl_min_offset = mock_params_get_for_tests("slMinOffset", default=0.005)
+        for idx, (test_name, gpt_reflection, gpt_conf, grok_reflection, grok_conf, expected_sl_pct) in enumerate(sl_test_cases):
+            print(f"\n--- SL Test Case #{idx + 1}: {test_name} ---")
+            print(f"    GPT (conf {gpt_conf}): '{gpt_reflection}'")
+            print(f"    Grok (conf {grok_conf}): '{grok_reflection}'")
+            print(f"    Expected Parsed SL (0.0X for X%): {expected_sl_pct}")
 
+            async def mock_gpt_sl_resp(*args, **kwargs):
+                return {"reflectie": gpt_reflection, "confidence": gpt_conf, "intentie": "HOLD"}
+            async def mock_grok_sl_resp(*args, **kwargs):
+                return {"reflectie": grok_reflection, "confidence": grok_conf, "intentie": "HOLD"}
 
-            async def mock_ask_ai_variable_sl(*args, **kwargs):
-                return {"reflectie": reflection_text, "confidence": confidence, "intentie": "HOLD", "emotie": "neutraal"}
+            optimizer.gpt_reflector.ask_ai = mock_gpt_sl_resp
+            optimizer.grok_reflector.ask_grok = mock_grok_sl_resp
 
-            original_gpt_ask_sl_temp = optimizer.gpt_reflector.ask_ai
-            original_grok_ask_sl_temp = optimizer.grok_reflector.ask_grok
-            optimizer.gpt_reflector.ask_ai = mock_ask_ai_variable_sl
-            # Grok mock that doesn't interfere with SL parsing
-            async def mock_grok_no_sl_interference(*args, **kwargs):
-                 return {"reflectie": "Grok has no SL opinion.", "confidence": 0.5, "intentie": "HOLD"}
-            optimizer.grok_reflector.ask_grok = mock_grok_no_sl_interference
-
+            # Ensure default SL params from mock_params_get_for_tests are used for clamping checks
+            current_sl_min_offset = mock_params_get_for_tests("slMinOffset", default=0.005)
+            current_sl_max_offset = mock_params_get_for_tests("slMaxOffset", default=0.10)
 
             sl_optimization_result = await optimizer.optimize_trailing_stop_loss(
                 dataframe=mock_df, trade=mock_trade_profitable, symbol=test_symbol, current_strategy_id=test_strategy_id,
                 learned_bias=0.5, learned_confidence=0.5, candles_by_timeframe=mock_candles_by_timeframe
             )
 
-            optimizer.gpt_reflector.ask_ai = original_gpt_ask_sl_temp # Restore AI mocks
-            optimizer.grok_reflector.ask_grok = original_grok_ask_sl_temp
-
             if expected_sl_pct is not None:
-                assert sl_optimization_result is not None, f"Test Case #{idx+1} FAILED: Expected SL but got None. Reflection: '{reflection_text}'"
+                assert sl_optimization_result is not None, f"Test Case '{test_name}' FAILED: Expected SL but got None."
                 # final_trailing_offset is derived from ai_recommended_sl_pct.
                 # With neutral bias/conf (0.5), factors are 1.0.
                 # So, final_trailing_offset should be ai_recommended_sl_pct clamped by slMinOffset and slMaxOffset.
-                clamped_expected_offset = max(current_sl_min_offset, min(expected_sl_pct, mock_params_get_for_tests("slMaxOffset", default=0.10)))
+                clamped_expected_offset = max(current_sl_min_offset, min(expected_sl_pct, current_sl_max_offset))
                 assert abs(sl_optimization_result['trailing_stop_positive_offset'] - clamped_expected_offset) < 0.0001, \
-                    f"Test Case #{idx+1} FAILED: Expected offset ~{clamped_expected_offset:.4f} (using slMinOffset {current_sl_min_offset}), got {sl_optimization_result['trailing_stop_positive_offset']:.4f}. Reflection: '{reflection_text}'"
-                print(f"Test Case #{idx+1} PASSED. Parsed SL leading to offset: {sl_optimization_result['trailing_stop_positive_offset']:.4f} (Raw: {expected_sl_pct}, Clamped by [{current_sl_min_offset}, {mock_params_get_for_tests('slMaxOffset', default=0.10)}]: {clamped_expected_offset:.4f})")
-
+                    f"Test Case '{test_name}' FAILED: Expected offset ~{clamped_expected_offset:.4f} (using slMinOffset {current_sl_min_offset}), got {sl_optimization_result['trailing_stop_positive_offset']:.4f}."
+                print(f"Test Case '{test_name}' PASSED. Parsed SL leading to offset: {sl_optimization_result['trailing_stop_positive_offset']:.4f} (Raw: {expected_sl_pct*100:.2f}%, Clamped by [{current_sl_min_offset*100:.2f}%, {current_sl_max_offset*100:.2f}%]: {clamped_expected_offset*100:.2f}%)")
             else:
-                assert sl_optimization_result is None, f"Test Case #{idx+1} FAILED: Expected no SL (None) but got {sl_optimization_result}. Reflection: '{reflection_text}'"
-                print(f"Test Case #{idx+1} PASSED. No SL parsed as expected. Reflection: '{reflection_text}'")
+                assert sl_optimization_result is None, f"Test Case '{test_name}' FAILED: Expected no SL (None) but got {sl_optimization_result}."
+                print(f"Test Case '{test_name}' PASSED. No SL parsed as expected.")
 
-        # Restore the general param mock after SL tests are done
-        optimizer.params_manager.get_param = mock_params_get_for_tests
+        optimizer.gpt_reflector.ask_ai = original_gpt_ask_sl_temp
+        optimizer.grok_reflector.ask_grok = original_grok_ask_sl_temp
+        optimizer.params_manager.get_param = mock_params_get_for_tests # Restore general param mock
 
         # Restore original methods (master restoration)
         if optimizer.prompt_builder:
             optimizer.prompt_builder.generate_prompt_with_data = original_prompt_builder_generate
 
 
-        # --- Test optimize_trailing_stop_loss ---
-        print("\n--- Test ExitOptimizer (optimize_trailing_stop_loss) ---")
-
-        sl_test_cases = [
-            ("Adviseer stop loss op 2.5% voor deze trade.", 0.8, 0.025),
-            ("Consider a stop-loss of 1.5 percent.", 0.7, 0.015),
-            ("Trailing stop should be 2pct", 0.9, 0.02),
-            ("Market is volatile, maybe a stoploss around 5 % is good.", 0.6, 0.05),
-            ("SL:3.2%", 0.85, 0.032),
-            ("Set S.L to 4.0 percent", 0.75, 0.04),
-            ("trailing_stop_of_1.2pct", 0.82, 0.012),
-            ("My analysis suggests a stop loss of 0.8 %.", 0.9, 0.008), # Test value < 1% but still valid
-            ("A 10 percent stop-loss seems appropriate here.", 0.8, 0.10),
-            ("No clear SL recommendation.", 0.5, None), # Should not parse
-            ("Definitely use a stop loss strategy.", 0.9, None), # Should not parse a value
-            ("The sl is 0.05 %", 0.7, None), # Should parse 0.0005, which is outside 0.1%-50% range
-            ("Suggesting a stoploss of 60%.", 0.8, None), # Outside 0.1%-50% range
-            ("TSL to 7.5 percent.", 0.88, 0.075),
-            ("stoploss:15pct", 0.92, 0.15),
-            ("Stop loss of around three point five percent", 0.6, None), # Word numbers not supported by current regex
-        ]
-
-        for idx, (reflection_text, confidence, expected_sl_pct) in enumerate(sl_test_cases):
-            print(f"\n--- SL Test Case #{idx + 1}: Reflection: '{reflection_text}', Confidence: {confidence} ---")
-
-            async def mock_ask_ai_variable_sl(*args, **kwargs):
-                return {"reflectie": reflection_text, "confidence": confidence, "intentie": "HOLD", "emotie": "neutraal"}
-
-            # Apply this mock to one of the AIs, the other can be a non-parsing one or same
-            optimizer.gpt_reflector.ask_ai = mock_ask_ai_variable_sl
-            async def mock_ask_grok_no_sl(*args, **kwargs): # Ensure Grok doesn't interfere unless intended
-                return {"reflectie": "No specific SL value from Grok.", "confidence": 0.5, "intentie": "HOLD"}
-            optimizer.grok_reflector.ask_grok = mock_ask_grok_no_sl
-
-            sl_optimization_result = await optimizer.optimize_trailing_stop_loss(
-                dataframe=mock_df, trade=mock_trade_profitable, symbol=test_symbol, current_strategy_id=test_strategy_id,
-                learned_bias=0.5, learned_confidence=0.5, candles_by_timeframe=mock_candles_by_timeframe # Neutral bias/conf for easier testing of parsed SL
-            )
-
-            if expected_sl_pct is not None:
-                assert sl_optimization_result is not None, f"Test Case #{idx+1} FAILED: Expected SL but got None. Reflection: '{reflection_text}'"
-                assert 'stoploss' in sl_optimization_result
-                assert 'trailing_stop_positive_offset' in sl_optimization_result
-                # The final_trailing_offset is derived from ai_recommended_sl_pct after bias/confidence factors.
-                # With neutral bias/conf (0.5), bias_factor and confidence_factor are 1.0.
-                # So, final_trailing_offset should be clamped ai_recommended_sl_pct.
-                # Clamping is max(0.005, min(expected_sl_pct, 0.10))
-                clamped_expected_offset = max(0.005, min(expected_sl_pct, 0.10))
-                assert abs(sl_optimization_result['trailing_stop_positive_offset'] - clamped_expected_offset) < 0.0001, \
-                    f"Test Case #{idx+1} FAILED: Expected offset ~{clamped_expected_offset:.4f}, got {sl_optimization_result['trailing_stop_positive_offset']:.4f}. Reflection: '{reflection_text}'"
-                print(f"Test Case #{idx+1} PASSED. Parsed SL leading to offset: {sl_optimization_result['trailing_stop_positive_offset']:.4f} (Expected raw: {expected_sl_pct}, Clamped: {clamped_expected_offset:.4f})")
-            else:
-                assert sl_optimization_result is None, f"Test Case #{idx+1} FAILED: Expected no SL (None) but got {sl_optimization_result}. Reflection: '{reflection_text}'"
-                print(f"Test Case #{idx+1} PASSED. No SL parsed as expected. Reflection: '{reflection_text}'")
-
-        # Restore original methods before this specific test case
-        optimizer.params_manager.get_param = mock_get_param_dynamic # Ensure dynamic mock is active
-
         # Scenario: Test custom SL adjustment parameters
         print(f"\n--- SL Test Case: Custom SL Adjustment Params ---")
-        current_mock_params = {
-            "slBiasImpactFactor": 0.3, # Default 0.2
-            "slConfidenceImpactFactor": 0.3, # Default 0.2
-            "slMinOffset": 0.008, # Default 0.005
-            "slMaxOffset": 0.12,  # Default 0.10
-            "slMinHardStop": -0.25, # Default -0.20
-            "slMaxHardStop": -0.02, # Default -0.01
-            "slDefaultTriggerProfit": 0.006 # Default 0.005
+        optimizer.params_manager.get_param = mock_params_get_for_tests # Ensure general mock is active for base params
+        # Temporarily set specific params for this test using a lambda for get_param
+        custom_params_for_sl_test = {
+            "slBiasImpactFactor": 0.3, "slConfidenceImpactFactor": 0.3,
+            "slMinOffset": 0.008, "slMaxOffset": 0.12,
+            "slMinHardStop": -0.25, "slMaxHardStop": -0.02,
+            "slDefaultTriggerProfit": 0.006,
+            # Ensure other necessary params are available from the general mock
         }
-        # AI recommends 5% SL, neutral bias/confidence for this part of test
-        async def mock_ask_ai_sl_5_pct(*args, **kwargs):
-            return {"reflectie": "Suggest SL of 5%", "confidence": 0.8, "intentie": "HOLD"}
-        optimizer.gpt_reflector.ask_ai = mock_ask_ai_sl_5_pct
-        optimizer.grok_reflector.ask_grok = mock_ask_grok_no_sl # Grok doesn't interfere
+        original_param_mock = optimizer.params_manager.get_param
+        optimizer.params_manager.get_param = lambda key, strategy_id=None, default=None: custom_params_for_sl_test.get(key, mock_params_get_for_tests(key, strategy_id, default))
+
+        # AI recommends 5% SL (JSON), neutral bias/confidence for this part of test
+        async def mock_gpt_sl_json_5_pct(*args, **kwargs):
+            return {"reflectie": 'Here is my advice: {"recommended_sl_percentage": 5.0}', "confidence": 0.8, "intentie": "HOLD"}
+        async def mock_grok_no_opinion_sl(*args, **kwargs):
+            return {"reflectie": "No SL opinion from Grok.", "confidence": 0.5, "intentie": "HOLD"}
+
+        optimizer.gpt_reflector.ask_ai = mock_gpt_sl_json_5_pct
+        optimizer.grok_reflector.ask_grok = mock_grok_no_opinion_sl
 
         sl_optimization_result_custom = await optimizer.optimize_trailing_stop_loss(
             mock_df, mock_trade_profitable, test_symbol, test_strategy_id,
             learned_bias=0.5, learned_confidence=0.5, # Neutral bias/conf
             candles_by_timeframe=mock_candles_by_timeframe
         )
+
         # Expected: ai_recommended_sl_pct = 0.05. Bias/Conf factors are 1.0.
         # final_trailing_offset = 0.05. Clamped by custom: max(0.008, min(0.05, 0.12)) = 0.05
-        # hard_stoploss_value = -(0.05 * 1.5) = -0.075. Clamped by custom: max(-0.25, min(-0.075, -0.02)) = -0.075
-        # trailing_stop_trigger = custom slDefaultTriggerProfit = 0.006 (profit 0.03 < 0.05)
-        print(f"SL Optimalisatie Resultaat (Custom Params): {json.dumps(sl_optimization_result_custom, indent=2, default=str)}")
+        # hard_stoploss_value = -(0.05 * default hardStopMultiplier 1.5) = -0.075.
+        # Clamped by custom hard stop: max(-0.25, min(-0.075, -0.02)) = -0.075
+        # trailing_stop_trigger = custom slDefaultTriggerProfit = 0.006 (profit 0.03 < default slTriggerProfitThreshold 0.05)
+
+        print(f"SL Optimalisatie Resultaat (Custom Params Test): {json.dumps(sl_optimization_result_custom, indent=2, default=str)}")
         assert sl_optimization_result_custom is not None
-        assert abs(sl_optimization_result_custom['trailing_stop_positive_offset'] - 0.05) < 0.0001
-        assert abs(sl_optimization_result_custom['stoploss'] - (-0.075)) < 0.0001
-        assert abs(sl_optimization_result_custom['trailing_stop_positive'] - 0.006) < 0.0001
+        assert abs(sl_optimization_result_custom['trailing_stop_positive_offset'] - 0.05) < 0.0001, f"Custom Param Test Offset: Expected 0.05, Got {sl_optimization_result_custom['trailing_stop_positive_offset']}"
+        assert abs(sl_optimization_result_custom['stoploss'] - (-0.075)) < 0.0001, f"Custom Param Test Stoploss: Expected -0.075, Got {sl_optimization_result_custom['stoploss']}"
+        assert abs(sl_optimization_result_custom['trailing_stop_positive'] - 0.006) < 0.0001, f"Custom Param Test Trigger: Expected 0.006, Got {sl_optimization_result_custom['trailing_stop_positive']}"
         print(f"SL Test Case Custom Params PASSED.")
 
+        optimizer.params_manager.get_param = original_param_mock # Restore general param mock
 
-        # Restore original methods
-        if optimizer.prompt_builder:
+        # Restore original methods (master restoration for all tests)
+        if optimizer.prompt_builder: # Check as it might be None if init failed
             optimizer.prompt_builder.generate_prompt_with_data = original_prompt_builder_generate
         optimizer.gpt_reflector.ask_ai = original_gpt_ask
         optimizer.grok_reflector.ask_grok = original_grok_ask
