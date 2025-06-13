@@ -58,6 +58,7 @@ class AIActivationEngine:
             self.grok_sentiment_fetcher = None
 
         self.last_reflection_timestamps: Dict[str, float] = {} # Per token
+CNN_DETECTION_THRESHOLD = 0.7 # Class constant for CNN detection threshold
         logger.info("AIActivationEngine geïnitialiseerd.")
 
     def _get_time_since_last_reflection(self, token: str) -> float:
@@ -167,18 +168,34 @@ class AIActivationEngine:
 
         pattern_data = await self.cnn_patterns_detector.detect_patterns_multi_timeframe(candles_by_timeframe, token)
 
+        # These are the patterns specifically analyzed by CNN models
+        cnn_specific_pattern_keys = self.cnn_patterns_detector.get_all_detectable_pattern_keys()
+        total_possible_patterns = len(cnn_specific_pattern_keys)
+
         pattern_score_val = 0.0
-        if pattern_data and pattern_data.get('patterns'):
-            detected_pattern_count = sum(1 for v in pattern_data['patterns'].values() if v)
-            # This method needs to be implemented in CNNPatterns to return a list of all pattern keys it can detect.
-            # total_possible_patterns = len(self.cnn_patterns_detector.get_all_detectable_pattern_keys())
-            # For now, using a placeholder or assuming all keys in 'patterns' are relevant if present.
-            all_pattern_keys_in_result = len(pattern_data['patterns']) # Number of patterns checked in this run
-            total_possible_patterns = all_pattern_keys_in_result if all_pattern_keys_in_result > 0 else 1 # Avoid div by zero
-            # A more robust way would be to have a fixed list of all pattern types the system knows.
-            # total_possible_patterns = len(['bullFlag', 'bearFlag', ...]) # Example
-            if total_possible_patterns > 0:
-                pattern_score_val = detected_pattern_count / total_possible_patterns
+        if total_possible_patterns > 0:
+            cnn_detected_count = 0
+            if pattern_data and pattern_data.get('cnn_predictions'):
+                # Iterate through the patterns that have dedicated CNN models
+                for cnn_pattern_key in cnn_specific_pattern_keys:
+                    # Check if this CNN pattern was detected with high confidence on any timeframe
+                    pattern_detected_on_any_tf = False
+                    for prediction_key, score in pattern_data['cnn_predictions'].items():
+                        # prediction_key might be like "5m_bullFlag_score" or "1h_bearishEngulfing_score"
+                        # We check if the cnn_pattern_key (e.g., "bullFlag") is part of the prediction_key
+                        # and ends with "_score"
+                        if f"_{cnn_pattern_key}_score" in prediction_key and prediction_key.endswith("_score"):
+                            if score >= self.CNN_DETECTION_THRESHOLD: # Use class constant
+                                pattern_detected_on_any_tf = True
+                                break  # Found for this cnn_pattern_key, move to next
+                    if pattern_detected_on_any_tf:
+                        cnn_detected_count += 1
+
+            pattern_score_val = cnn_detected_count / total_possible_patterns
+        else:
+            # This case handles when there are no CNN-specific patterns defined.
+            # Could also log a warning if this is unexpected.
+            logger.info("No CNN-specific patterns defined for detection, pattern_score_val is 0.")
 
         trigger_data = {
             "patternScore": pattern_score_val,
@@ -369,9 +386,91 @@ if __name__ == "__main__":
 
         # Call the new test function
         await test_should_trigger_ai_logic(engine)
+        # Call the pattern score calculation test function
+        await test_pattern_score_val_calculation()
 
     # Add to imports in __main__ or at the top of the file if used more broadly
     from unittest.mock import patch, AsyncMock
+
+    async def test_pattern_score_val_calculation():
+        logger.info("\n--- Test pattern_score_val Calculation ---")
+
+        class MockReflectieLusForTestPatternScore:
+            async def process_reflection_cycle(self, **kwargs):
+                # This mock is minimal as activate_ai should not reach this point in this test
+                logger.info(f"MockReflectieLusForTestPatternScore.process_reflection_cycle called with {kwargs.get('symbol')}")
+                return {"summary": "Mocked reflection for pattern score test"}
+
+        class MockCNNPatternsForPatternScoreTest(CNNPatterns):
+            def get_all_detectable_pattern_keys(self) -> List[str]:
+                return ["bullFlag", "bearTrap", "futurePattern"]
+
+            async def detect_patterns_multi_timeframe(self, candles_by_timeframe: Dict[str, pd.DataFrame], symbol: str) -> Dict[str, Any]:
+                return {
+                    "cnn_predictions": {
+                        "5m_bullFlag_score": 0.85,  # Above threshold 0.7
+                        "1h_bullFlag_score": 0.6,   # Below threshold
+                        "5m_bearTrap_score": 0.5,   # Below threshold
+                        "15m_nonCnnPattern_score": 0.9, # Not in get_all_detectable_pattern_keys
+                        "1h_futurePattern_score": 0.7 # At threshold
+                    },
+                    "patterns": {}, # Keep other parts minimal
+                    "context": {}
+                }
+
+        # Need MockBiasReflector and MockConfidenceEngine from the outer scope or define them here
+        # They are defined in run_test_ai_activation_engine, so we can reuse them if this test is called from there,
+        # or define simplified versions here. For standalone clarity, let's define simple ones.
+        class MockBiasReflector:
+            def get_bias_score(self, token, strategy_id): return 0.5
+        class MockConfidenceEngine:
+            def get_confidence_score(self, token, strategy_id): return 0.5
+
+
+        mock_reflectie_lus_pattern_test = MockReflectieLusForTestPatternScore()
+        engine = AIActivationEngine(reflectie_lus_instance=mock_reflectie_lus_pattern_test)
+
+        # Assign the specialized mock CNN detector
+        engine.cnn_patterns_detector = MockCNNPatternsForPatternScoreTest()
+
+        # Explicitly set the threshold on the instance for this test, mirroring class constant
+        # This ensures the test uses the intended value even if class structure changes.
+        engine.CNN_DETECTION_THRESHOLD = 0.7
+
+        calculated_pattern_score = None
+        with patch.object(engine, '_should_trigger_ai', new_callable=AsyncMock, return_value=False) as mock_should_trigger:
+            await engine.activate_ai(
+                trigger_type='test_pattern_score_trigger',
+                token='TEST/PATTERNSCORE',
+                candles_by_timeframe={}, # Mocked, not used by MockCNNPatternsForPatternScoreTest
+                strategy_id='test_pattern_score_strat',
+                bias_reflector_instance=MockBiasReflector(),
+                confidence_engine_instance=MockConfidenceEngine(),
+                mode='test' # ensure it doesn't force trigger via 'pretrain' or 'backtest_reflection'
+            )
+
+            assert mock_should_trigger.called, "_should_trigger_ai was not called, pattern_score_val might not have been calculated or passed."
+
+            # Retrieve the 'trigger_data' argument from the call to _should_trigger_ai
+            # call_args is a tuple: (args, kwargs). args is a tuple of positional arguments.
+            called_args = mock_should_trigger.call_args[0]
+            assert len(called_args) > 0, "_should_trigger_ai called without arguments."
+            trigger_data_arg = called_args[0] # The first argument is trigger_data
+
+            calculated_pattern_score = trigger_data_arg.get('patternScore')
+
+        assert calculated_pattern_score is not None, "patternScore was not found in trigger_data."
+
+        # Expected: bullFlag (0.85 >= 0.7) is 1, futurePattern (0.7 >= 0.7) is 1. Total 2.
+        # Total possible patterns = 3 (bullFlag, bearTrap, futurePattern)
+        # Score = 2 / 3
+        expected_score = 2/3
+        assert abs(calculated_pattern_score - expected_score) < 0.001, \
+            f"Calculated pattern_score_val {calculated_pattern_score} does not match expected {expected_score}"
+
+        logger.info(f"Test pattern_score_val calculation: PASSED. Score: {calculated_pattern_score:.4f} (Expected: {expected_score:.4f})")
+        logger.info("--- Test pattern_score_val Calculation Complete ---")
+
 
     async def test_should_trigger_ai_logic(engine_instance: AIActivationEngine):
         logger.info("\n--- Test _should_trigger_ai Logic ---")
