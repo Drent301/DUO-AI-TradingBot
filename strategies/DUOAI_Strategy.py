@@ -26,7 +26,6 @@ from core.exit_optimizer import ExitOptimizer
 from core.strategy_manager import StrategyManager
 from core.interval_selector import IntervalSelector
 from core.params_manager import ParamsManager
-from core.trade_logger import TradeLogger
 from core.cooldown_tracker import CooldownTracker # Ensure this is present
 
 logger = logging.getLogger(__name__)
@@ -91,7 +90,6 @@ class DUOAI_Strategy(IStrategy):
     strategy_manager: StrategyManager = StrategyManager()
     interval_selector: IntervalSelector = IntervalSelector()
     params_manager: ParamsManager = ParamsManager()
-    trade_logger: TradeLogger = TradeLogger()
     cooldown_tracker: CooldownTracker = CooldownTracker() # Ensure this is present
 
 
@@ -396,9 +394,6 @@ class DUOAI_Strategy(IStrategy):
         trade_data['exit_type'] = order.get('ft_pair_exit_reason', 'unknown') # Freqtrade specific exit reason
 
         logger.info(f"Trade gesloten voor {pair} (ID: {trade.id}). Resultaat: {profit_loss_pct:.2%}. Exit reden: {trade_data['exit_type']}. Trigger AI reflectie en leerloops.")
-
-        # Log de trade in het eigen trade_log.json
-        asyncio.create_task(self.trade_logger.log_trade(trade_data))
 
         # Activeer cooldown als de trade verliesgevend was
         if profit_loss_pct < 0:

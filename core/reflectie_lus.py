@@ -99,31 +99,6 @@ class ReflectieLus:
         """
         self.last_reflection_timestamps[token] = datetime.now().timestamp() * 1000
 
-    def _should_trigger_ai(self, trigger_data: Dict[str, Any], mode: str = 'live') -> bool:
-        """
-        Bepaalt of de AI-reflectie moet worden getriggerd op basis van verschillende factoren.
-        Vertaald van shouldTriggerAI in aiActivationEngine.js.
-        """
-        score = 0
-        pattern_score = trigger_data.get('patternScore', 0)
-        volume_spike = trigger_data.get('volumeSpike', False)
-        confidence = trigger_data.get('confidence')
-        last_time = trigger_data.get('lastTime', 0)
-        strategy_profit = trigger_data.get('strategyProfit', 0) # Dit moet uit Freqtrade komen
-
-        if pattern_score > 0.7: score += 2
-        if volume_spike: score += 1 # 'True' of 'False'
-        if confidence is not None and confidence < 0.6: score += 1
-        if last_time > 60 * 60 * 1000: score += 1 # meer dan 1 uur geleden
-        if strategy_profit < 0: score += 1 # Strategie verliest
-
-        # Drempelwaarde voor triggering
-        trigger_threshold = 3
-        if mode == 'pretrain' or mode == 'backtest': # Forceer trigger in pretrain/backtest mode
-            return True
-
-        return score >= trigger_threshold
-
     async def process_reflection_cycle(
         self,
         symbol: str,
@@ -149,19 +124,6 @@ class ReflectieLus:
         # Freqtrade zal de DataFrames van candles_by_timeframe leveren
         # Sentiment data wordt opgehaald door prompt_builder via grok_sentiment_fetcher
         # Patronen worden gedetecteerd door prompt_builder via cnn_patterns
-
-        # Trigger check (voor live/dry_run, niet voor pretrain/backtest waarin alle trades worden gereflecteerd)
-        if mode in ['live', 'dry_run']:
-            dummy_trigger_data = {
-                "patternScore": 0.8, # Mock, moet uit cnn_patterns komen
-                "volumeSpike": True, # Mock
-                "confidence": current_confidence,
-                "lastTime": self._get_time_since_last_reflection(symbol),
-                "strategyProfit": trade_context.get('profit_pct', 0.0)
-            }
-            if not self._should_trigger_ai(dummy_trigger_data, mode):
-                logger.info(f"[ReflectieCyclus] AI-reflectie niet getriggerd voor {symbol} (score te laag/niet nodig).")
-                return None
 
         # 2. Prompt Generatie
         # De prompt_builder haalt al de sentiment en patroondata op intern.
