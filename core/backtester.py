@@ -493,5 +493,3 @@ class Backtester:
             logger.info(f"Backtest results saved to {BACKTEST_RESULTS_FILE}")
         except Exception as e:
             logger.error(f"Failed to save backtest results: {e}", exc_info=True)
-
-```

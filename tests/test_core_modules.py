@@ -876,8 +876,19 @@ async def test_entry_decider_should_enter(
 
     # Instantiate EntryDecider
     # Patching EntryDecider.get_consensus directly after instantiation or via @patch.object
-    entry_decider = EntryDecider()
-    entry_decider.get_consensus = AsyncMock(return_value=mock_get_consensus_result)
+    # Make sure EntryDecider's __init__ doesn't have complex dependencies not mocked here
+    # For now, assuming ParamsManager, PromptBuilder, GPTReflector, GrokReflector are the main ones.
+    # If BiasReflector, ConfidenceEngine are also initialized in __init__, they might need mocking too.
+    with patch('core.entry_decider.ParamsManager', return_value=mock_params_manager_instance), \
+         patch('core.entry_decider.PromptBuilder', return_value=mock_prompt_builder_instance), \
+         patch('core.entry_decider.GPTReflector', MockGPTReflector), \
+         patch('core.entry_decider.GrokReflector', MockGrokReflector), \
+         patch('core.entry_decider.BiasReflector', MockBiasReflector), \
+         patch('core.entry_decider.ConfidenceEngine', MockConfidenceEngine), \
+         patch('core.entry_decider.CNNPatterns', return_value=mock_cnn_patterns_instance), \
+         patch('core.entry_decider.CooldownTracker', return_value=mock_cooldown_tracker_instance):
+        entry_decider = EntryDecider()
+        entry_decider.get_consensus = AsyncMock(return_value=mock_get_consensus_result)
 
 
     # Prepare inputs for should_enter
@@ -926,9 +937,1196 @@ async def test_entry_decider_should_enter(
     # Verify CNNPatterns.detect_patterns_multi_timeframe was called
     mock_cnn_patterns_instance.detect_patterns_multi_timeframe.assert_called_once_with(candles_by_timeframe, symbol)
 
+
+# Imports for ConfidenceEngine tests
+from core.confidence_engine import ConfidenceEngine, CONFIDENCE_COOLDOWN_SECONDS
+# datetime, timedelta, os, json, asyncio, patch, logging are already imported or available via pytest.
+
+@pytest.fixture
+def confidence_engine_instance_with_temp_memory(tmp_path):
+    """
+    Provides a ConfidenceEngine instance using a temporary CONFIDENCE_MEMORY_FILE.
+    Ensures test isolation by providing a clean memory file for each test.
+    """
+    temp_memory_dir = tmp_path / "confidence_memory_test"
+    temp_memory_dir.mkdir()
+    temp_confidence_file_path = temp_memory_dir / "confidence_memory.json"
+
+    with patch('core.confidence_engine.CONFIDENCE_MEMORY_FILE', str(temp_confidence_file_path)):
+        engine = ConfidenceEngine()
+        yield engine, str(temp_confidence_file_path)
+    # Cleanup handled by tmp_path
+
+class TestConfidenceEngine:
+    TEST_TOKEN = "TEST_CONF/TOKEN"
+    TEST_STRATEGY = "TestConfStrategy"
+
+    @pytest.mark.asyncio
+    async def test_initial_confidence_and_max_pct(self, confidence_engine_instance_with_temp_memory, caplog):
+        """Checks default confidence and max_per_trade_pct for a new token/strategy."""
+        caplog.set_level(logging.INFO)
+        engine, _ = confidence_engine_instance_with_temp_memory
+
+        initial_confidence = engine.get_confidence_score(self.TEST_TOKEN, self.TEST_STRATEGY)
+        initial_max_pct = engine.get_max_per_trade_pct(self.TEST_TOKEN, self.TEST_STRATEGY)
+
+        assert initial_confidence == 0.5, "Initial confidence should be 0.5."
+        assert initial_max_pct == 0.1, "Initial max_per_trade_pct should be 0.1."
+        assert f"ConfidenceEngine geïnitialiseerd. Geheugen: {engine.confidence_memory}" in caplog.text # Check init log
+
+    @pytest.mark.asyncio
+    async def test_update_confidence_winning_trade(self, confidence_engine_instance_with_temp_memory, caplog):
+        caplog.set_level(logging.INFO)
+        engine, memory_file = confidence_engine_instance_with_temp_memory
+
+        initial_confidence = engine.get_confidence_score(self.TEST_TOKEN, self.TEST_STRATEGY) # 0.5
+        initial_max_pct = engine.get_max_per_trade_pct(self.TEST_TOKEN, self.TEST_STRATEGY) # 0.1
+
+        ai_reported_confidence = 0.8
+        trade_profit_pct = 0.02 # 2% profit
+
+        await engine.update_confidence(
+            self.TEST_TOKEN, self.TEST_STRATEGY,
+            ai_reported_confidence=ai_reported_confidence,
+            trade_result_pct=trade_profit_pct
+        )
+
+        updated_confidence = engine.get_confidence_score(self.TEST_TOKEN, self.TEST_STRATEGY)
+        updated_max_pct = engine.get_max_per_trade_pct(self.TEST_TOKEN, self.TEST_STRATEGY)
+
+        # Expected calculations:
+        # profit_boost = min(0.02 * 5, 1.0) = 0.1
+        # confidence_increase = (0.8 * 0.05) + (0.1 * 0.1) = 0.04 + 0.01 = 0.05
+        # adjusted_learned_confidence = 0.5 + 0.05 = 0.55
+        # max_per_trade_pct = min(0.1 + 0.01 + (0.1 * 0.02), 0.5) = min(0.11 + 0.002, 0.5) = min(0.112, 0.5) = 0.112
+
+        assert abs(updated_confidence - 0.55) < 0.0001, "Confidence calculation mismatch for winning trade."
+        assert abs(updated_max_pct - 0.112) < 0.0001, "MaxPerTradePct calculation mismatch for winning trade."
+        assert f"Confidence voor {self.TEST_TOKEN}/{self.TEST_STRATEGY} bijgewerkt naar {updated_confidence:.3f}" in caplog.text
+
+        with open(memory_file, 'r') as f:
+            memory = json.load(f)
+        assert memory[self.TEST_TOKEN][self.TEST_STRATEGY]['confidence'] == updated_confidence
+        assert memory[self.TEST_TOKEN][self.TEST_STRATEGY]['max_per_trade_pct'] == updated_max_pct
+        assert memory[self.TEST_TOKEN][self.TEST_STRATEGY]['trade_count'] == 1
+
+    @pytest.mark.asyncio
+    async def test_update_confidence_large_winning_trade(self, confidence_engine_instance_with_temp_memory, caplog):
+        caplog.set_level(logging.INFO)
+        engine, _ = confidence_engine_instance_with_temp_memory
+        # Assume previous state or start fresh; for this test, starting fresh is fine as logic is additive
+
+        ai_reported_confidence = 0.9
+        trade_profit_pct = 0.05 # 5% profit
+
+        await engine.update_confidence(
+            self.TEST_TOKEN, self.TEST_STRATEGY,
+            ai_reported_confidence=ai_reported_confidence,
+            trade_result_pct=trade_profit_pct
+        )
+        updated_confidence = engine.get_confidence_score(self.TEST_TOKEN, self.TEST_STRATEGY)
+        updated_max_pct = engine.get_max_per_trade_pct(self.TEST_TOKEN, self.TEST_STRATEGY)
+
+        # profit_boost = min(0.05 * 5, 1.0) = 0.25
+        # confidence_increase = (0.9 * 0.05) + (0.25 * 0.1) = 0.045 + 0.025 = 0.07
+        # adjusted_learned_confidence = 0.5 (initial) + 0.07 = 0.57
+        # max_per_trade_pct = min(0.1 + 0.01 + (0.25 * 0.02), 0.5) = min(0.11 + 0.005, 0.5) = min(0.115, 0.5) = 0.115
+        assert abs(updated_confidence - 0.57) < 0.0001
+        assert abs(updated_max_pct - 0.115) < 0.0001
+
+    @pytest.mark.asyncio
+    async def test_update_confidence_losing_trade(self, confidence_engine_instance_with_temp_memory, caplog):
+        caplog.set_level(logging.INFO)
+        engine, _ = confidence_engine_instance_with_temp_memory
+
+        ai_reported_confidence = 0.7
+        trade_profit_pct = -0.01 # -1% loss
+
+        await engine.update_confidence(
+            self.TEST_TOKEN, self.TEST_STRATEGY,
+            ai_reported_confidence=ai_reported_confidence,
+            trade_result_pct=trade_profit_pct
+        )
+        updated_confidence = engine.get_confidence_score(self.TEST_TOKEN, self.TEST_STRATEGY)
+        updated_max_pct = engine.get_max_per_trade_pct(self.TEST_TOKEN, self.TEST_STRATEGY)
+
+        # loss_penalty = min(abs(-0.01) * 5, 1.0) = 0.05
+        # confidence_decrease = (0.7 * 0.05) + (0.05 * 0.1) = 0.035 + 0.005 = 0.04
+        # adjusted_learned_confidence = 0.5 - 0.04 = 0.46
+        # max_per_trade_pct = max(0.1 - 0.01 - (0.05 * 0.02), 0.02) = max(0.09 - 0.001, 0.02) = max(0.089, 0.02) = 0.089
+        assert abs(updated_confidence - 0.46) < 0.0001
+        assert abs(updated_max_pct - 0.089) < 0.0001
+
+    @pytest.mark.asyncio
+    async def test_update_confidence_large_losing_trade(self, confidence_engine_instance_with_temp_memory, caplog):
+        caplog.set_level(logging.INFO)
+        engine, _ = confidence_engine_instance_with_temp_memory
+
+        ai_reported_confidence = 0.8
+        trade_profit_pct = -0.04 # -4% loss
+
+        await engine.update_confidence(
+            self.TEST_TOKEN, self.TEST_STRATEGY,
+            ai_reported_confidence=ai_reported_confidence,
+            trade_result_pct=trade_profit_pct
+        )
+        updated_confidence = engine.get_confidence_score(self.TEST_TOKEN, self.TEST_STRATEGY)
+        updated_max_pct = engine.get_max_per_trade_pct(self.TEST_TOKEN, self.TEST_STRATEGY)
+
+        # loss_penalty = min(abs(-0.04) * 5, 1.0) = 0.20
+        # confidence_decrease = (0.8 * 0.05) + (0.20 * 0.1) = 0.04 + 0.02 = 0.06
+        # adjusted_learned_confidence = 0.5 - 0.06 = 0.44
+        # max_per_trade_pct = max(0.1 - 0.01 - (0.20 * 0.02), 0.02) = max(0.09 - 0.004, 0.02) = max(0.086, 0.02) = 0.086
+        assert abs(updated_confidence - 0.44) < 0.0001
+        assert abs(updated_max_pct - 0.086) < 0.0001
+
+    @pytest.mark.asyncio
+    async def test_update_confidence_ai_only_reflection(self, confidence_engine_instance_with_temp_memory, caplog):
+        caplog.set_level(logging.INFO)
+        engine, _ = confidence_engine_instance_with_temp_memory
+        initial_confidence = engine.get_confidence_score(self.TEST_TOKEN, self.TEST_STRATEGY) # 0.5
+        initial_max_pct = engine.get_max_per_trade_pct(self.TEST_TOKEN, self.TEST_STRATEGY) # 0.1
+
+        ai_reported_confidence = 0.9
+        await engine.update_confidence(
+            self.TEST_TOKEN, self.TEST_STRATEGY,
+            ai_reported_confidence=ai_reported_confidence
+            # No trade_result_pct
+        )
+        updated_confidence = engine.get_confidence_score(self.TEST_TOKEN, self.TEST_STRATEGY)
+        updated_max_pct = engine.get_max_per_trade_pct(self.TEST_TOKEN, self.TEST_STRATEGY)
+
+        # adjustment_weight = 0.1
+        # expected_confidence = (0.5 * (1 - 0.1) + 0.9 * 0.1) = (0.5 * 0.9 + 0.09) = 0.45 + 0.09 = 0.54
+        assert abs(updated_confidence - 0.54) < 0.0001
+        assert updated_max_pct == initial_max_pct, "MaxPerTradePct should not change on AI-only reflection."
+
+    @pytest.mark.asyncio
+    async def test_confidence_update_cooldown(self, confidence_engine_instance_with_temp_memory, caplog):
+        caplog.set_level(logging.DEBUG)
+        engine, _ = confidence_engine_instance_with_temp_memory
+
+        # First update
+        await engine.update_confidence(self.TEST_TOKEN, self.TEST_STRATEGY, 0.7, trade_result_pct=0.01)
+        first_confidence = engine.get_confidence_score(self.TEST_TOKEN, self.TEST_STRATEGY)
+        first_max_pct = engine.get_max_per_trade_pct(self.TEST_TOKEN, self.TEST_STRATEGY)
+
+        # Attempt second update immediately
+        await engine.update_confidence(self.TEST_TOKEN, self.TEST_STRATEGY, 0.2, trade_result_pct=-0.02)
+        second_confidence = engine.get_confidence_score(self.TEST_TOKEN, self.TEST_STRATEGY)
+        second_max_pct = engine.get_max_per_trade_pct(self.TEST_TOKEN, self.TEST_STRATEGY)
+
+        assert abs(second_confidence - first_confidence) < 0.0001, "Confidence should not change during cooldown."
+        assert abs(second_max_pct - first_max_pct) < 0.0001, "MaxPerTradePct should not change during cooldown."
+        assert f"Cooldown actief voor {self.TEST_TOKEN}/{self.TEST_STRATEGY}" in caplog.text
+
+    @pytest.mark.asyncio
+    async def test_confidence_update_after_cooldown_mocked_time(self, confidence_engine_instance_with_temp_memory, caplog):
+        caplog.set_level(logging.INFO)
+        engine, _ = confidence_engine_instance_with_temp_memory
+
+        initial_update_time = datetime(2023, 1, 1, 12, 0, 0)
+
+        # Mock datetime for the first update
+        with patch('core.confidence_engine.datetime') as mock_dt_initial:
+            mock_dt_initial.now.return_value = initial_update_time
+            mock_dt_initial.fromisoformat.side_effect = lambda ts: datetime.fromisoformat(ts)
+            await engine.update_confidence(self.TEST_TOKEN, self.TEST_STRATEGY, 0.75, trade_result_pct=0.01) # win
+
+        confidence_after_first_update = engine.get_confidence_score(self.TEST_TOKEN, self.TEST_STRATEGY)
+        max_pct_after_first_update = engine.get_max_per_trade_pct(self.TEST_TOKEN, self.TEST_STRATEGY)
+
+        # Mock datetime for an attempt during cooldown
+        with patch('core.confidence_engine.datetime') as mock_dt_cooldown:
+            mock_dt_cooldown.now.return_value = initial_update_time + timedelta(seconds=CONFIDENCE_COOLDOWN_SECONDS / 2)
+            mock_dt_cooldown.fromisoformat.side_effect = lambda ts: datetime.fromisoformat(ts)
+            await engine.update_confidence(self.TEST_TOKEN, self.TEST_STRATEGY, 0.3, trade_result_pct=-0.01) # loss
+
+        assert abs(engine.get_confidence_score(self.TEST_TOKEN, self.TEST_STRATEGY) - confidence_after_first_update) < 0.0001
+        assert abs(engine.get_max_per_trade_pct(self.TEST_TOKEN, self.TEST_STRATEGY) - max_pct_after_first_update) < 0.0001
+
+        # Mock datetime for an attempt after cooldown
+        with patch('core.confidence_engine.datetime') as mock_dt_after_cooldown:
+            mock_dt_after_cooldown.now.return_value = initial_update_time + timedelta(seconds=CONFIDENCE_COOLDOWN_SECONDS + 1)
+            mock_dt_after_cooldown.fromisoformat.side_effect = lambda ts: datetime.fromisoformat(ts)
+            await engine.update_confidence(self.TEST_TOKEN, self.TEST_STRATEGY, 0.3, trade_result_pct=-0.01) # loss
+
+        confidence_after_cooldown_expiry = engine.get_confidence_score(self.TEST_TOKEN, self.TEST_STRATEGY)
+        max_pct_after_cooldown_expiry = engine.get_max_per_trade_pct(self.TEST_TOKEN, self.TEST_STRATEGY)
+
+        assert confidence_after_cooldown_expiry != confidence_after_first_update, "Confidence should have updated after cooldown."
+        assert max_pct_after_cooldown_expiry != max_pct_after_first_update, "MaxPerTradePct should have updated after cooldown."
+
+
+
+
+# Imports for CNNPatternsMain tests
+from core.cnn_patterns import CNNPatterns, SimpleCNN # SimpleCNN needed for creating dummy model
+# torch, pd, np, os, json, datetime, logging, asyncio, sys, pytest, patch, MagicMock already imported or available
+
+@pytest.fixture
+def cnn_patterns_with_dummy_models(tmp_path):
+    """
+    Provides a CNNPatterns instance with dummy models and scalers in a temporary directory.
+    Patches CNNPatterns.MODELS_DIR and core.params_manager.ParamsManager for the test.
+    """
+    dummy_models_dir = tmp_path / "data" / "models"
+
+    test_symbol_underscore = "TEST_USDT"
+    test_timeframe = "1h"
+    test_arch_key = "default_simple"
+
+    # Mock ParamsManager for CNNPatterns instance
+    mock_pm_instance = MagicMock(spec=ParamsManager)
+    mock_pm_instance.get_param.side_effect = lambda key, default=None: \
+        test_arch_key if key == 'current_cnn_architecture_key' else \
+        {
+            test_arch_key: { # Must match parameters SimpleCNN expects or can handle with defaults
+                "num_conv_layers": 2, "filters_per_layer": [16, 32],
+                "kernel_sizes_per_layer": [3, 3], "strides_per_layer": [1, 1],
+                "padding_per_layer": [1, 1], "pooling_types_per_layer": ['max', 'max'],
+                "pooling_kernel_sizes_per_layer": [2, 2], "pooling_strides_per_layer": [2, 2],
+                "use_batch_norm": False, "dropout_rate": 0.0
+            }
+        } if key == 'cnn_architecture_configs' else \
+        default
+
+    # Create dummy model and scaler files
+    dummy_patterns_meta = {
+        'bullFlag': {'input_channels': 12, 'num_classes': 2},
+        'bearishEngulfing': {'input_channels': 12, 'num_classes': 2}
+    }
+    dummy_sequence_length = 30
+    dummy_feature_names = ['open', 'high', 'low', 'close', 'volume', 'rsi', 'macd', 'macdsignal', 'macdhist', 'bb_lowerband', 'bb_middleband', 'bb_upperband']
+
+
+    for pattern_name, meta_info in dummy_patterns_meta.items():
+        model_dir_path = dummy_models_dir / test_symbol_underscore / test_timeframe
+        model_dir_path.mkdir(parents=True, exist_ok=True)
+
+        model_path = model_dir_path / f"cnn_model_{pattern_name}_{test_arch_key}.pth"
+        scaler_path = model_dir_path / f"scaler_params_{pattern_name}_{test_arch_key}.json"
+
+        # Create dummy model state_dict
+        # Ensure input_channels in SimpleCNN matches len(dummy_feature_names)
+        arch_params_for_dummy_model = mock_pm_instance.get_param('cnn_architecture_configs')[test_arch_key]
+        dummy_model = SimpleCNN(
+            input_channels=len(dummy_feature_names),
+            num_classes=meta_info['num_classes'],
+            sequence_length=dummy_sequence_length,
+            **arch_params_for_dummy_model
+            )
+        torch.save(dummy_model.state_dict(), model_path)
+
+        # Create dummy scaler JSON
+        dummy_scaler_params = {
+            'min_': [0.0] * len(dummy_feature_names),
+            'scale_': [1.0] * len(dummy_feature_names),
+            'sequence_length': dummy_sequence_length,
+            'feature_names_in_': dummy_feature_names
+        }
+        with open(scaler_path, 'w') as f:
+            json.dump(dummy_scaler_params, f)
+
+    with patch('core.cnn_patterns.CNNPatterns.MODELS_DIR', str(dummy_models_dir)), \
+         patch('core.cnn_patterns.ParamsManager', return_value=mock_pm_instance):
+        cnn_detector = CNNPatterns()
+        # Pre-load models for the test symbol/timeframe to ensure they are loaded from dummy files
+        cnn_detector._load_cnn_models_and_scalers(symbol=test_symbol_underscore.replace("_", "/"), timeframe=test_timeframe, arch_key_to_load=test_arch_key)
+        yield cnn_detector, test_symbol_underscore.replace("_", "/"), test_timeframe # Return symbol and timeframe for use in test
+
+class TestCNNPatternsMain:
+    def _create_mock_dataframe(self, num_rows=50):
+        return pd.DataFrame({
+            'open': np.random.rand(num_rows) * 100, 'high': np.random.rand(num_rows) * 110,
+            'low': np.random.rand(num_rows) * 90, 'close': np.random.rand(num_rows) * 100,
+            'volume': np.random.rand(num_rows) * 1000, 'rsi': np.random.rand(num_rows) * 100,
+            'macd': np.random.rand(num_rows), 'macdsignal': np.random.rand(num_rows), 'macdhist': np.random.rand(num_rows),
+            'bb_lowerband': np.random.rand(num_rows)*95, 'bb_middleband':np.random.rand(num_rows)*100, 'bb_upperband':np.random.rand(num_rows)*105,
+            'date': pd.date_range(end=datetime.now(timezone.utc), periods=num_rows, freq='1h')
+        }).set_index('date')
+
+    @pytest.mark.asyncio
+    async def test_cnn_patterns_main_loading_and_prediction(self, cnn_patterns_with_dummy_models, caplog):
+        caplog.set_level(logging.DEBUG)
+        cnn_detector, test_symbol, test_timeframe = cnn_patterns_with_dummy_models
+
+        mock_df = self._create_mock_dataframe()
+
+        # Test predict_pattern_score for patterns with dummy models
+        for pattern_name in cnn_detector.pattern_model_meta_info.keys():
+            score = await cnn_detector.predict_pattern_score(mock_df, test_symbol, test_timeframe, pattern_name)
+            assert 0.0 <= score <= 1.0, f"{pattern_name} score out of range: {score}"
+            assert f"CNN voorspelde score voor '{test_symbol.replace('/', '_')}_{test_timeframe}_{pattern_name}_default_simple'" in caplog.text
+
+    @pytest.mark.asyncio
+    async def test_cnn_patterns_main_get_all_detectable_keys(self, cnn_patterns_with_dummy_models):
+        cnn_detector, _, _ = cnn_patterns_with_dummy_models
+        pattern_keys = cnn_detector.get_all_detectable_pattern_keys()
+        expected_keys = list(cnn_detector.pattern_model_meta_info.keys())
+        assert sorted(pattern_keys) == sorted(expected_keys), \
+            f"Pattern keys {pattern_keys} do not match expected {expected_keys}"
+
+    @pytest.mark.asyncio
+    async def test_cnn_patterns_main_determine_trend(self, cnn_patterns_with_dummy_models, caplog):
+        caplog.set_level(logging.DEBUG)
+        cnn_detector, _, _ = cnn_patterns_with_dummy_models # Need instance for determine_trend
+        base_time_dt = datetime.now(timezone.utc)
+
+        # Helper to create list of candle dicts
+        def create_candle_list(prices):
+            return [{'open': p, 'high': p + 1, 'low': p - 1, 'close': p, 'volume': 100,
+                       'time': (base_time_dt + timedelta(hours=i)).timestamp() * 1000}
+                      for i, p in enumerate(prices)]
+
+        # Uptrend
+        uptrend_prices = [50 + i * 0.5 for i in range(20)] # Clearer trend
+        trend_result = cnn_detector.determine_trend(create_candle_list(uptrend_prices))
+        assert trend_result == "uptrend", f"Expected 'uptrend', got {trend_result}"
+
+        # Downtrend
+        downtrend_prices = [70 - i * 0.5 for i in range(20)] # Clearer trend
+        trend_result = cnn_detector.determine_trend(create_candle_list(downtrend_prices))
+        assert trend_result == "downtrend", f"Expected 'downtrend', got {trend_result}"
+
+        # Sideways Trend (very little change)
+        sideways_prices = [60 + ( (i % 3 - 1) * 0.01 ) for i in range(20)]
+        trend_result = cnn_detector.determine_trend(create_candle_list(sideways_prices))
+        assert trend_result == "sideways", f"Expected 'sideways', got {trend_result}"
+
+        # Insufficient Data
+        insufficient_candles = create_candle_list(uptrend_prices[:5])
+        trend_result = cnn_detector.determine_trend(insufficient_candles)
+        assert trend_result == "undetermined", f"Expected 'undetermined' for insufficient data, got {trend_result}"
+
+    @pytest.mark.asyncio
+    async def test_cnn_patterns_main_detect_volume_spike(self, cnn_patterns_with_dummy_models, caplog):
+        caplog.set_level(logging.DEBUG)
+        cnn_detector, _, _ = cnn_patterns_with_dummy_models
+        base_time_dt = datetime.now(timezone.utc)
+
+        def create_candle_list_vol(volumes):
+            return [{'open': 100, 'high': 105, 'low': 95, 'close': 100, 'volume': v,
+                       'time': (base_time_dt + timedelta(hours=i)).timestamp() * 1000}
+                      for i, v in enumerate(volumes)]
+
+        # Volume Spike
+        spike_volumes = [100] * 19 + [300] # Last volume is 3x average
+        spike_result = cnn_detector.detect_volume_spike(create_candle_list_vol(spike_volumes), period=20, spike_factor=2.0)
+        assert spike_result is True, "Expected True for volume spike"
+
+        # No Volume Spike
+        no_spike_volumes = [100] * 20
+        no_spike_volumes[-1] = 110 # Last volume slightly higher, but not a spike
+        spike_result = cnn_detector.detect_volume_spike(create_candle_list_vol(no_spike_volumes), period=20, spike_factor=2.0)
+        assert spike_result is False, "Expected False for no volume spike"
+
+        # Insufficient Data
+        insufficient_volumes = spike_volumes[:5]
+        spike_result = cnn_detector.detect_volume_spike(create_candle_list_vol(insufficient_volumes), period=20, spike_factor=2.0)
+        assert spike_result is False, "Expected False for insufficient data (volume spike)"
+
+
+
+# Imports for BitvavoExecutor tests
+from core.bitvavo_executor import BitvavoExecutor
+import ccxt # For patching and for ccxt error types
+from ccxt.base.errors import AuthenticationError, RateLimitExceeded, InsufficientFunds, InvalidOrder, NetworkError, ExchangeError, BadSymbol, RequestTimeout, ExchangeNotAvailable, DDoSProtection
+
+@pytest.fixture
+def mock_bitvavo_exchange_fixture():
+    """
+    Patches ccxt.bitvavo to return an AsyncMock instance representing the exchange.
+    This mock_exchange will have its methods (fetch_balance, fetch_ohlcv, etc.)
+    as AsyncMocks automatically.
+    """
+    with patch('ccxt.bitvavo', new_callable=AsyncMock) as mock_ccxt_bitvavo:
+        # Configure the instance returned by ccxt.bitvavo() to also be an AsyncMock
+        # This represents the 'self.exchange' object in BitvavoExecutor
+        mock_exchange_instance = AsyncMock()
+        mock_ccxt_bitvavo.return_value = mock_exchange_instance
+        yield mock_exchange_instance # Yield the instance that executor.exchange will become
+
+class TestBitvavoExecutor:
+    @pytest.mark.asyncio
+    @patch.dict(os.environ, {"BITVAVO_API_KEY": "test_key", "BITVAVO_SECRET_KEY": "test_secret"})
+    async def test_fetch_balance_success(self, mock_bitvavo_exchange_fixture, caplog):
+        """Tests successful balance fetching."""
+        caplog.set_level(logging.INFO)
+        mock_exchange = mock_bitvavo_exchange_fixture
+
+        expected_balance_all = {
+            'EUR': {'free': 1000.0, 'used': 0.0, 'total': 1000.0},
+            'ETH': {'free': 10.0, 'used': 0.0, 'total': 10.0},
+            'info': {'some_extra_info': 'value'} # CCXT often includes an 'info' field
+        }
+        mock_exchange.fetch_balance = AsyncMock(return_value=expected_balance_all)
+
+        executor = BitvavoExecutor() # Initializes with mocked ccxt.bitvavo
+
+        # Test fetching all balances
+        balance_all = await executor.fetch_balance()
+        assert balance_all == expected_balance_all
+        mock_exchange.fetch_balance.assert_called_once()
+
+        # Test fetching specific currency
+        mock_exchange.fetch_balance.reset_mock() # Reset for the next call
+        expected_balance_eth = expected_balance_all['ETH']
+        # No need to reconfigure return_value if the overall structure is what we test against for specific key
+
+        balance_eth = await executor.fetch_balance('ETH')
+        assert balance_eth == expected_balance_eth
+        mock_exchange.fetch_balance.assert_called_once() # Called again
+
+        # Test fetching non-existent currency
+        mock_exchange.fetch_balance.reset_mock()
+        balance_non_existent = await executor.fetch_balance('XYZ')
+        assert balance_non_existent == {'free': 0, 'used': 0, 'total': 0}
+        mock_exchange.fetch_balance.assert_called_once()
+
+
+    @pytest.mark.asyncio
+    @patch.dict(os.environ, {"BITVAVO_API_KEY": "test_key", "BITVAVO_SECRET_KEY": "test_secret"})
+    async def test_fetch_ohlcv_success(self, mock_bitvavo_exchange_fixture, caplog):
+        """Tests successful OHLCV fetching."""
+        caplog.set_level(logging.DEBUG)
+        mock_exchange = mock_bitvavo_exchange_fixture
+
+        expected_ohlcv_data = [
+            [1672531200000, 100.0, 105.0, 98.0, 102.0, 1000.0], # [timestamp, open, high, low, close, volume]
+            [1672534800000, 102.0, 108.0, 101.0, 107.0, 1200.0]
+        ]
+        mock_exchange.fetch_ohlcv = AsyncMock(return_value=expected_ohlcv_data)
+
+        executor = BitvavoExecutor()
+        symbol = "ETH/EUR"
+        timeframe = "1h"
+        limit = 2
+
+        ohlcv_data = await executor.fetch_ohlcv(symbol, timeframe, limit)
+
+        assert ohlcv_data == expected_ohlcv_data
+        mock_exchange.fetch_ohlcv.assert_called_once_with(symbol, timeframe, limit=limit)
+        assert f"OHLCV data fetched for {symbol}" in caplog.text
+
+
+    @pytest.mark.asyncio
+    @patch.dict(os.environ, {"BITVAVO_API_KEY": "test_key", "BITVAVO_SECRET_KEY": "test_secret"})
+    async def test_create_market_buy_order_success(self, mock_bitvavo_exchange_fixture, caplog):
+        caplog.set_level(logging.INFO)
+        mock_exchange = mock_bitvavo_exchange_fixture
+
+        expected_order_info = {'id': '12345', 'symbol': 'ETH/EUR', 'status': 'closed', 'amount': 0.01, 'filled': 0.01}
+        mock_exchange.create_market_buy_order = AsyncMock(return_value=expected_order_info)
+
+        executor = BitvavoExecutor()
+        symbol = "ETH/EUR"
+        amount = 0.01
+
+        order_info = await executor.create_market_buy_order(symbol, amount)
+
+        assert order_info == expected_order_info
+        mock_exchange.create_market_buy_order.assert_called_once_with(symbol, amount)
+        assert f"Market BUY order placed for {amount} of {symbol}" in caplog.text
+
+    @pytest.mark.asyncio
+    @patch.dict(os.environ, {"BITVAVO_API_KEY": "test_key", "BITVAVO_SECRET_KEY": "test_secret"})
+    async def test_create_market_sell_order_success(self, mock_bitvavo_exchange_fixture, caplog):
+        caplog.set_level(logging.INFO)
+        mock_exchange = mock_bitvavo_exchange_fixture
+
+        expected_order_info = {'id': '67890', 'symbol': 'BTC/EUR', 'status': 'closed', 'amount': 0.005, 'filled': 0.005}
+        mock_exchange.create_market_sell_order = AsyncMock(return_value=expected_order_info)
+
+        executor = BitvavoExecutor()
+        symbol = "BTC/EUR"
+        amount = 0.005
+
+        order_info = await executor.create_market_sell_order(symbol, amount)
+
+        assert order_info == expected_order_info
+        mock_exchange.create_market_sell_order.assert_called_once_with(symbol, amount)
+        assert f"Market SELL order placed for {amount} of {symbol}" in caplog.text
+
+    # Parameterize error handling tests
+    @pytest.mark.asyncio
+    @patch.dict(os.environ, {"BITVAVO_API_KEY": "test_key", "BITVAVO_SECRET_KEY": "test_secret"})
+    @pytest.mark.parametrize(
+        "method_name, method_args, ccxt_error, expected_return, log_message_part",
+        [
+            ("fetch_balance", (), AuthenticationError, {}, "AuthenticationError in fetch_balance"),
+            ("fetch_balance", ("EUR",), RateLimitExceeded, {}, "RateLimitExceeded in fetch_balance"),
+            ("fetch_ohlcv", ("ETH/EUR", "1h", 10), NetworkError, [], "NetworkError in fetch_ohlcv"),
+            ("fetch_ohlcv", ("ETH/EUR", "1h", 10), ExchangeError, [], "ExchangeError in fetch_ohlcv"),
+            ("create_market_buy_order", ("ETH/EUR", 0.01), InsufficientFunds, None, "InsufficientFunds in create_market_buy_order"),
+            ("create_market_buy_order", ("ETH/EUR", 0.01), InvalidOrder, None, "InvalidOrder in create_market_buy_order"),
+            ("create_market_sell_order", ("BTC/EUR", 0.005), BadSymbol, None, "BadSymbol in create_market_sell_order"),
+            ("create_market_sell_order", ("BTC/EUR", 0.005), RequestTimeout, None, "RequestTimeout in create_market_sell_order"),
+        ]
+    )
+    async def test_method_error_handling(
+        self, mock_bitvavo_exchange_fixture, caplog,
+        method_name, method_args, ccxt_error, expected_return, log_message_part
+    ):
+        caplog.set_level(logging.WARNING) # Errors are logged as warning or error
+        mock_exchange = mock_bitvavo_exchange_fixture
+
+        # Configure the mocked exchange method to raise the specified CCXT error
+        mocked_method = AsyncMock(side_effect=ccxt_error(str(ccxt_error))) # Pass error message for context
+        setattr(mock_exchange, method_name, mocked_method)
+
+        executor = BitvavoExecutor()
+
+        # Call the BitvavoExecutor method
+        result = await getattr(executor, method_name)(*method_args)
+
+        assert result == expected_return
+        assert log_message_part in caplog.text
+        getattr(mock_exchange, method_name).assert_called_once()
+
+
+
+
+# Imports for BiasReflector tests
+from core.bias_reflector import BiasReflector, BIAS_COOLDOWN_SECONDS
+# datetime, timedelta, os, json, asyncio, patch are already imported.
+# pytest is available.
+
+@pytest.fixture
+def bias_reflector_instance_with_temp_memory(tmp_path):
+    """
+    Provides a BiasReflector instance using a temporary BIAS_MEMORY_FILE.
+    Ensures test isolation by providing a clean memory file for each test.
+    """
+    temp_memory_dir = tmp_path / "bias_memory_test"
+    temp_memory_dir.mkdir()
+    temp_bias_file_path = temp_memory_dir / "bias_memory.json"
+
+    # Patch the BIAS_MEMORY_FILE constant in the bias_reflector module
+    with patch('core.bias_reflector.BIAS_MEMORY_FILE', str(temp_bias_file_path)):
+        reflector = BiasReflector()
+        yield reflector, str(temp_bias_file_path) # Yield both instance and path for optional direct checks
+
+    # Cleanup is handled by tmp_path fixture for the directory and its contents.
+
+class TestBiasReflector:
+    TEST_TOKEN = "TEST/TOKEN"
+    TEST_STRATEGY = "TestStrategy"
+
+    @pytest.mark.asyncio
+    async def test_initial_bias_score(self, bias_reflector_instance_with_temp_memory):
+        """Checks the default bias for a new token/strategy."""
+        bias_reflector, _ = bias_reflector_instance_with_temp_memory
+        initial_bias = bias_reflector.get_bias_score(self.TEST_TOKEN, self.TEST_STRATEGY)
+        assert initial_bias == 0.5, "Initial bias for a new token/strategy should be 0.5 (neutral)."
+
+    @pytest.mark.asyncio
+    async def test_update_bias_winning_trade(self, bias_reflector_instance_with_temp_memory, caplog):
+        """Simulates a winning trade and checks if bias updates positively."""
+        caplog.set_level(logging.INFO)
+        bias_reflector, memory_file_path = bias_reflector_instance_with_temp_memory
+
+        initial_bias = bias_reflector.get_bias_score(self.TEST_TOKEN, self.TEST_STRATEGY) # Should be 0.5
+
+        ai_suggested_bias = 0.7
+        ai_confidence = 0.8
+        trade_profit_pct = 0.02 # 2% profit
+
+        await bias_reflector.update_bias(
+            self.TEST_TOKEN, self.TEST_STRATEGY,
+            new_ai_bias=ai_suggested_bias,
+            confidence=ai_confidence,
+            trade_result_pct=trade_profit_pct
+        )
+
+        updated_bias = bias_reflector.get_bias_score(self.TEST_TOKEN, self.TEST_STRATEGY)
+
+        assert updated_bias > initial_bias, "Bias should increase after a winning trade with positive AI signals."
+        # The exact calculation:
+        # current_bias = 0.5
+        # trade_influence_factor = 0.8 * 0.1 = 0.08
+        # target_bias = 0.7 (since new_ai_bias > current_bias)
+        # adjustment = (0.7 - 0.5) * 0.08 * (1 + min(0.02 * 10, 1))
+        #            = 0.2 * 0.08 * (1 + 0.2) = 0.2 * 0.08 * 1.2 = 0.016 * 1.2 = 0.0192
+        # calculated_new_bias = 0.5 + 0.0192 = 0.5192
+        assert abs(updated_bias - 0.5192) < 0.0001, f"Bias calculation mismatch. Expected ~0.5192, got {updated_bias}"
+        assert f"Bias voor {self.TEST_TOKEN}/{self.TEST_STRATEGY} bijgewerkt naar {updated_bias:.3f}" in caplog.text
+
+        # Verify memory file content
+        with open(memory_file_path, 'r') as f:
+            memory_data = json.load(f)
+        assert memory_data[self.TEST_TOKEN][self.TEST_STRATEGY]['bias'] == updated_bias
+        assert memory_data[self.TEST_TOKEN][self.TEST_STRATEGY]['trade_count'] == 1
+        assert memory_data[self.TEST_TOKEN][self.TEST_STRATEGY]['total_profit_pct'] == trade_profit_pct
+
+    @pytest.mark.asyncio
+    async def test_update_bias_losing_trade(self, bias_reflector_instance_with_temp_memory, caplog):
+        """Simulates a losing trade and checks if bias updates appropriately."""
+        caplog.set_level(logging.INFO)
+        bias_reflector, _ = bias_reflector_instance_with_temp_memory
+        initial_bias = 0.6 # Set a slightly positive initial bias for better testing of decrease
+        bias_reflector.bias_memory[self.TEST_TOKEN] = {self.TEST_STRATEGY: {'bias': initial_bias, 'last_update': None, 'trade_count': 0, 'total_profit_pct': 0.0}}
+
+
+        ai_suggested_bias = 0.3
+        ai_confidence = 0.6
+        trade_profit_pct = -0.01 # -1% loss
+
+        await bias_reflector.update_bias(
+            self.TEST_TOKEN, self.TEST_STRATEGY,
+            new_ai_bias=ai_suggested_bias,
+            confidence=ai_confidence,
+            trade_result_pct=trade_profit_pct
+        )
+        updated_bias = bias_reflector.get_bias_score(self.TEST_TOKEN, self.TEST_STRATEGY)
+
+        assert updated_bias < initial_bias, "Bias should decrease after a losing trade, especially with negative AI signals."
+        # current_bias = 0.6
+        # trade_influence_factor = 0.6 * 0.1 = 0.06
+        # target_bias = 0.3 (since new_ai_bias < current_bias)
+        # adjustment = (0.3 - 0.6) * 0.06 * (1 + min(abs(-0.01) * 10, 1))
+        #            = -0.3 * 0.06 * (1 + 0.1) = -0.3 * 0.06 * 1.1 = -0.018 * 1.1 = -0.0198
+        # calculated_new_bias = 0.6 - 0.0198 = 0.5802
+        assert abs(updated_bias - 0.5802) < 0.0001, f"Bias calculation mismatch. Expected ~0.5802, got {updated_bias}"
+        assert f"Bias voor {self.TEST_TOKEN}/{self.TEST_STRATEGY} bijgewerkt naar {updated_bias:.3f}" in caplog.text
+
+    @pytest.mark.asyncio
+    async def test_update_bias_ai_only(self, bias_reflector_instance_with_temp_memory, caplog):
+        """Simulates an update based only on AI reflection (no trade)."""
+        caplog.set_level(logging.INFO)
+        bias_reflector, _ = bias_reflector_instance_with_temp_memory
+        initial_bias = 0.5
+
+        ai_suggested_bias = 0.9
+        ai_confidence = 0.9
+
+        await bias_reflector.update_bias(
+            self.TEST_TOKEN, self.TEST_STRATEGY,
+            new_ai_bias=ai_suggested_bias,
+            confidence=ai_confidence
+            # trade_result_pct is None
+        )
+        updated_bias = bias_reflector.get_bias_score(self.TEST_TOKEN, self.TEST_STRATEGY)
+
+        # Expected: (current_bias * (1 - confidence) + new_ai_bias * confidence)
+        #         = (0.5 * (1 - 0.9) + 0.9 * 0.9)
+        #         = (0.5 * 0.1 + 0.81) = 0.05 + 0.81 = 0.86
+        expected_calculated_bias = 0.86
+        assert abs(updated_bias - expected_calculated_bias) < 0.0001, "Bias should move towards AI suggestion, weighted by confidence."
+        assert f"Bias voor {self.TEST_TOKEN}/{self.TEST_STRATEGY} bijgewerkt naar {updated_bias:.3f}" in caplog.text
+
+    @pytest.mark.asyncio
+    async def test_bias_update_cooldown(self, bias_reflector_instance_with_temp_memory, caplog):
+        """Checks that bias is not updated during the cooldown period."""
+        caplog.set_level(logging.DEBUG) # Need DEBUG for cooldown message
+        bias_reflector, _ = bias_reflector_instance_with_temp_memory
+
+        # First update to set 'last_update' timestamp
+        await bias_reflector.update_bias(self.TEST_TOKEN, self.TEST_STRATEGY, 0.6, 0.7)
+        first_updated_bias = bias_reflector.get_bias_score(self.TEST_TOKEN, self.TEST_STRATEGY)
+
+        # Attempt another update immediately (should be blocked by cooldown)
+        await bias_reflector.update_bias(self.TEST_TOKEN, self.TEST_STRATEGY, 0.1, 0.9, trade_result_pct=-0.05)
+        bias_after_cooldown_attempt = bias_reflector.get_bias_score(self.TEST_TOKEN, self.TEST_STRATEGY)
+
+        assert abs(bias_after_cooldown_attempt - first_updated_bias) < 0.0001, "Bias should not change during cooldown period."
+        assert f"Cooldown actief voor {self.TEST_TOKEN}/{self.TEST_STRATEGY}" in caplog.text
+
+    @pytest.mark.asyncio
+    async def test_bias_update_after_cooldown_mocked_time(self, bias_reflector_instance_with_temp_memory, caplog):
+        """Tests that bias updates after cooldown period by mocking datetime.now()."""
+        caplog.set_level(logging.INFO)
+        bias_reflector, _ = bias_reflector_instance_with_temp_memory
+
+        # Initial update
+        initial_update_time = datetime(2023, 1, 1, 12, 0, 0)
+        with patch('core.bias_reflector.datetime') as mock_datetime:
+            mock_datetime.now.return_value = initial_update_time
+            mock_datetime.fromisoformat.side_effect = lambda ts: datetime.fromisoformat(ts) # Ensure fromisoformat still works
+
+            await bias_reflector.update_bias(self.TEST_TOKEN, self.TEST_STRATEGY, 0.6, 0.7)
+
+        first_updated_bias = bias_reflector.get_bias_score(self.TEST_TOKEN, self.TEST_STRATEGY)
+
+        # Attempt update during cooldown (mock time slightly after initial update)
+        with patch('core.bias_reflector.datetime') as mock_datetime_cooldown:
+            mock_datetime_cooldown.now.return_value = initial_update_time + timedelta(seconds=BIAS_COOLDOWN_SECONDS / 2)
+            mock_datetime_cooldown.fromisoformat.side_effect = lambda ts: datetime.fromisoformat(ts)
+
+            await bias_reflector.update_bias(self.TEST_TOKEN, self.TEST_STRATEGY, 0.2, 0.8)
+            bias_during_cooldown = bias_reflector.get_bias_score(self.TEST_TOKEN, self.TEST_STRATEGY)
+            assert abs(bias_during_cooldown - first_updated_bias) < 0.0001, "Bias should not update during mocked cooldown."
+
+        # Attempt update after cooldown (mock time well after cooldown period)
+        with patch('core.bias_reflector.datetime') as mock_datetime_after_cooldown:
+            mock_datetime_after_cooldown.now.return_value = initial_update_time + timedelta(seconds=BIAS_COOLDOWN_SECONDS + 1)
+            mock_datetime_after_cooldown.fromisoformat.side_effect = lambda ts: datetime.fromisoformat(ts)
+
+            await bias_reflector.update_bias(self.TEST_TOKEN, self.TEST_STRATEGY, 0.2, 0.8) # Different values to ensure change
+
+        bias_after_cooldown = bias_reflector.get_bias_score(self.TEST_TOKEN, self.TEST_STRATEGY)
+        assert bias_after_cooldown != first_updated_bias, "Bias should update after cooldown period."
+        # Expected: (0.42 * (1-0.8) + 0.2 * 0.8) = (0.42 * 0.2 + 0.16) = 0.084 + 0.16 = 0.244
+        # Current bias before this update was (0.5 * (1-0.7) + 0.6*0.7) = 0.15 + 0.42 = 0.57
+        # So, (0.57 * 0.2 + 0.2 * 0.8) = 0.114 + 0.16 = 0.274
+        assert abs(bias_after_cooldown - 0.274) < 0.0001, f"Bias calculation error after cooldown. Expected ~0.274, got {bias_after_cooldown}"
+        assert f"Bias voor {self.TEST_TOKEN}/{self.TEST_STRATEGY} bijgewerkt naar {bias_after_cooldown:.3f}" in caplog.text
+
+
+
+# Imports for Backtester tests
+from core.backtester import Backtester #, TIMEFRAME_TO_SECONDS
+from core.bitvavo_executor import BitvavoExecutor # For mocking
+# ParamsManager, CNNPatterns are already imported
+from datetime import timezone # Already imported datetime, just need timezone
+
+@pytest.fixture
+def mock_backtester_dependencies():
+    """Provides mocked dependencies for Backtester."""
+    mock_params_manager = MagicMock(spec=ParamsManager)
+    mock_cnn_detector = MagicMock(spec=CNNPatterns)
+    mock_bitvavo_executor = MagicMock(spec=BitvavoExecutor)
+
+    # Setup default return values for ParamsManager global params
+    mock_params_manager.get_global_params.return_value = {
+        'perform_backtesting': True,
+        'backtest_start_date_str': "2023-01-01",
+        'backtest_entry_threshold': 0.7,
+        'backtest_take_profit_pct': 0.05,
+        'backtest_stop_loss_pct': 0.02,
+        'backtest_hold_duration_candles': 20,
+        'backtest_initial_capital': 1000.0,
+        'backtest_stake_pct_capital': 0.1
+    }
+    return mock_params_manager, mock_cnn_detector, mock_bitvavo_executor
+
+def create_mock_ohlcv_data(start_date_str: str, num_candles: int, timeframe: str) -> pd.DataFrame:
+    """Helper to create a Pandas DataFrame with mock OHLCV data."""
+    start_dt = datetime.strptime(start_date_str, "%Y-%m-%d").replace(tzinfo=timezone.utc)
+
+    # Use TIMEFRAME_TO_SECONDS from core.backtester or define a local version for tests
+    TIMEFRAME_TO_SECONDS_TEST = {
+        '1m': 60, '5m': 300, '15m': 900, '1h': 3600, '4h': 14400, '1d': 86400
+    }
+    interval_seconds = TIMEFRAME_TO_SECONDS_TEST.get(timeframe, 3600) # Default to 1h if not found
+
+    dates = [start_dt + timedelta(seconds=i * interval_seconds) for i in range(num_candles)]
+    data = {
+        'open': np.random.uniform(90, 110, num_candles),
+        'high': np.random.uniform(100, 120, num_candles),
+        'low': np.random.uniform(80, 100, num_candles),
+        'close': np.random.uniform(90, 110, num_candles),
+        'volume': np.random.uniform(1000, 5000, num_candles)
+    }
+    df = pd.DataFrame(data, index=pd.DatetimeIndex(dates, name='date'))
+    # Ensure high is max and low is min of open/close for realistic candles
+    df['high'] = df[['open', 'close']].max(axis=1) + np.random.uniform(0, 5, num_candles)
+    df['low'] = df[['open', 'close']].min(axis=1) - np.random.uniform(0, 5, num_candles)
+    df.attrs['pair'] = 'TEST/USDT'
+    df.attrs['timeframe'] = timeframe
+    return df
+
+class TestBacktester:
+    @pytest.mark.asyncio
+    async def test_run_backtest_scenario(self, mock_backtester_dependencies, caplog):
+        caplog.set_level(logging.INFO)
+        mock_params_manager, mock_cnn_detector, mock_bitvavo_executor = mock_backtester_dependencies
+
+        # 1. Configure mock BitvavoExecutor to return predefined OHLCV data
+        mock_ohlcv_df = create_mock_ohlcv_data("2023-01-01", 200, "1h") # 200 candles for 1h timeframe
+        # _fetch_backtest_data in Backtester uses fetch_ohlcv in a loop.
+        # For simplicity, we'll mock _fetch_backtest_data directly.
+        # If we wanted to test the looping logic in _fetch_backtest_data, we'd mock fetch_ohlcv on BitvavoExecutor.
+
+        # 2. Configure mock CNNPatterns
+        # Simulate a sequence of pattern scores. Let's make it simple: always above threshold for a few candles.
+        # predict_pattern_score is called with a DataFrame window.
+        # We need to ensure the mock can be called repeatedly.
+        # Let's make it return a high score for the first few calls, then lower.
+        pattern_scores_sequence = [0.8, 0.85, 0.75, 0.6, 0.5] # Example sequence
+        mock_cnn_detector.predict_pattern_score = MagicMock(side_effect=pattern_scores_sequence + [0.5] * 100) # Default to low score after sequence
+
+        # Instantiate Backtester with mocked dependencies
+        backtester = Backtester(
+            params_manager=mock_params_manager,
+            cnn_pattern_detector=mock_cnn_detector,
+            bitvavo_executor=mock_bitvavo_executor
+        )
+
+        # Patch _fetch_backtest_data to return our mock OHLCV data directly
+        # This avoids dealing with the complexities of mocking the paginated fetch_ohlcv calls.
+        with patch.object(backtester, '_fetch_backtest_data', AsyncMock(return_value=mock_ohlcv_df.copy())) as mock_fetch_data, \
+             patch.object(backtester, '_save_backtest_results', MagicMock()) as mock_save_results:
+
+            # Define backtest parameters
+            test_symbol = "TEST/USDT"
+            test_timeframe = "1h"
+            test_pattern_type = "test_pattern"
+            test_architecture_key = "test_arch"
+            test_sequence_length = 30 # Must be less than num_candles in mock_ohlcv_df - indicator period (e.g. 20 for BBANDS)
+
+            # Run the backtest
+            results = await backtester.run_backtest(
+                symbol=test_symbol,
+                timeframe=test_timeframe,
+                pattern_type=test_pattern_type,
+                architecture_key=test_architecture_key,
+                sequence_length=test_sequence_length
+            )
+
+            # Assertions
+            assert results is not None, "run_backtest should return results."
+            mock_fetch_data.assert_called_once_with(test_symbol, test_timeframe, "2023-01-01")
+
+            assert 'metrics' in results, "Results should contain 'metrics'."
+            assert 'trades' in results, "Results should contain 'trades'."
+            assert 'portfolio_history' in results, "Results should contain 'portfolio_history'."
+
+            # Example basic assertions on metrics (more detailed assertions require specific data crafting)
+            assert isinstance(results['metrics']['final_capital'], float)
+            assert isinstance(results['metrics']['total_return_pct'], float)
+            assert isinstance(results['metrics']['num_trades'], int)
+            assert isinstance(results['metrics']['win_rate_pct'], float)
+
+            # Based on pattern_scores_sequence [0.8, 0.85, 0.75, 0.6, 0.5] and entry_threshold 0.7
+            # We expect 3 entries if positions are closed before next signal.
+            # The exact number of trades depends on TP, SL, hold duration.
+            # For this initial test, let's check if at least one trade happened due to high scores.
+            if any(s >= mock_params_manager.get_global_params()['backtest_entry_threshold'] for s in pattern_scores_sequence):
+                 assert results['metrics']['num_trades'] > 0, "Expected at least one trade based on mock scores."
+            else:
+                 assert results['metrics']['num_trades'] == 0, "Expected no trades if all scores are below threshold."
+
+
+            mock_save_results.assert_called_once()
+            # We can also check the content passed to _save_backtest_results if needed.
+            # saved_data = mock_save_results.call_args[0][0]
+            # assert saved_data['symbol'] == test_symbol
+
+            # Check if _add_indicators was called (implicitly via run_backtest -> _fetch_backtest_data -> _add_indicators)
+            # This is harder to check directly without more patching of _add_indicators itself or checking logs.
+            # For now, we assume if data is processed and trades occur, indicators were likely involved.
+            assert "Backtest finished" in caplog.text
+            assert f"Initial Capital: {mock_params_manager.get_global_params()['backtest_initial_capital']:.2f}" in caplog.text
+
+
+
 # Imports for ExitOptimizer tests
 from core.exit_optimizer import ExitOptimizer
 # Most dependencies are already imported or can be patched via core.exit_optimizer.*
+
+# Imports for AIActivationEngine tests
+from core.ai_activation_engine import AIActivationEngine
+# ReflectieLus and CNNPatterns might be needed if not already imported or if specific mocks are used.
+# from core.reflectie_lus import ReflectieLus # Already imported by other tests or mocked
+# from core.cnn_patterns import CNNPatterns # Already imported by other tests or mocked
+import pandas as pd # Already imported
+import numpy as np # Already imported
+from datetime import datetime, timedelta # Already imported
+# import os # Already imported
+# import json # Already imported
+import logging # Already imported
+# import asyncio # Already imported
+# import sys # Already imported
+# from unittest.mock import patch, AsyncMock # Already imported
+
+# Helper function to create mock data for AIActivationEngine tests
+def create_mock_dataframe_for_ai_activation(timeframe: str = '5m', num_candles: int = 100) -> pd.DataFrame:
+    data = []
+    now = datetime.utcnow()
+    interval_seconds_map = {'1m': 60, '5m': 300, '15m': 900, '1h': 3600}
+    interval_seconds = interval_seconds_map.get(timeframe, 300)
+    for i in range(num_candles):
+        date = now - timedelta(seconds=(num_candles - 1 - i) * interval_seconds)
+        open_ = 100 + i * 0.01 + np.random.randn() * 0.1
+        close_ = open_ + np.random.randn() * 0.5
+        high_ = max(open_, close_) + np.random.rand() * 0.2
+        low_ = min(open_, close_) - np.random.rand() * 0.2
+        volume = 1000 + np.random.rand() * 2000
+        data.append([date, open_, high_, low_, close_, volume])
+    df = pd.DataFrame(data, columns=['date', 'open', 'high', 'low', 'close', 'volume'])
+    df['date'] = pd.to_datetime(df['date'])
+    df.set_index('date', inplace=True)
+    df.attrs['timeframe'] = timeframe
+    df.attrs['pair'] = 'ETH/USDT' # Example pair
+    return df
+
+# Mock classes for AIActivationEngine tests
+class MockReflectieLusForTest:
+    def __init__(self):
+        self.last_prompt_type = None
+        self.last_pattern_data = None
+        self.last_symbol = None
+        self.last_trade_context = None
+        self.call_count = 0
+
+    async def process_reflection_cycle(self, **kwargs):
+        self.call_count += 1
+        self.last_prompt_type = kwargs.get('prompt_type')
+        self.last_pattern_data = kwargs.get('pattern_data')
+        self.last_symbol = kwargs.get('symbol')
+        self.last_trade_context = kwargs.get('trade_context')
+        logging.info(f"MockReflectieLusForTest.process_reflection_cycle called for {self.last_symbol} with prompt_type {self.last_prompt_type}")
+        return {
+            "timestamp": datetime.now().isoformat(),
+            "token": self.last_symbol,
+            "strategyId": kwargs.get('strategy_id'),
+            "prompt_type": self.last_prompt_type,
+            "summary": "Mocked reflection cycle completed.",
+            "mode": kwargs.get('mode'),
+            "pattern_data_used": self.last_pattern_data is not None,
+            "received_trade_context": self.last_trade_context
+        }
+
+class MockBiasReflector:
+    def get_bias_score(self, token, strategy_id): return 0.65
+
+class MockConfidenceEngine:
+    def get_confidence_score(self, token, strategy_id): return 0.75
+
+class MockCNNPatternsForAIAE(CNNPatterns): # Extend the actual class or use a more specific mock
+    def __init__(self): # Add init if CNNPatterns has one that needs to be called or mocked
+        super().__init__() # Call parent __init__ if necessary
+        self.mock_pattern_keys = ["bullFlag", "bearFlag", "breakout", "rsiDivergence", "CDLDOJI", "doubleTop", "headAndShoulders"]
+
+    def get_all_detectable_pattern_keys(self) -> list:
+        return self.mock_pattern_keys
+
+    async def detect_patterns_multi_timeframe(self, candles_by_timeframe: dict, symbol: str) -> dict:
+        # Return a structure that activate_ai expects, including 'cnn_predictions' and 'context'
+        return {
+            "cnn_predictions": {
+                "5m_bullFlag_score": 0.8, # Example, make it configurable if needed for tests
+                "1h_bearFlag_score": 0.75
+            },
+            "patterns": {"detected_rule_pattern": True}, # Example
+            "context": {"volume_spike": True, "trend_strength": 0.6} # Example
+        }
+
+class MockPromptBuilderForAIAE: # Renamed to avoid conflict
+    async def generate_prompt_with_data(self, **kwargs):
+        logging.info(f"MockPromptBuilderForAIAE.generate_prompt_with_data called for {kwargs.get('symbol')}")
+        return f"Fallback mock prompt for {kwargs.get('symbol')} - {kwargs.get('prompt_type')}"
+
+
+@pytest.fixture
+def mock_reflectie_lus_instance():
+    return MockReflectieLusForTest()
+
+@pytest.fixture
+def ai_activation_engine_instance(mock_reflectie_lus_instance):
+    # engine = AIActivationEngine(reflectie_lus_instance=mock_reflectie_lus_instance)
+    # # We need to mock dependencies of AIActivationEngine's __init__ if they are complex
+    # # For now, assume PromptBuilder, GrokSentimentFetcher can be default or None for these tests,
+    # # or patch them globally if they cause issues.
+    with patch('core.ai_activation_engine.PromptBuilder', new_callable=MockPromptBuilderForAIAE) as mock_pb, \
+         patch('core.ai_activation_engine.GrokSentimentFetcher') as mock_gsf, \
+         patch.object(AIActivationEngine, 'cnn_patterns_detector', new_callable=MockCNNPatternsForAIAE) as mock_cnn_detector_attr:
+        # mock_cnn_detector_attr = MockCNNPatternsForAIAE() # This line should be removed as patch.object handles assignment
+        engine = AIActivationEngine(reflectie_lus_instance=mock_reflectie_lus_instance)
+        # If AIActivationEngine initializes its own CNNPatterns, we need to mock that specific instance or the class.
+        # The patch.object for 'cnn_patterns_detector' on the class should handle this.
+        # If GrokSentimentFetcher is initialized and fails without API keys, mock it to return a dummy.
+        mock_gsf.return_value.fetch_live_search_data = AsyncMock(return_value=[]) # Default no sentiment
+        return engine
+
+
+# --- Tests for AIActivationEngine ---
+
+@pytest.mark.asyncio
+async def test_activate_ai_entry_signal(ai_activation_engine_instance, mock_reflectie_lus_instance):
+    engine = ai_activation_engine_instance
+    test_token = "ETH/USDT"
+    test_strategy_id = "DUOAI_Strategy_Entry"
+    mock_candles_by_timeframe = {
+        '5m': create_mock_dataframe_for_ai_activation('5m', 60),
+        '1h': create_mock_dataframe_for_ai_activation('1h', 60)
+    }
+    entry_trade_context = {"signal_strength": 0.85, "some_other_entry_info": "test_value"}
+
+    # Mock _should_trigger_ai to ensure AI activates for this test
+    with patch.object(engine, '_should_trigger_ai', new_callable=AsyncMock, return_value=True):
+        entry_reflection = await engine.activate_ai(
+            trigger_type='entry_signal',
+            token=test_token,
+            candles_by_timeframe=mock_candles_by_timeframe,
+            strategy_id=test_strategy_id,
+            trade_context=entry_trade_context,
+            mode='dry_run', # Example mode
+            bias_reflector_instance=MockBiasReflector(),
+            confidence_engine_instance=MockConfidenceEngine()
+        )
+
+    assert entry_reflection is not None, "Entry signal reflection was not triggered or returned None."
+    assert mock_reflectie_lus_instance.last_prompt_type == 'entry_analysis', \
+        f"Incorrect prompt_type for entry_signal: {mock_reflectie_lus_instance.last_prompt_type}"
+    assert mock_reflectie_lus_instance.last_pattern_data is not None, "Pattern data not passed for entry_signal"
+    assert mock_reflectie_lus_instance.last_trade_context.get("signal_strength") == 0.85, "Trade context not passed correctly"
+
+@pytest.mark.asyncio
+async def test_activate_ai_trade_closed(ai_activation_engine_instance, mock_reflectie_lus_instance):
+    engine = ai_activation_engine_instance
+    test_token = "BTC/USDT"
+    test_strategy_id = "DUOAI_Strategy_Exit"
+    mock_candles_by_timeframe = {'15m': create_mock_dataframe_for_ai_activation('15m')}
+    closed_trade_context = {"entry_price": 2500, "exit_price": 2450, "profit_pct": -0.02, "trade_id": "t123"}
+
+    with patch.object(engine, '_should_trigger_ai', new_callable=AsyncMock, return_value=True):
+        exit_reflection = await engine.activate_ai(
+            trigger_type='trade_closed',
+            token=test_token,
+            candles_by_timeframe=mock_candles_by_timeframe,
+            strategy_id=test_strategy_id,
+            trade_context=closed_trade_context,
+            mode='live',
+            bias_reflector_instance=MockBiasReflector(),
+            confidence_engine_instance=MockConfidenceEngine()
+        )
+
+    assert exit_reflection is not None, "Trade closed reflection was not triggered."
+    assert mock_reflectie_lus_instance.last_prompt_type == 'post_trade_analysis', \
+        f"Incorrect prompt_type for trade_closed: {mock_reflectie_lus_instance.last_prompt_type}"
+    assert mock_reflectie_lus_instance.last_trade_context.get("trade_id") == "t123", "Trade context not passed correctly"
+
+@pytest.mark.asyncio
+async def test_activate_ai_cnn_pattern_detected(ai_activation_engine_instance, mock_reflectie_lus_instance):
+    engine = ai_activation_engine_instance
+    test_token = "ADA/USDT"
+    test_strategy_id = "CNN_Strategy"
+    mock_candles_by_timeframe = {'1h': create_mock_dataframe_for_ai_activation('1h')}
+    cnn_context = {"pattern_name": "bull_flag_1h", "confidence": 0.92}
+
+    with patch.object(engine, '_should_trigger_ai', new_callable=AsyncMock, return_value=True):
+        cnn_reflection = await engine.activate_ai(
+            trigger_type='cnn_pattern_detected',
+            token=test_token,
+            candles_by_timeframe=mock_candles_by_timeframe,
+            strategy_id=test_strategy_id,
+            trade_context=cnn_context,
+            mode='live',
+            bias_reflector_instance=MockBiasReflector(),
+            confidence_engine_instance=MockConfidenceEngine()
+        )
+    assert cnn_reflection is not None, "CNN pattern reflection was not triggered."
+    assert mock_reflectie_lus_instance.last_prompt_type == 'pattern_analysis', \
+        f"Incorrect prompt_type for cnn_pattern_detected: {mock_reflectie_lus_instance.last_prompt_type}"
+    assert mock_reflectie_lus_instance.last_trade_context.get("pattern_name") == "bull_flag_1h", "Trade context not passed correctly"
+
+
+@pytest.mark.asyncio
+async def test_activate_ai_unknown_trigger(ai_activation_engine_instance, mock_reflectie_lus_instance):
+    engine = ai_activation_engine_instance
+    test_token = "SOL/USDT"
+    test_strategy_id = "GeneralPurposeStrategy"
+    mock_candles_by_timeframe = {'5m': create_mock_dataframe_for_ai_activation('5m')}
+    unknown_context = {"detail": "some_random_event_for_general_analysis"}
+
+    with patch.object(engine, '_should_trigger_ai', new_callable=AsyncMock, return_value=True):
+        unknown_reflection = await engine.activate_ai(
+            trigger_type='unknown_signal',
+            token=test_token,
+            candles_by_timeframe=mock_candles_by_timeframe,
+            strategy_id=test_strategy_id,
+            trade_context=unknown_context,
+            mode='live',
+            bias_reflector_instance=MockBiasReflector(),
+            confidence_engine_instance=MockConfidenceEngine()
+        )
+    assert unknown_reflection is not None, "Unknown signal reflection was not triggered."
+    assert mock_reflectie_lus_instance.last_prompt_type == 'general_analysis', \
+        f"Incorrect prompt_type for unknown_signal: {mock_reflectie_lus_instance.last_prompt_type}"
+    assert mock_reflectie_lus_instance.last_trade_context.get("detail") == "some_random_event_for_general_analysis"
+
+@pytest.mark.asyncio
+async def test_pattern_score_val_calculation_in_activate_ai(ai_activation_engine_instance):
+    engine = ai_activation_engine_instance # Uses the fixture with MockCNNPatternsForAIAE
+
+    # Configure the mock CNN detector on the specific engine instance for this test if needed,
+    # or ensure the fixture's mock is adequate.
+    # The fixture uses MockCNNPatternsForAIAE which defines get_all_detectable_pattern_keys
+    # and detect_patterns_multi_timeframe.
+
+    # Example: Override specific mock behavior if necessary
+    class CustomMockCNNPatterns(MockCNNPatternsForAIAE):
+        def get_all_detectable_pattern_keys(self) -> list:
+            return ["bullFlag", "bearTrap", "futurePattern"] # 3 total possible
+
+        async def detect_patterns_multi_timeframe(self, candles_by_timeframe: dict, symbol: str) -> dict:
+            return {
+                "cnn_predictions": {
+                    "5m_bullFlag_score": 0.85,  # Detected (>= 0.7 threshold)
+                    "1h_bullFlag_score": 0.6,   # Not detected
+                    "5m_bearTrap_score": 0.5,   # Not detected
+                    "15m_nonCnnPattern_score": 0.9, # Not in get_all_detectable_pattern_keys
+                    "1h_futurePattern_score": 0.7 # Detected (>= 0.7 threshold)
+                }, "patterns": {}, "context": {}
+            }
+    engine.cnn_patterns_detector = CustomMockCNNPatterns() # Override the fixture's detector for this test
+    engine.CNN_DETECTION_THRESHOLD = 0.7 # Ensure threshold is known for the test
+
+    calculated_pattern_score = None
+    # Patch _should_trigger_ai to prevent full AI activation, and to capture trigger_data
+    with patch.object(engine, '_should_trigger_ai', new_callable=AsyncMock, return_value=False) as mock_should_trigger:
+        await engine.activate_ai(
+            trigger_type='test_pattern_score_trigger',
+            token='TEST/PATTERNSCORE',
+            candles_by_timeframe={}, # Mocked, not used by CustomMockCNNPatterns
+            strategy_id='test_pattern_score_strat',
+            bias_reflector_instance=MockBiasReflector(),
+            confidence_engine_instance=MockConfidenceEngine(),
+            mode='test'
+        )
+        assert mock_should_trigger.called, "_should_trigger_ai was not called"
+        trigger_data_arg = mock_should_trigger.call_args[0][0]
+        calculated_pattern_score = trigger_data_arg.get('patternScore')
+
+    assert calculated_pattern_score is not None, "patternScore was not found in trigger_data."
+    # Expected: bullFlag (1), futurePattern (1) = 2 detected. Total possible = 3. Score = 2/3.
+    expected_score = 2/3
+    assert abs(calculated_pattern_score - expected_score) < 0.001, \
+        f"Calculated pattern_score_val {calculated_pattern_score} does not match expected {expected_score}"
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "test_id, sentiment_return, trigger_data_input, expected_trigger_result, expected_log_part",
+    [
+        ("SentimentBoostsTrigger", [{"item": "data"}], # Grok returns sentiment
+         {"patternScore": 0.5, "volumeSpike": False, "learned_confidence": 0.3, "time_since_last_reflection": 0, "profit_metric": 0.0},
+         True, "Sentiment items found"), # Expected: score 1 (sentiment) + 2 (low conf) = 3. Threshold for conf 0.3 is 2. 3 >= 2 -> True
+
+        ("NoSentimentLowConfStillTriggers", [], # Grok returns no sentiment
+         {"patternScore": 0.5, "volumeSpike": False, "learned_confidence": 0.3, "time_since_last_reflection": 0, "profit_metric": 0.0},
+         True, "No sentiment items found"), # Expected: score 0 (no sentiment) + 2 (low conf) = 2. Threshold for conf 0.3 is 2. 2 >= 2 -> True
+
+        ("NoSentimentHighConfNoTrigger", [],
+         {"patternScore": 0.1, "volumeSpike": False, "learned_confidence": 0.8, "time_since_last_reflection": 0, "profit_metric": 0.0},
+         False, "No sentiment items found"), # Expected: score 0. Threshold for conf 0.8 is 3. 0 < 3 -> False
+
+        ("GrokFetcherNoneLowConfTriggers", None, # Grok fetcher itself is None
+         {"patternScore": 0.5, "volumeSpike": False, "learned_confidence": 0.3, "time_since_last_reflection": 0, "profit_metric": 0.0},
+         True, "GrokSentimentFetcher not available"), # Expected: score 0 (no sentiment) + 2 (low conf) = 2. Threshold for conf 0.3 is 2. 2 >= 2 -> True
+    ]
+)
+async def test_should_trigger_ai_logic_detailed(
+    ai_activation_engine_instance, caplog,
+    test_id, sentiment_return, trigger_data_input, expected_trigger_result, expected_log_part
+):
+    engine = ai_activation_engine_instance
+    caplog.set_level(logging.DEBUG) # Capture DEBUG logs from _should_trigger_ai
+
+    original_fetcher = engine.grok_sentiment_fetcher
+    if sentiment_return is None and original_fetcher is not None: # Scenario: GrokFetcher is None
+        engine.grok_sentiment_fetcher = None
+    elif original_fetcher is not None : # sentiment_return is list (empty or with data)
+        engine.grok_sentiment_fetcher.fetch_live_search_data = AsyncMock(return_value=sentiment_return)
+
+
+    result = await engine._should_trigger_ai(trigger_data_input, "TEST/TOKEN", "live")
+    assert result == expected_trigger_result, f"Test ID '{test_id}': Trigger result mismatch."
+    assert expected_log_part in caplog.text, f"Test ID '{test_id}': Expected log string '{expected_log_part}' not found."
+
+    engine.grok_sentiment_fetcher = original_fetcher # Restore fetcher
+
 
 def get_exit_optimizer_param_side_effect(scenario_params):
     """
@@ -1040,7 +2238,14 @@ async def test_exit_optimizer_should_exit(
     mock_prompt_builder_instance.generate_prompt_with_data.return_value = "Test exit prompt"
 
     # Instantiate ExitOptimizer
-    exit_optimizer = ExitOptimizer()
+    # Similar to EntryDecider, ensure __init__ dependencies are mocked if complex.
+    # ExitOptimizer initializes: ParamsManager, PromptBuilder, GPTReflector, GrokReflector, CNNPatterns.
+    with patch('core.exit_optimizer.ParamsManager', return_value=mock_params_manager_instance), \
+         patch('core.exit_optimizer.PromptBuilder', return_value=mock_prompt_builder_instance), \
+         patch('core.exit_optimizer.GPTReflector', return_value=mock_gpt_reflector_instance), \
+         patch('core.exit_optimizer.GrokReflector', return_value=mock_grok_reflector_instance), \
+         patch('core.exit_optimizer.CNNPatterns', return_value=mock_cnn_patterns_instance):
+        exit_optimizer = ExitOptimizer()
 
     # Prepare inputs for should_exit
     symbol = "ETH/USDT"
@@ -1084,6 +2289,181 @@ async def test_exit_optimizer_should_exit(
 # Imports for ExitOptimizer tests
 from core.exit_optimizer import ExitOptimizer
 # Most dependencies are already imported or can be patched via core.exit_optimizer.*
+
+# Imports for AIOptimizer tests
+import sqlite3
+from core.ai_optimizer import AIOptimizer, FREQTRADE_DB_PATH as AIO_FREQTRADE_DB_PATH # Import constant too
+from core.strategy_manager import StrategyManager # For AIOptimizer dependency
+from core.pre_trainer import PreTrainer # For AIOptimizer dependency
+# reflectie_analyser functions are used by AIOptimizer, will need mocking or direct import if used.
+# from core.reflectie_analyser import analyse_reflecties, generate_mutation_proposal, analyze_timeframe_bias
+
+
+# Path for the dummy reflection log, matching what AIOptimizer's __main__ used
+TEST_REFLECTION_LOG_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'memory', 'test_reflectie-logboek.json')
+
+
+@pytest.fixture
+def dummy_freqtrade_db_and_reflection_log(tmp_path):
+    """
+    Sets up a dummy Freqtrade SQLite database with test trades and a mock reflection log.
+    Yields the path to the dummy database and cleans it up afterwards.
+    The reflection log is also cleaned up.
+    """
+    # Use tmp_path for the dummy database to ensure isolation between test runs
+    dummy_db_path = tmp_path / "test_freqtrade.sqlite"
+
+    conn_test = sqlite3.connect(dummy_db_path)
+    cursor = conn_test.cursor()
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS trades (
+            id INTEGER PRIMARY KEY,
+            pair TEXT NOT NULL,
+            strategy TEXT NOT NULL,
+            profit_abs REAL,
+            profit_pct REAL,
+            is_open INTEGER,
+            open_date TIMESTAMP,
+            close_date TIMESTAMP
+        );
+    """)
+    dummy_trades_data = [
+        (1, "ETH/USDT", "DUOAI_Strategy", 10.0, 0.05, 0, datetime(2024,1,1).isoformat(), datetime(2024,1,2).isoformat()),
+        (2, "ETH/USDT", "DUOAI_Strategy", -5.0, -0.025, 0, datetime(2024,1,3).isoformat(), datetime(2024,1,4).isoformat()),
+        (3, "ETH/USDT", "DUOAI_Strategy", 8.0, 0.04, 0, datetime(2024,1,5).isoformat(), datetime(2024,1,6).isoformat()),
+        (4, "BTC/USDT", "Another_Strategy", 20.0, 0.03, 0, datetime(2024,1,1).isoformat(), datetime(2024,1,2).isoformat()),
+        (5, "ZEN/USDT", "DUOAI_Strategy", 15.0, 0.06, 0, (datetime.now() - timedelta(days=10)).isoformat(), (datetime.now() - timedelta(days=9)).isoformat()),
+        (6, "ZEN/USDT", "DUOAI_Strategy", 2.0, 0.01, 0, (datetime.now() - timedelta(days=5)).isoformat(), (datetime.now() - timedelta(days=4)).isoformat()),
+        (8, "ZEN/USDT", "DUOAI_Strategy", 10.0, 0.05, 0, (datetime.now() - timedelta(days=12)).isoformat(), (datetime.now() - timedelta(days=11)).isoformat()),
+        (9, "ZEN/USDT", "DUOAI_Strategy", 12.0, 0.04, 0, (datetime.now() - timedelta(days=8)).isoformat(), (datetime.now() - timedelta(days=7)).isoformat()),
+        (10, "ZEN/USDT", "DUOAI_Strategy", 9.0, 0.03, 0, (datetime.now() - timedelta(days=3)).isoformat(), (datetime.now() - timedelta(days=2)).isoformat()),
+        (7, "LSK/BTC", "DUOAI_Strategy", 5.0, 0.02, 0, (datetime.now() - timedelta(days=2)).isoformat(), (datetime.now() - timedelta(days=1)).isoformat()),
+        (11, "ADA/USDT", "DUOAI_Strategy", 5.0, 0.010, 0, (datetime.now() - timedelta(days=15)).isoformat(), (datetime.now() - timedelta(days=14)).isoformat()),
+        (12, "ADA/USDT", "DUOAI_Strategy", 6.0, 0.012, 0, (datetime.now() - timedelta(days=13)).isoformat(), (datetime.now() - timedelta(days=12)).isoformat()),
+        (13, "ADA/USDT", "DUOAI_Strategy", -2.0, -0.004, 0, (datetime.now() - timedelta(days=11)).isoformat(), (datetime.now() - timedelta(days=10)).isoformat()),
+        (14, "ADA/USDT", "DUOAI_Strategy", 8.0, 0.015, 0, (datetime.now() - timedelta(days=9)).isoformat(), (datetime.now() - timedelta(days=8)).isoformat()),
+        (15, "ADA/USDT", "DUOAI_Strategy", 7.0, 0.013, 0, (datetime.now() - timedelta(days=7)).isoformat(), (datetime.now() - timedelta(days=6)).isoformat())
+    ]
+    cursor.executemany("INSERT OR IGNORE INTO trades (id, pair, strategy, profit_abs, profit_pct, is_open, open_date, close_date) VALUES (?,?,?,?,?,?,?,?)", dummy_trades_data)
+    conn_test.commit()
+    conn_test.close()
+
+    # Mock reflectie logboek
+    mock_log_data = [
+        {"token": "ETH/USDT", "strategyId": "DUOAI_Strategy", "combined_confidence": 0.8, "combined_bias_reported": 0.7,
+         "current_learned_bias": 0.6, "current_learned_confidence": 0.7,
+         "trade_context": {"timeframe": "1h", "profit_pct": 0.02}, "timestamp": "2025-06-11T10:00:00Z"},
+    ]
+    os.makedirs(os.path.dirname(TEST_REFLECTION_LOG_FILE), exist_ok=True)
+    with open(TEST_REFLECTION_LOG_FILE, 'w', encoding='utf-8') as f:
+        json.dump(mock_log_data, f, indent=2)
+
+    # Patch the FREQTRADE_DB_PATH constant in ai_optimizer module to use the dummy DB
+    with patch('core.ai_optimizer.FREQTRADE_DB_PATH', str(dummy_db_path)):
+        yield str(dummy_db_path), TEST_REFLECTION_LOG_FILE # Provide paths to the test
+
+    # Cleanup: The dummy_db_path in tmp_path is auto-cleaned by pytest.
+    # We need to explicitly remove the reflection log file if it's not in tmp_path.
+    if os.path.exists(TEST_REFLECTION_LOG_FILE):
+        os.remove(TEST_REFLECTION_LOG_FILE)
+
+
+class TestAIOptimizer:
+    @pytest.mark.asyncio
+    async def test_ai_optimizer_periodic_optimization(self, dummy_freqtrade_db_and_reflection_log, caplog):
+        caplog.set_level(logging.INFO)
+        dummy_db_path, mock_reflection_log_path = dummy_freqtrade_db_and_reflection_log
+
+        # Mock dependencies of AIOptimizer.
+        # PreTrainer and StrategyManager are instantiated in AIOptimizer's __init__.
+        # reflectie_analyser functions are called by run_periodic_optimization.
+
+        mock_pre_trainer_instance = MagicMock(spec=PreTrainer)
+        mock_pre_trainer_instance.run_pretraining_pipeline = AsyncMock()
+
+        mock_strategy_manager_instance = MagicMock(spec=StrategyManager)
+        mock_strategy_manager_instance.get_strategy_performance = MagicMock(return_value={"trades": 10, "profit_sum_pct": 0.5})
+        mock_strategy_manager_instance.mutate_strategy = AsyncMock(return_value=True)
+        # Mock ParamsManager instance that is an attribute of StrategyManager
+        mock_params_manager_for_strat_manager = MagicMock(spec=ParamsManager)
+        mock_params_manager_for_strat_manager.get_param = AsyncMock(side_effect=lambda key, strategy_id=None, default=None: default if default is not None else (5 if key == "preferredPairsCount" else ({} if key == "strategies" else [])))
+        mock_params_manager_for_strat_manager.set_param = AsyncMock()
+        mock_strategy_manager_instance.params_manager = mock_params_manager_for_strat_manager
+
+
+        # Mock the external analysis functions
+        mock_analyse_reflecties = MagicMock(return_value={"insight": "test_insight"})
+        mock_generate_mutation_proposal = MagicMock(return_value={"param_change": "test_change"})
+        mock_analyze_timeframe_bias = MagicMock(return_value=0.55) # Example bias score
+
+        with patch('core.ai_optimizer.PreTrainer', return_value=mock_pre_trainer_instance) as mock_pre_trainer_class, \
+             patch('core.ai_optimizer.StrategyManager', return_value=mock_strategy_manager_instance) as mock_strategy_manager_class, \
+             patch('core.ai_optimizer.analyse_reflecties', mock_analyse_reflecties) as mock_analyse_reflecties_func, \
+             patch('core.ai_optimizer.generate_mutation_proposal', mock_generate_mutation_proposal) as mock_generate_mutation_proposal_func, \
+             patch('core.ai_optimizer.analyze_timeframe_bias', mock_analyze_timeframe_bias) as mock_analyze_timeframe_bias_func, \
+             patch('core.reflectie_analyser.REFLECTION_LOG_FILE', mock_reflection_log_path): # Ensure analyse_reflecties uses the mock log
+
+            optimizer = AIOptimizer() # Now uses mocked PreTrainer and StrategyManager
+
+            test_symbols = ["ETH/USDT", "ZEN/USDT", "LSK/BTC", "ADA/USDT"]
+            test_timeframes = ["1h"]
+
+            logging.info("--- Test AIOptimizer: run_periodic_optimization (Default preferredPairsCount=5) ---")
+            # Ensure default is used first by resetting get_param side_effect for preferredPairsCount specifically
+            async def params_get_side_effect_default(key, strategy_id=None, default=None):
+                if key == "preferredPairsCount": return 5 # Default for this run
+                if key == "strategies": return {}
+                if key == "preferredPairs": return []
+                return default
+            mock_params_manager_for_strat_manager.get_param.side_effect = params_get_side_effect_default
+
+            await optimizer.run_periodic_optimization(test_symbols, test_timeframes)
+
+            # Assertions for default run
+            # Check preferredPairs after optimization
+            # The actual call to set_param for preferredPairs is what we need to check
+            set_param_calls = mock_params_manager_for_strat_manager.set_param.call_args_list
+            preferred_pairs_call = next((c for c in set_param_calls if c.args[0] == "preferredPairs"), None)
+            assert preferred_pairs_call is not None, "set_param was not called for 'preferredPairs'"
+
+            preferred_pairs_after_opt_default = preferred_pairs_call.args[1]
+            logging.info(f"Geleerde preferredPairs na optimalisatie (Default Count): {preferred_pairs_after_opt_default}")
+            assert len(preferred_pairs_after_opt_default) <= 5
+            assert "ZEN/USDT" in preferred_pairs_after_opt_default
+            assert "ADA/USDT" in preferred_pairs_after_opt_default
+            # Verify that mutation proposal was called for each symbol/timeframe pair
+            assert mock_generate_mutation_proposal_func.call_count == len(test_symbols) * len(test_timeframes)
+            # Verify strategy was mutated (or attempted)
+            assert mock_strategy_manager_instance.mutate_strategy.call_count == len(test_symbols) * len(test_timeframes)
+
+
+            logging.info("--- Test AIOptimizer: run_periodic_optimization (Custom preferredPairsCount=1) ---")
+            # Reset mocks for the second run if necessary (e.g., call counts)
+            mock_params_manager_for_strat_manager.reset_mock() # Resets set_param calls and get_param side_effect
+            mock_generate_mutation_proposal_func.reset_mock()
+            mock_strategy_manager_instance.mutate_strategy.reset_mock()
+
+            async def params_get_side_effect_custom(key, strategy_id=None, default=None):
+                if key == "preferredPairsCount": return 1 # Custom for this run
+                if key == "strategies": return {}
+                if key == "preferredPairs": return []
+                return default
+            mock_params_manager_for_strat_manager.get_param.side_effect = params_get_side_effect_custom
+
+            await optimizer.run_periodic_optimization(test_symbols, test_timeframes)
+
+            # Assertions for custom run
+            set_param_calls_custom = mock_params_manager_for_strat_manager.set_param.call_args_list
+            preferred_pairs_call_custom = next((c for c in set_param_calls_custom if c.args[0] == "preferredPairs"), None)
+            assert preferred_pairs_call_custom is not None, "set_param was not called for 'preferredPairs' in custom run"
+
+            preferred_pairs_after_opt_custom = preferred_pairs_call_custom.args[1]
+            logging.info(f"Geleerde preferredPairs na optimalisatie (Custom Count=1): {preferred_pairs_after_opt_custom}")
+            assert len(preferred_pairs_after_opt_custom) == 1
+            assert "ZEN/USDT" in preferred_pairs_after_opt_custom
+
+            assert "Periodic optimization cycle finished." in caplog.text
+
 
 def get_exit_optimizer_param_side_effect(scenario_params):
     """

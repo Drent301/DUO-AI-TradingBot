@@ -7,6 +7,8 @@ from datetime import datetime, timedelta # Added timedelta
 from typing import List, Dict, Any, Optional
 import pandas as pd # Added pandas
 import sqlite3 # Added sqlite3
+# import dotenv # No longer needed as __main__ is removed
+# import sys # No longer needed as __main__ is removed
 
 # Attempt to import necessary components from other core modules
 try:
@@ -210,119 +212,3 @@ class AIOptimizer:
         await self._learn_preferred_pairs() # Added call
         logger.info("Periodic optimization cycle finished.") # Ensure this is the final log msg as per instr.
         self._log_optimization_activity("cycle_end", {})
-
-
-if __name__ == "__main__":
-    import dotenv
-    import sys
-    # Note: pandas, sqlite3, datetime, timedelta should be imported at the top of the file.
-    # Ensure these are covered by step 1.
-
-    logging.basicConfig(level=logging.INFO,
-                        format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-                        handlers=[logging.StreamHandler(sys.stdout)])
-    dotenv_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '.env')
-    dotenv.load_dotenv(dotenv_path)
-
-    # Setup a dummy Freqtrade database with some trades for testing
-    # FREQTRADE_DB_PATH is now a global constant
-    if not os.path.exists(FREQTRADE_DB_PATH):
-        print(f"Waarschuwing: Freqtrade database {FREQTRADE_DB_PATH} niet gevonden. Maak een dummy DB aan.")
-        conn_test = sqlite3.connect(FREQTRADE_DB_PATH)
-        cursor = conn_test.cursor()
-        cursor.execute("""
-            CREATE TABLE IF NOT EXISTS trades (
-                id INTEGER PRIMARY KEY,
-                pair TEXT NOT NULL,
-                strategy TEXT NOT NULL,
-                profit_abs REAL,
-                profit_pct REAL,
-                is_open INTEGER,
-                open_date TIMESTAMP,
-                close_date TIMESTAMP
-            );
-        """)
-        dummy_trades_data = [
-            # Original ETH trades (likely not recent enough or not DUOAI_Strategy)
-            (1, "ETH/USDT", "DUOAI_Strategy", 10.0, 0.05, 0, datetime(2024,1,1).isoformat(), datetime(2024,1,2).isoformat()),
-            (2, "ETH/USDT", "DUOAI_Strategy", -5.0, -0.025, 0, datetime(2024,1,3).isoformat(), datetime(2024,1,4).isoformat()),
-            (3, "ETH/USDT", "DUOAI_Strategy", 8.0, 0.04, 0, datetime(2024,1,5).isoformat(), datetime(2024,1,6).isoformat()),
-            # Original BTC trade (wrong strategy for preferredPairs logic if it filters by strategy, also not recent)
-            (4, "BTC/USDT", "Another_Strategy", 20.0, 0.03, 0, datetime(2024,1,1).isoformat(), datetime(2024,1,2).isoformat()),
-
-            # ZEN/USDT trades (target: 5 recent trades for "DUOAI_Strategy")
-            # Original recent ZEN trades:
-            (5, "ZEN/USDT", "DUOAI_Strategy", 15.0, 0.06, 0, (datetime.now() - timedelta(days=10)).isoformat(), (datetime.now() - timedelta(days=9)).isoformat()), # profit_pct = 0.06
-            (6, "ZEN/USDT", "DUOAI_Strategy", 2.0, 0.01, 0, (datetime.now() - timedelta(days=5)).isoformat(), (datetime.now() - timedelta(days=4)).isoformat()),  # profit_pct = 0.01
-            # Added ZEN trades to meet count >= 5 and ensure it's preferred:
-            (8, "ZEN/USDT", "DUOAI_Strategy", 10.0, 0.05, 0, (datetime.now() - timedelta(days=12)).isoformat(), (datetime.now() - timedelta(days=11)).isoformat()), # profit_pct = 0.05
-            (9, "ZEN/USDT", "DUOAI_Strategy", 12.0, 0.04, 0, (datetime.now() - timedelta(days=8)).isoformat(), (datetime.now() - timedelta(days=7)).isoformat()),  # profit_pct = 0.04
-            (10, "ZEN/USDT", "DUOAI_Strategy", 9.0, 0.03, 0, (datetime.now() - timedelta(days=3)).isoformat(), (datetime.now() - timedelta(days=2)).isoformat()),   # profit_pct = 0.03
-
-            # LSK/BTC trade (original, 1 recent trade for DUOAI_Strategy, won't meet count >= 5)
-            (7, "LSK/BTC", "DUOAI_Strategy", 5.0, 0.02, 0, (datetime.now() - timedelta(days=2)).isoformat(), (datetime.now() - timedelta(days=1)).isoformat()), # profit_pct = 0.02
-
-            # ADA/USDT trades (target: 5 recent trades for "DUOAI_Strategy", with lower avg profit than ZEN)
-            (11, "ADA/USDT", "DUOAI_Strategy", 5.0, 0.010, 0, (datetime.now() - timedelta(days=15)).isoformat(), (datetime.now() - timedelta(days=14)).isoformat()), # profit_pct = 0.010
-            (12, "ADA/USDT", "DUOAI_Strategy", 6.0, 0.012, 0, (datetime.now() - timedelta(days=13)).isoformat(), (datetime.now() - timedelta(days=12)).isoformat()), # profit_pct = 0.012
-            (13, "ADA/USDT", "DUOAI_Strategy", -2.0, -0.004, 0, (datetime.now() - timedelta(days=11)).isoformat(), (datetime.now() - timedelta(days=10)).isoformat()),# profit_pct = -0.004
-            (14, "ADA/USDT", "DUOAI_Strategy", 8.0, 0.015, 0, (datetime.now() - timedelta(days=9)).isoformat(), (datetime.now() - timedelta(days=8)).isoformat()),  # profit_pct = 0.015
-            (15, "ADA/USDT", "DUOAI_Strategy", 7.0, 0.013, 0, (datetime.now() - timedelta(days=7)).isoformat(), (datetime.now() - timedelta(days=6)).isoformat())   # profit_pct = 0.013
-        ]
-        cursor.executemany("INSERT OR IGNORE INTO trades (id, pair, strategy, profit_abs, profit_pct, is_open, open_date, close_date) VALUES (?,?,?,?,?,?,?,?)", dummy_trades_data)
-        conn_test.commit()
-        conn_test.close()
-        print(f"Dummy database met trades aangemaakt in {FREQTRADE_DB_PATH}")
-
-    # Mock reflectie logboek voor testdoeleinden
-    mock_log_data = [
-        {"token": "ETH/USDT", "strategyId": "DUOAI_Strategy", "combined_confidence": 0.8, "combined_bias_reported": 0.7,
-         "current_learned_bias": 0.6, "current_learned_confidence": 0.7,
-         "trade_context": {"timeframe": "1h", "profit_pct": 0.02}, "timestamp": "2025-06-11T10:00:00Z"},
-        {"token": "ETH/USDT", "strategyId": "DUOAI_Strategy", "combined_confidence": 0.6, "combined_bias_reported": 0.4,
-         "current_learned_bias": 0.65, "current_learned_confidence": 0.75,
-         "trade_context": {"timeframe": "1h", "profit_pct": -0.01}, "timestamp": "2025-06-11T11:00:00Z"},
-        {"token": "ETH/USDT", "strategyId": "DUOAI_Strategy", "combined_confidence": 0.9, "combined_bias_reported": 0.8,
-         "current_learned_bias": 0.7, "current_learned_confidence": 0.8,
-         "trade_context": {"timeframe": "1h", "profit_pct": 0.04}, "timestamp": "2025-06-11T12:00:00Z"},
-    ]
-    # Path for reflectie-logboek.json from issue's AIOptimizer code
-    reflectie_log_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'memory', 'reflectie-logboek.json')
-    os.makedirs(os.path.dirname(reflectie_log_path), exist_ok=True)
-    with open(reflectie_log_path, 'w', encoding='utf-8') as f:
-        json.dump(mock_log_data, f, indent=2)
-    print(f"Mock reflectie logboek aangemaakt op: {reflectie_log_path}")
-
-    async def run_test_ai_optimizer():
-        optimizer = AIOptimizer()
-
-        test_symbols = ["ETH/USDT", "ZEN/USDT", "LSK/BTC", "ADA/USDT"] # Added ADA
-        test_timeframes = ["1h"]
-
-        print("\n--- Test AIOptimizer: run_periodic_optimization (Default preferredPairsCount=5) ---")
-        # Ensure default is used first if not set
-        await optimizer.strategy_manager.params_manager.set_param("preferredPairsCount", None) # Clear to ensure default is tested
-        await optimizer.run_periodic_optimization(test_symbols, test_timeframes)
-
-        preferred_pairs_after_opt_default = await optimizer.strategy_manager.params_manager.get_param("preferredPairs")
-        print(f"Geleerde preferredPairs na optimalisatie (Default Count): {preferred_pairs_after_opt_default}")
-        assert len(preferred_pairs_after_opt_default) <= 5
-        # Based on dummy data: ZEN (avg profit ~0.038), ADA (avg profit ~0.0092), ETH (no recent DUOAI), LSK (1 trade)
-        # Expected default top 2: ZEN/USDT, ADA/USDT (if LSK is filtered by count)
-        assert "ZEN/USDT" in preferred_pairs_after_opt_default
-        assert "ADA/USDT" in preferred_pairs_after_opt_default
-
-
-        print("\n--- Test AIOptimizer: run_periodic_optimization (Custom preferredPairsCount=1) ---")
-        await optimizer.strategy_manager.params_manager.set_param("preferredPairsCount", 1)
-        await optimizer.run_periodic_optimization(test_symbols, test_timeframes) # Rerun learning part
-
-        preferred_pairs_after_opt_custom = await optimizer.strategy_manager.params_manager.get_param("preferredPairs")
-        print(f"Geleerde preferredPairs na optimalisatie (Custom Count=1): {preferred_pairs_after_opt_custom}")
-        assert len(preferred_pairs_after_opt_custom) == 1
-        assert "ZEN/USDT" in preferred_pairs_after_opt_custom # ZEN has highest avg profit in dummy data
-
-        print("\nOptimalisatiecyclus voltooid. Controleer de logs en memory-bestanden.")
-
-
-    asyncio.run(run_test_ai_optimizer())
