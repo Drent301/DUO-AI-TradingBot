@@ -14,6 +14,9 @@ logger.setLevel(logging.INFO)
 
 GROK_API_KEY = os.getenv('GROK_API_KEY')
 GROK_MODEL = os.getenv('GROK_MODEL', 'grok-1')
+# Note: For 'live data feat' (e.g., real-time social media feed analysis via GrokSentimentFetcher),
+# GROK_MODEL should be set to 'grok-3' in the .env file.
+# This feature relies on Grok 3's advanced capabilities for processing live data.
 # Corrected ENDPOINT definition to remove markdown link
 ENDPOINT = os.getenv('GROK_API_URL', 'https://api.x.ai/v1/chat/completions') # Voorbeeldendpoint
 
