@@ -202,7 +202,7 @@ class AIActivationEngine:
 
         trigger_data = {
             "patternScore": pattern_score_val,
-            "volumeSpike": pattern_data.get('context', {}).get('volume_spike', False),
+            "volumeSpike": pattern_data.get('context', {}).get('volume_spike', False) if pattern_data else False,
             "learned_confidence": learned_confidence,
             "time_since_last_reflection": self._get_time_since_last_reflection(token),
             "profit_metric": trade_context.get('profit_pct', 0.0) if trade_context else 0.0
