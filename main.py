@@ -2,6 +2,7 @@
 import os
 import sys
 from pathlib import Path
+from freqtrade.main import main as freqtrade_main
 import logging
 import dotenv
 
@@ -29,6 +30,27 @@ def main():
     logger.info("Welkom bij de DUO-AI Trading Bot!")
     logger.info("Dit is de start van je zelflerende trading systeem.")
 
+    # Stel de command line arguments in voor Freqtrade
+    sys.argv = [
+        "freqtrade",
+        "trade",
+        "--config", "config/config.json",
+        "--strategy", "DUOAI_Strategy"
+    ]
+
+    logger.info(f"Freqtrade starten met argumenten: {' '.join(sys.argv)}")
+
+    # Roep Freqtrade's main functie aan
+    try:
+        freqtrade_main()
+    except SystemExit as e:
+        logger.info(f"Freqtrade afgesloten met status: {e.code}")
+        raise  # Her-raise de SystemExit exceptie
+    except Exception as e:
+        logger.error(f"Fout tijdens het uitvoeren van Freqtrade: {e}", exc_info=True)
+        sys.exit(1)  # Sluit af met een error code
+
+
     # Voorbeeld van hoe je Freqtrade kunt aanroepen via de command line interface
     # Dit zal later worden geïntegreerd in de reflectiecyclus of handmatig via terminal
     # Voor testen:
@@ -37,10 +59,10 @@ def main():
     # # Je zou subprocess.run(command) kunnen gebruiken, maar voor nu leggen we het hier uit
     # # De gebruiker zal dit commando handmatig uitvoeren via de terminal.
 
-    logger.info("\nGebruik 'freqtrade' commando's voor backtesting en live trading na configuratie.")
-    logger.info("Voorbeeld Backtest: freqtrade backtesting --strategy DUOAI_Strategy -c config/config.json")
-    logger.info("Voorbeeld Dry-Run: freqtrade trade --config config/config.json --strategy DUOAI_Strategy")
-    logger.info("Zorg ervoor dat je virtual environment geactiveerd is en Freqtrade geïnstalleerd is.")
+    # logger.info("\nGebruik 'freqtrade' commando's voor backtesting en live trading na configuratie.")
+    # logger.info("Voorbeeld Backtest: freqtrade backtesting --strategy DUOAI_Strategy -c config/config.json")
+    # logger.info("Voorbeeld Dry-Run: freqtrade trade --config config/config.json --strategy DUOAI_Strategy")
+    # logger.info("Zorg ervoor dat je virtual environment geactiveerd is en Freqtrade geïnstalleerd is.")
 
     # Hieronder komen de AI-coördinatie-logica die periodiek wordt aangeroepen
     # door een scheduler, of getriggerd door Freqtrade events.
