@@ -1,5 +1,7 @@
 import asyncio
 import logging
+import json
+import pandas as pd
 
 logger = logging.getLogger(__name__)
 
@@ -21,6 +23,7 @@ class PromptBuilder:
         Generates a detailed prompt for AI analysis based on provided market data and context.
         """
         final_prompt_parts = []
+        all_timeframe_indicators = {}
 
         # Common header
         final_prompt_parts.append(f"Symbol: {symbol}")
@@ -64,6 +67,32 @@ class PromptBuilder:
             else:
                 final_prompt_parts.append(f"\n--- Timeframe: {tf} --- (No data provided)")
 
+        # Technical Indicators Section
+        primary_indicators = [
+            'rsi', 'macd', 'macdsignal', 'macdhist',
+            'bb_lowerband', 'bb_middleband', 'bb_upperband',
+            'ema_short', 'ema_long'
+        ]
+        for tf, df in candles_by_timeframe.items():
+            if not df.empty:
+                latest_row = df.iloc[-1]
+                indicators_for_tf = {}
+                for indicator_col in primary_indicators:
+                    if indicator_col in df.columns and pd.notna(latest_row[indicator_col]):
+                        indicators_for_tf[indicator_col] = latest_row[indicator_col]
+
+                # Handle indicators with variable names like 'volume_mean_20'
+                for col_name in df.columns:
+                    if col_name.startswith('volume_mean') and pd.notna(latest_row[col_name]):
+                        indicators_for_tf[col_name] = latest_row[col_name]
+
+                if indicators_for_tf:
+                    all_timeframe_indicators[tf] = indicators_for_tf
+
+        if all_timeframe_indicators:
+            final_prompt_parts.append("\nLatest Technical Indicators:")
+            final_prompt_parts.append(json.dumps(all_timeframe_indicators, indent=2, default=str))
+
 
         final_prompt = "\n".join(final_prompt_parts)
         # logger.debug(f"Generated prompt for type '{prompt_type}' for {symbol}:\n{final_prompt}")
@@ -77,17 +106,54 @@ async def test_prompt_builder():
         '1h': object()  # In a real test, this would be a DataFrame
     }
     # Simulate DataFrames for to_string()
-    import pandas as pd
+    # import pandas as pd # Already imported at the top
     mock_candles['5m'] = pd.DataFrame({
-        'open': [10, 11, 12, 11.5, 12.5], 'high': [10.5, 11.5, 12.5, 12, 13],
-        'low': [9.5, 10.5, 11.5, 11, 12], 'close': [11, 12, 11.5, 12.5, 12],
-        'volume': [100, 120, 110, 130, 90]
+        'open': [10, 11, 12, 11.5, 12.5],
+        'high': [10.5, 11.5, 12.5, 12, 13],
+        'low': [9.5, 10.5, 11.5, 11, 12],
+        'close': [11, 12, 11.5, 12.5, 12.8], # Last close 12.8
+        'volume': [100, 120, 110, 130, 90],
+        'rsi': [50, 55, 60, 58, 62.1],
+        'macd': [0.1, 0.12, 0.15, 0.13, 0.16],
+        'macdsignal': [0.09, 0.1, 0.11, 0.12, 0.13],
+        'macdhist': [0.01, 0.02, 0.04, 0.01, 0.03],
+        'bb_lowerband': [9, 10, 11, 10.5, 11.5],
+        'bb_middleband': [10, 11, 12, 11.5, 12.5],
+        'bb_upperband': [11, 12, 13, 12.5, 13.5],
+        'ema_short': [10.8, 11.2, 11.8, 11.6, 12.2],
+        'ema_long': [10.5, 10.8, 11.1, 11.3, 11.7],
+        'volume_mean_10': [110, 115, 112, 118, 110.5] # Last value 110.5
     })
-    mock_candles['1h'] = pd.DataFrame()
+    # Add data for 1h timeframe as well
+    mock_candles['1h'] = pd.DataFrame({
+        'open': [1200, 1210, 1205],
+        'high': [1250, 1220, 1215],
+        'low': [1190, 1200, 1200],
+        'close': [1210, 1205, 1212.7], # Last close 1212.7
+        'volume': [1000, 1200, 1100],
+        'rsi': [60.3, 55.2, 58.9],
+        'ema_short': [1208, 1206, 1209.5],
+        # This one intentionally has fewer indicators
+    })
 
 
     prompt_ma = await builder.generate_prompt_with_data(mock_candles, "BTC/USDT", "marketAnalysis")
     logger.info(f"--- Market Analysis Prompt ---\n{prompt_ma}\n")
+
+    # Assertions for the new technical indicators section
+    assert "Latest Technical Indicators:" in prompt_ma, "Missing 'Latest Technical Indicators:' section title"
+    assert '"5m": {' in prompt_ma, "Missing '5m' timeframe key in JSON"
+    assert '"1h": {' in prompt_ma, "Missing '1h' timeframe key in JSON"
+    assert '"rsi": 62.1' in prompt_ma, "Missing/incorrect rsi for 5m"
+    assert '"macd": 0.16' in prompt_ma, "Missing/incorrect macd for 5m"
+    assert '"volume_mean_10": 110.5' in prompt_ma, "Missing/incorrect volume_mean_10 for 5m"
+    assert '"close": 12.8' not in prompt_ma, "OHLC data should not be in the JSON indicator block"
+    assert '"rsi": 58.9' in prompt_ma, "Missing/incorrect rsi for 1h"
+    assert '"ema_short": 1209.5' in prompt_ma, "Missing/incorrect ema_short for 1h"
+    assert '"macd":' not in prompt_ma.split('"1h": {')[1], "MACD should not be in 1h data as it was not provided"
+
+
+    logger.info("Assertions for Market Analysis prompt passed.")
 
     prompt_rm = await builder.generate_prompt_with_data(
         mock_candles, "ETH/USDT", "riskManagement",
