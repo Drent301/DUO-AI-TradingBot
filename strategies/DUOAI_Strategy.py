@@ -170,6 +170,7 @@ class DUOAI_Strategy(IStrategy):
         dataframe['bb_lowerband'] = bollinger['lower']
         dataframe['bb_middleband'] = bollinger['mid']
         dataframe['bb_upperband'] = bollinger['upper']
+        dataframe['ema_20'] = ta.EMA(dataframe, timeperiod=20)
         dataframe['volume_mean_20'] = dataframe['volume'].rolling(20).mean()
 
         # --- Merge informative timeframes into the main dataframe ---
