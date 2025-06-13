@@ -224,6 +224,16 @@ CNN_DETECTION_THRESHOLD = 0.7 # Class constant for CNN detection threshold
 
         logger.info(f"[AI-ACTIVATION] Delegating to ReflectieLus for {token} ({trigger_type}).")
 
+        # Determine prompt_type based on trigger_type
+        prompt_type_mapping = {
+            'entry_signal': 'entry_analysis',
+            'trade_closed': 'post_trade_analysis',
+            'cnn_pattern_detected': 'pattern_analysis'
+        }
+        prompt_type = prompt_type_mapping.get(trigger_type, 'general_analysis')
+
+        logger.info(f"[AI-ACTIVATION] Determined prompt_type: {prompt_type} for trigger_type: {trigger_type}")
+
         # The prompt_type for ReflectieLus will be handled in Step 3 of the main plan.
         # For now, we assume ReflectieLus.process_reflection_cycle will take pattern_data.
         # We will pass 'comprehensive_analysis' as prompt_type, and pattern_data.
@@ -237,7 +247,7 @@ CNN_DETECTION_THRESHOLD = 0.7 # Class constant for CNN detection threshold
             current_confidence=learned_confidence, # Calculated in activate_ai
             mode=mode,
             # These are new parameters to be added to ReflectieLus.process_reflection_cycle in plan step 3
-            prompt_type='comprehensive_analysis',
+            prompt_type=prompt_type, # Use the determined prompt_type
             pattern_data=pattern_data
         )
 
@@ -295,17 +305,28 @@ if __name__ == "__main__":
         # to ensure it's created within the same async context if needed,
         # or just for neatness.
         class MockReflectieLusForTest: # Renamed to avoid conflict if MockReflectieLus is defined globally
+            def __init__(self):
+                self.last_prompt_type = None
+                self.last_pattern_data = None
+                self.last_symbol = None
+                self.last_trade_context = None
+
             async def process_reflection_cycle(self, **kwargs):
-                logger.info(f"MockReflectieLusForTest.process_reflection_cycle called for {kwargs.get('symbol')} with prompt_type {kwargs.get('prompt_type')}")
+                self.last_prompt_type = kwargs.get('prompt_type')
+                self.last_pattern_data = kwargs.get('pattern_data')
+                self.last_symbol = kwargs.get('symbol')
+                self.last_trade_context = kwargs.get('trade_context')
+                logger.info(f"MockReflectieLusForTest.process_reflection_cycle called for {self.last_symbol} with prompt_type {self.last_prompt_type}")
                 # Simulate returning a reflection log entry structure
                 return {
                     "timestamp": datetime.now().isoformat(),
-                    "token": kwargs.get('symbol'),
+                    "token": self.last_symbol,
                     "strategyId": kwargs.get('strategy_id'),
-                    "prompt_type": kwargs.get('prompt_type'),
+                    "prompt_type": self.last_prompt_type,
                     "summary": "Mocked reflection cycle completed.",
                     "mode": kwargs.get('mode'),
-                    "pattern_data_used": kwargs.get('pattern_data') is not None
+                    "pattern_data_used": self.last_pattern_data is not None,
+                    "received_trade_context": self.last_trade_context
                 }
         mock_reflectie_lus = MockReflectieLusForTest()
         engine = AIActivationEngine(reflectie_lus_instance=mock_reflectie_lus)
@@ -347,37 +368,103 @@ if __name__ == "__main__":
 
 
         print("\n--- Test AIActivationEngine ---")
-        print("\nActiveren AI voor een 'entry_signal' trigger (delegated to ReflectieLus)...")
+
+        # Test 'entry_signal'
+        print("\nActiveren AI voor een 'entry_signal' trigger...")
+        entry_trade_context = {"signal_strength": 0.85, "some_other_entry_info": "test_value"}
         entry_reflection = await engine.activate_ai(
             trigger_type='entry_signal',
             token=test_token,
             candles_by_timeframe=mock_candles_by_timeframe,
             strategy_id=test_strategy_id,
-            trade_context={"signal_strength": 0.85},
+            trade_context=entry_trade_context,
             mode='dry_run',
             bias_reflector_instance=mock_bias_reflector,
             confidence_engine_instance=mock_confidence_engine
         )
         if entry_reflection:
-            print("\nResultaat Entry Signaal Reflectie (via ReflectieLus):", json.dumps(entry_reflection, indent=2, default=str))
+            assert mock_reflectie_lus.last_prompt_type == 'entry_analysis', \
+                f"Incorrect prompt_type for entry_signal: {mock_reflectie_lus.last_prompt_type}"
+            assert mock_reflectie_lus.last_pattern_data is not None, "Pattern data not passed for entry_signal"
+            assert mock_reflectie_lus.last_trade_context.get("signal_strength") == 0.85, "Trade context not passed correctly for entry_signal"
+            print(f"Resultaat Entry Signaal Reflectie: OK (prompt_type='{mock_reflectie_lus.last_prompt_type}')")
+            # print(json.dumps(entry_reflection, indent=2, default=str)) # Optional: print full result
         else:
-            print("Entry Signaal Reflectie (via ReflectieLus) niet getriggerd / geen resultaat.")
+            print("Entry Signaal Reflectie niet getriggerd / geen resultaat. Test FAILED.")
+            assert False, "Entry signal reflection was not triggered."
 
-        print("\nActiveren AI voor een 'trade_closed' trigger (delegated to ReflectieLus)...")
+        # Test 'trade_closed'
+        print("\nActiveren AI voor een 'trade_closed' trigger...")
+        closed_trade_context = {"entry_price": 2500, "exit_price": 2450, "profit_pct": -0.02, "trade_id": "t123"}
         exit_reflection = await engine.activate_ai(
             trigger_type='trade_closed',
             token=test_token,
             candles_by_timeframe=mock_candles_by_timeframe,
             strategy_id=test_strategy_id,
-            trade_context={"entry_price": 2500, "exit_price": 2450, "profit_pct": -0.02, "trade_id": "t123"},
+            trade_context=closed_trade_context,
             mode='live',
             bias_reflector_instance=mock_bias_reflector,
             confidence_engine_instance=mock_confidence_engine
         )
         if exit_reflection:
-            print("\nResultaat Trade Closed Reflectie (via ReflectieLus):", json.dumps(exit_reflection, indent=2, default=str))
+            assert mock_reflectie_lus.last_prompt_type == 'post_trade_analysis', \
+                f"Incorrect prompt_type for trade_closed: {mock_reflectie_lus.last_prompt_type}"
+            assert mock_reflectie_lus.last_pattern_data is not None, "Pattern data not passed for trade_closed"
+            assert mock_reflectie_lus.last_trade_context.get("trade_id") == "t123", "Trade context not passed correctly for trade_closed"
+            print(f"Resultaat Trade Closed Reflectie: OK (prompt_type='{mock_reflectie_lus.last_prompt_type}')")
+            # print(json.dumps(exit_reflection, indent=2, default=str)) # Optional: print full result
         else:
-            print("Trade Closed Reflectie (via ReflectieLus) niet getriggerd / geen resultaat.")
+            print("Trade Closed Reflectie niet getriggerd / geen resultaat. Test FAILED.")
+            assert False, "Trade closed reflection was not triggered."
+
+        # Test 'cnn_pattern_detected'
+        print("\nActiveren AI voor een 'cnn_pattern_detected' trigger...")
+        cnn_context = {"pattern_name": "bull_flag_5m", "confidence": 0.92}
+        cnn_reflection = await engine.activate_ai(
+            trigger_type='cnn_pattern_detected',
+            token=test_token,
+            candles_by_timeframe=mock_candles_by_timeframe,
+            strategy_id=test_strategy_id,
+            trade_context=cnn_context,
+            mode='live', # Or any mode that allows triggering
+            bias_reflector_instance=mock_bias_reflector,
+            confidence_engine_instance=mock_confidence_engine
+        )
+        if cnn_reflection:
+            assert mock_reflectie_lus.last_prompt_type == 'pattern_analysis', \
+                f"Incorrect prompt_type for cnn_pattern_detected: {mock_reflectie_lus.last_prompt_type}"
+            assert mock_reflectie_lus.last_pattern_data is not None, "Pattern data not passed for cnn_pattern_detected"
+            assert mock_reflectie_lus.last_trade_context.get("pattern_name") == "bull_flag_5m", "Trade context not passed correctly for cnn_pattern_detected"
+            print(f"Resultaat CNN Pattern Reflectie: OK (prompt_type='{mock_reflectie_lus.last_prompt_type}')")
+        else:
+            print("CNN Pattern Reflectie niet getriggerd / geen resultaat. Test FAILED.")
+            # This might fail if _should_trigger_ai is strict; adjust trigger_data or mock _should_trigger_ai if needed for this test
+            # For now, we assume it can trigger.
+            assert False, "CNN Pattern reflection was not triggered."
+
+        # Test unknown trigger type
+        print("\nActiveren AI voor een onbekende trigger type ('unknown_signal')...")
+        unknown_context = {"detail": "some_random_event"}
+        unknown_reflection = await engine.activate_ai(
+            trigger_type='unknown_signal', # An unknown trigger
+            token=test_token,
+            candles_by_timeframe=mock_candles_by_timeframe,
+            strategy_id=test_strategy_id,
+            trade_context=unknown_context,
+            mode='live',
+            bias_reflector_instance=mock_bias_reflector,
+            confidence_engine_instance=mock_confidence_engine
+        )
+        if unknown_reflection:
+            assert mock_reflectie_lus.last_prompt_type == 'general_analysis', \
+                f"Incorrect prompt_type for unknown_signal: {mock_reflectie_lus.last_prompt_type}"
+            assert mock_reflectie_lus.last_pattern_data is not None, "Pattern data not passed for unknown_signal"
+            assert mock_reflectie_lus.last_trade_context.get("detail") == "some_random_event", "Trade context not passed correctly for unknown_signal"
+            print(f"Resultaat Onbekend Signaal Reflectie: OK (prompt_type='{mock_reflectie_lus.last_prompt_type}')")
+        else:
+            print("Onbekend Signaal Reflectie niet getriggerd / geen resultaat. Test FAILED.")
+            # This might fail if _should_trigger_ai is strict.
+            assert False, "Unknown signal reflection was not triggered."
 
         # Logging is now handled by ReflectieLus, so REFLECTIE_LOG_FILE check here might be redundant
         # or should point to wherever ReflectieLus logs, if different.
