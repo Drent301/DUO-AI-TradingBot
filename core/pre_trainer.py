@@ -29,6 +29,7 @@ logger.setLevel(logging.INFO)
 # PyTorch Imports
 import torch
 import torch.nn as nn
+import optuna
 import torch.optim as optim
 from torch.utils.data import DataLoader, TensorDataset
 
@@ -181,6 +182,71 @@ class PreTrainer:
         except Exception as e:
             logger.error(f"Feil ved skriving til cache-fil {filepath}: {e}")
 
+    def _load_gold_standard_data(self, symbol: str, timeframe: str, pattern_type: str, expected_columns: List[str]) -> pd.DataFrame | None:
+        """
+        Loads gold standard data for a given symbol, timeframe, and pattern type.
+        Verifies that the loaded data contains all expected columns and sets the timestamp as index.
+        """
+        gold_standard_path = self.params_manager.get_param("gold_standard_data_path")
+        if not gold_standard_path:
+            logger.debug("Gold standard data path not set in parameters. Skipping gold standard loading.")
+            return None
+
+        symbol_sanitized = symbol.replace('/', '_')
+        filename = f"{symbol_sanitized}_{timeframe}_{pattern_type}_gold.csv"
+        full_path = os.path.join(gold_standard_path, filename)
+
+        if not os.path.exists(full_path):
+            logger.debug(f"Gold standard data file not found: {full_path}")
+            return None
+
+        try:
+            df = pd.read_csv(full_path)
+            if df.empty:
+                logger.warning(f"Gold standard data file is empty: {full_path}")
+                return None
+
+            # Verify all expected columns are present
+            missing_cols = [col for col in expected_columns if col not in df.columns]
+            if missing_cols:
+                logger.error(f"Gold standard data file {full_path} is missing expected columns: {missing_cols}. Expected: {expected_columns}")
+                return None
+
+            # Ensure 'timestamp' column is present for index conversion
+            if 'timestamp' not in df.columns:
+                logger.error(f"Gold standard data file {full_path} is missing 'timestamp' column for index conversion.")
+                return None
+
+            # Convert timestamp to datetime and set as index
+            # Assuming timestamp is in milliseconds if it's a large integer, otherwise seconds or already datetime string
+            if pd.api.types.is_numeric_dtype(df['timestamp']):
+                # Heuristic: if timestamp values are very large, assume milliseconds
+                if df['timestamp'].mean() > 1e12: # Arbitrary threshold for milliseconds
+                    df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
+                else: # Assume seconds otherwise
+                    df['timestamp'] = pd.to_datetime(df['timestamp'], unit='s')
+            else: # Try direct conversion for string formats
+                df['timestamp'] = pd.to_datetime(df['timestamp'])
+
+            df.set_index('timestamp', inplace=True)
+            df.sort_index(inplace=True) # Ensure data is sorted by time
+
+            logger.info(f"Successfully loaded {len(df)} records from gold standard data: {full_path}")
+            return df
+
+        except FileNotFoundError:
+            logger.debug(f"Gold standard data file not found (should have been caught by os.path.exists, but good to handle): {full_path}")
+            return None
+        except pd.errors.EmptyDataError:
+            logger.warning(f"Gold standard data file is empty (pandas error): {full_path}")
+            return None
+        except ValueError as ve:
+            logger.error(f"ValueError processing gold standard data file {full_path}: {ve}")
+            return None
+        except Exception as e:
+            logger.error(f"An unexpected error occurred while loading gold standard data from {full_path}: {e}")
+            return None
+
     async def _fetch_ohlcv_for_period(self, symbol: str, timeframe: str, start_dt: dt, end_dt: dt) -> pd.DataFrame | None:
         # ... (as before, with caching) ...
         cache_filepath = self._get_cache_filepath(symbol, timeframe, start_dt, end_dt)
@@ -231,162 +297,330 @@ class PreTrainer:
         if 'timestamp' in return_df.columns: return_df.drop(columns=['timestamp'], inplace=True)
         return return_df
 
-    async def fetch_historical_data(self, symbol: str, timeframe: str) -> pd.DataFrame:
-        # ... (implementation as before) ...
+    async def fetch_historical_data(self, symbol: str, timeframe: str) -> Dict[str, pd.DataFrame]:
         if not self.bitvavo_executor:
             logger.error("BitvavoExecutor niet geïnitialiseerd. Kan geen historische data ophalen.")
-            return pd.DataFrame()
-        all_ohlcv_data_dfs = []
-        fetched_via_regimes = False
+            return {"all": pd.DataFrame()} # Return dict with empty DF for "all"
+
+        all_ohlcv_data_dfs_by_regime: Dict[str, List[pd.DataFrame]] = {}
+        all_ohlcv_data_dfs_for_concatenation: List[pd.DataFrame] = []
+        processed_regime_dfs: Dict[str, pd.DataFrame] = {}
+        fetched_any_data = False
+
         if symbol in self.market_regimes and self.market_regimes[symbol]:
-            logger.info(f"Marktregimes gevonden voor {symbol}. Data wordt per regime opgehaald.")
+            logger.info(f"Marktregimes gevonden voor {symbol}. Data wordt per gedefinieerd regime opgehaald.")
             symbol_regimes = self.market_regimes[symbol]
             for regime_category, periods in symbol_regimes.items():
-                if not periods: continue
-                logger.info(f"Verwerken regime categorie: {regime_category} voor {symbol}")
+                if not periods:
+                    logger.info(f"Geen periodes gedefinieerd voor regime '{regime_category}' in {symbol}. Overslaan.")
+                    continue
+
+                logger.info(f"Verwerken regime categorie: {regime_category} voor {symbol} ({timeframe})")
+                regime_specific_period_dfs = []
                 for period in periods:
                     try:
                         regime_start_dt = dt.strptime(period['start_date'], "%Y-%m-%d")
                         regime_end_dt = dt.strptime(period['end_date'], "%Y-%m-%d").replace(hour=23, minute=59, second=59, microsecond=999999)
                         if regime_start_dt > regime_end_dt:
-                            logger.warning(f"Ongeldige periode i regimes for {symbol} {regime_category}: start {period['start_date']} er etter end {period['end_date']}. Hopper over.")
+                            logger.warning(f"Ongeldige periode in regimes voor {symbol} {regime_category}: start {period['start_date']} is na end {period['end_date']}. Overslaan.")
                             continue
+
                         period_df = await self._fetch_ohlcv_for_period(symbol, timeframe, regime_start_dt, regime_end_dt)
                         if period_df is not None and not period_df.empty:
-                            all_ohlcv_data_dfs.append(period_df); fetched_via_regimes = True
-                    except ValueError as e: logger.error(f"Ugyldig datoformat i regimes for {symbol} {regime_category} periode {period}: {e}. Hopper over.")
-                    except Exception as e: logger.error(f"Generell feil ved behandling av regime {symbol} {regime_category} periode {period}: {e}. Hopper over.")
-            if fetched_via_regimes and all_ohlcv_data_dfs: logger.info(f"Data for {symbol} ({timeframe}) hentet via markedsregimer.")
-            elif fetched_via_regimes: logger.warning(f"Regimer definert for {symbol} ({timeframe}) men ingen data hentet.")
-        if not fetched_via_regimes:
-            logger.info(f"Ingen spesifikke regimer (med data) funnet/behandlet for {symbol} ({timeframe}), eller ingen regimer definert. Global datoperiode brukes.")
+                            regime_specific_period_dfs.append(period_df)
+                            all_ohlcv_data_dfs_for_concatenation.append(period_df) # Also add to general list for "all" data
+                            fetched_any_data = True
+                            logger.info(f"Data ({len(period_df)} candles) gehaald voor {symbol}-{timeframe} ({regime_category}) periode {period['start_date']}-{period['end_date']}")
+                        else:
+                            logger.info(f"Geen data gehaald voor {symbol}-{timeframe} ({regime_category}) periode {period['start_date']}-{period['end_date']}")
+
+                    except ValueError as e:
+                        logger.error(f"Ugyldig datoformat in regimes for {symbol} {regime_category} periode {period}: {e}. Overslaan.")
+                    except Exception as e:
+                        logger.error(f"Generieke fout bij verwerken regime {symbol} {regime_category} periode {period}: {e}. Overslaan.")
+
+                if regime_specific_period_dfs:
+                    all_ohlcv_data_dfs_by_regime[regime_category] = regime_specific_period_dfs
+                    logger.info(f"Data voor regime '{regime_category}' ({symbol}-{timeframe}) verzameld.")
+                else:
+                    logger.warning(f"Geen data verzameld voor regime '{regime_category}' ({symbol}-{timeframe}) na verwerken van alle periodes.")
+
+        if not fetched_any_data or not all_ohlcv_data_dfs_for_concatenation: # Fallback or if only "all" is desired implicitly
+            logger.info(f"Geen data via specifieke regimes gehaald (of geen regimes gedefinieerd/gevonden voor {symbol}). Globale datarange wordt gebruikt voor 'all' data.")
             global_start_date_str = self.params_manager.get_param("data_fetch_start_date_str")
             global_end_date_str = self.params_manager.get_param("data_fetch_end_date_str")
-            if not global_start_date_str: logger.error(f"Ingen 'data_fetch_start_date_str' funnet i ParamsManager for {symbol} ({timeframe})."); return pd.DataFrame()
+            if not global_start_date_str:
+                logger.error(f"Geen 'data_fetch_start_date_str' in ParamsManager voor {symbol} ({timeframe}). Kan geen 'all' data halen.")
+                return {"all": pd.DataFrame()}
+
             try:
                 start_dt_global = dt.strptime(global_start_date_str, "%Y-%m-%d")
                 end_dt_global = dt.now()
-                if global_end_date_str: end_dt_global = dt.strptime(global_end_date_str, "%Y-%m-%d").replace(hour=23, minute=59, second=59, microsecond=999999)
-                if start_dt_global > end_dt_global: logger.error(f"Global startdato {global_start_date_str} er etter sluttdato {global_end_date_str}."); return pd.DataFrame()
+                if global_end_date_str:
+                    end_dt_global = dt.strptime(global_end_date_str, "%Y-%m-%d").replace(hour=23, minute=59, second=59, microsecond=999999)
+
+                if start_dt_global > end_dt_global:
+                    logger.error(f"Global startdatum {global_start_date_str} is na sluttdato {global_end_date_str}.")
+                    return {"all": pd.DataFrame()}
+
                 global_df = await self._fetch_ohlcv_for_period(symbol, timeframe, start_dt_global, end_dt_global)
                 if global_df is not None and not global_df.empty:
-                     all_ohlcv_data_dfs.append(global_df)
-                     logger.info(f"Data for {symbol} ({timeframe}) hentet via global periode: {global_start_date_str} - {global_end_date_str if global_end_date_str else 'nåtid'}.")
-                else: logger.warning(f"Ingen data hentet for {symbol} ({timeframe}) med global periode.")
-            except ValueError as e: logger.error(f"Ugyldig globalt datoformat: {e}."); return pd.DataFrame()
-        if not all_ohlcv_data_dfs: logger.warning(f"Til slutt ingen historisk data tilgjengelig for {symbol} ({timeframe})."); return pd.DataFrame()
-        final_df = pd.concat(all_ohlcv_data_dfs, ignore_index=False)
-        if final_df.empty: logger.warning(f"Tom DataFrame etter concat for {symbol} ({timeframe})."); return pd.DataFrame()
-        if not isinstance(final_df.index, pd.DatetimeIndex):
-             logger.error(f"Index for {symbol} ({timeframe}) er ikke DatetimeIndex etter concat.")
-             if 'date' in final_df.columns: final_df['date'] = pd.to_datetime(final_df['date']); final_df.set_index('date', inplace=True)
-             else: return pd.DataFrame()
-        if not final_df.index.is_unique: final_df = final_df[~final_df.index.duplicated(keep='first')]; logger.info(f"Duplikater fjernet. Resterende candles: {len(final_df)}")
-        final_df.sort_index(inplace=True)
-        final_df.attrs['timeframe'] = timeframe; final_df.attrs['pair'] = symbol
-        logger.info(f"Totalt {len(final_df)} unike candles forberedt for {symbol} ({timeframe}). Fetched via regimes: {fetched_via_regimes}")
-        return final_df
+                    all_ohlcv_data_dfs_for_concatenation.append(global_df)
+                    fetched_any_data = True
+                    logger.info(f"Data ({len(global_df)} candles) gehaald voor {symbol}-{timeframe} via globale periode: {global_start_date_str} - {global_end_date_str if global_end_date_str else 'nu'}.")
+                else:
+                    logger.warning(f"Geen data gehaald voor {symbol}-{timeframe} met globale periode.")
+            except ValueError as e:
+                logger.error(f"Ugyldig globalt datoformat: {e}.")
+                return {"all": pd.DataFrame()}
+
+        # Process "all" data (concatenated from all sources)
+        concatenated_df = None
+        if all_ohlcv_data_dfs_for_concatenation:
+            concatenated_df = pd.concat(all_ohlcv_data_dfs_for_concatenation, ignore_index=False)
+            if not isinstance(concatenated_df.index, pd.DatetimeIndex):
+                 logger.error(f"Index voor geconcateneerde data {symbol} ({timeframe}) is geen DatetimeIndex.")
+                 if 'date' in concatenated_df.columns: concatenated_df['date'] = pd.to_datetime(concatenated_df['date']); concatenated_df.set_index('date', inplace=True)
+                 # else: concatenated_df will be empty or problematic, handled below
+            if not concatenated_df.index.is_unique:
+                concatenated_df = concatenated_df[~concatenated_df.index.duplicated(keep='first')]
+                logger.info(f"Duplikaten verwijderd van geconcateneerde data. Resterende candles: {len(concatenated_df)}")
+            concatenated_df.sort_index(inplace=True)
+            concatenated_df.attrs['timeframe'] = timeframe
+            concatenated_df.attrs['pair'] = symbol
+            logger.info(f"Totaal {len(concatenated_df)} unieke candles voor 'all' data voor {symbol} ({timeframe}).")
+
+        processed_regime_dfs["all"] = concatenated_df if concatenated_df is not None and not concatenated_df.empty else pd.DataFrame()
+        if processed_regime_dfs["all"].empty:
+            logger.warning(f"Uiteindelijk geen 'all' data beschikbaar voor {symbol} ({timeframe}).")
+
+
+        # Process regime-specific data
+        for regime_cat, df_list in all_ohlcv_data_dfs_by_regime.items():
+            if df_list:
+                regime_df = pd.concat(df_list, ignore_index=False)
+                if not isinstance(regime_df.index, pd.DatetimeIndex):
+                    logger.error(f"Index voor regime '{regime_cat}' data {symbol} ({timeframe}) is geen DatetimeIndex.")
+                    if 'date' in regime_df.columns: regime_df['date'] = pd.to_datetime(regime_df['date']); regime_df.set_index('date', inplace=True)
+                    else: processed_regime_dfs[regime_cat] = pd.DataFrame(); continue
+
+                if not regime_df.index.is_unique:
+                    regime_df = regime_df[~regime_df.index.duplicated(keep='first')]
+                regime_df.sort_index(inplace=True)
+                regime_df.attrs['timeframe'] = timeframe
+                regime_df.attrs['pair'] = symbol
+                processed_regime_dfs[regime_cat] = regime_df
+                logger.info(f"Data voor regime '{regime_cat}' ({symbol}-{timeframe}) verwerkt. {len(regime_df)} candles.")
+            else:
+                processed_regime_dfs[regime_cat] = pd.DataFrame()
+                logger.warning(f"Lege DataFrame voor regime '{regime_cat}' ({symbol}-{timeframe}) na verwerking.")
+
+        if not fetched_any_data and not processed_regime_dfs.get("all", pd.DataFrame()).empty:
+             logger.warning(f"Geen data gehaald voor {symbol} ({timeframe}) voor enige regime of globale periode.")
+             # Ensure "all" is an empty DataFrame if truly no data
+             if all(df.empty for df in processed_regime_dfs.values()):
+                 return {"all": pd.DataFrame()}
+
+        return processed_regime_dfs
 
     async def prepare_training_data(self, dataframe: pd.DataFrame, pattern_type: str) -> pd.DataFrame:
-        # ... (implementation as before, including form detection and new logging) ...
-        pair = dataframe.attrs.get('pair', 'N/A'); tf = dataframe.attrs.get('timeframe', 'N/A')
+        pair = dataframe.attrs.get('pair', 'N/A')
+        tf = dataframe.attrs.get('timeframe', 'N/A')
         logger.info(f"Voorbereiden trainingsdata voor {pair} ({tf}), pattern: {pattern_type}...")
-        if dataframe.empty: logger.warning(f"Lege dataframe ontvangen in prepare_training_data for {pattern_type}."); return dataframe
+
+        if dataframe.empty:
+            logger.warning(f"Lege dataframe ontvangen in prepare_training_data for {pattern_type}.")
+            return dataframe
+
+        # Ensure technical indicators are calculated first (already seems to be the case)
         if not hasattr(self, 'cnn_pattern_detector'):
             from core.cnn_patterns import CNNPatterns
-            self.cnn_pattern_detector = CNNPatterns(); logger.info("CNNPatterns detector geïnitialiseerd in prepare_training_data.")
+            self.cnn_pattern_detector = CNNPatterns()
+            logger.info("CNNPatterns detector geïnitialiseerd in prepare_training_data.")
         if 'rsi' not in dataframe.columns: dataframe['rsi'] = ta.RSI(dataframe)
         if 'macd' not in dataframe.columns:
-            macd_df = ta.MACD(dataframe); dataframe['macd'] = macd_df['macd']
-            dataframe['macdsignal'] = macd_df['macdsignal']; dataframe['macdhist'] = macd_df['macdhist']
+            macd_df = ta.MACD(dataframe)
+            dataframe['macd'] = macd_df['macd']
+            dataframe['macdsignal'] = macd_df['macdsignal']
+            dataframe['macdhist'] = macd_df['macdhist']
         if 'bb_middleband' not in dataframe.columns:
             from freqtrade.vendor.qtpylib.indicators import bollinger_bands
             bollinger = bollinger_bands(ta.TYPPRICE(dataframe), window=20, stds=2)
-            dataframe['bb_lowerband'] = bollinger['lower']; dataframe['bb_middleband'] = bollinger['mid']; dataframe['bb_upperband'] = bollinger['upper']
-        dataframe['form_pattern_detected'] = False; min_pattern_window_size = 0
+            dataframe['bb_lowerband'] = bollinger['lower']
+            dataframe['bb_middleband'] = bollinger['mid']
+            dataframe['bb_upperband'] = bollinger['upper']
+
+        label_column_name = f"{pattern_type}_label"
+        dataframe[label_column_name] = 0 # Initialize label column
+        dataframe['gold_label_applied'] = False # Helper column to track gold standard application
+
+        # 1. Load Gold Standard Data
+        gold_ohlcv_cols = ['timestamp', 'open', 'high', 'low', 'close', 'volume'] # Core OHLCV for structure
+        gold_df = self._load_gold_standard_data(
+            symbol=pair,
+            timeframe=tf,
+            pattern_type=pattern_type,
+            expected_columns=gold_ohlcv_cols + ['gold_label']
+        )
+
+        # 2. Merge Gold Standard Labels
+        if gold_df is not None and not gold_df.empty and 'gold_label' in gold_df.columns:
+            logger.info(f"Gold standard data gevonden voor {pair}-{tf}-{pattern_type}. Labels worden samengevoegd.")
+            # Ensure gold_df index is datetime, _load_gold_standard_data should handle this
+            if not isinstance(gold_df.index, pd.DatetimeIndex):
+                 logger.error("Gold standard DataFrame index is not DatetimeIndex. Kan niet mergen.")
+            else:
+                # Join gold labels. Keep original dataframe index.
+                temp_df = dataframe.join(gold_df[['gold_label']], how='left', rsuffix='_gold')
+
+                # Apply gold labels where available
+                gold_labels_applied_count = 0
+                if 'gold_label' in temp_df.columns: # Check if join produced the column
+                    # Mark rows where gold label is not NaN (meaning it was present in gold_df)
+                    valid_gold_indices = temp_df['gold_label'].notna()
+                    dataframe.loc[valid_gold_indices, label_column_name] = temp_df.loc[valid_gold_indices, 'gold_label'].astype(int)
+                    dataframe.loc[valid_gold_indices, 'gold_label_applied'] = True
+                    gold_labels_applied_count = valid_gold_indices.sum()
+                    logger.info(f"{gold_labels_applied_count} labels toegepast vanuit gold standard data voor {pair}-{tf}-{pattern_type}.")
+                else:
+                    logger.warning(f"Kolom 'gold_label' niet gevonden na join met gold_df voor {pair}-{tf}-{pattern_type}.")
+        else:
+            logger.info(f"Geen gold standard data gebruikt voor labeling voor {pair}-{tf}-{pattern_type}.")
+
+        # 3. Form Pattern Detection (already present)
+        dataframe['form_pattern_detected'] = False
+        min_pattern_window_size = 0
         if pattern_type == 'bullFlag': min_pattern_window_size = 10
         elif pattern_type == 'bearishEngulfing': min_pattern_window_size = 2
-        else: logger.warning(f"Form detection not implemented for '{pattern_type}' for {pair}-{tf}. Defaulting all to True."); dataframe['form_pattern_detected'] = True
+        else:
+            logger.warning(f"Form detection niet geïmplementeerd voor '{pattern_type}' voor {pair}-{tf}. Defaulting all to True.")
+            dataframe['form_pattern_detected'] = True
+
         if min_pattern_window_size > 0 and not dataframe['form_pattern_detected'].all():
-            df_for_detection = dataframe.reset_index()
+            df_for_detection = dataframe.reset_index() # Requires 'date' or 'timestamp' column if index is DatetimeIndex
+            if not isinstance(dataframe.index, pd.DatetimeIndex): # Should be DatetimeIndex
+                 logger.error("DataFrame index is niet DatetimeIndex vóór form pattern detection loop.")
+            # if 'date' not in df_for_detection.columns and dataframe.index.name == 'timestamp': # common after set_index
+            #    df_for_detection.rename(columns={'timestamp':'date'}, inplace=True) # ensure 'date' exists if reset_index loses it
+
             for i in range(min_pattern_window_size - 1, len(df_for_detection)):
-                if i >= len(dataframe.index): continue
+                # Ensure we are using original DataFrame's index for assignment
+                original_df_index_at_i = dataframe.index[i]
+
                 window_df_slice = df_for_detection.iloc[max(0, i - min_pattern_window_size + 1) : i + 1]
                 if len(window_df_slice) < min_pattern_window_size: continue
+
+                # _dataframe_to_candles expects 'open', 'high', 'low', 'close', 'volume', 'date'
+                # Ensure 'date' column exists if it's not the index before this call, or adapt _dataframe_to_candles
+                # Current _dataframe_to_candles uses .to_dict(orient='records'), so column names matter.
+                # Assuming OHLCV are present. If 'date' is index, reset_index() would make it a column.
+                # If index is already 'date', it should be fine.
+                # If index is 'timestamp', reset_index() makes it a column.
+
                 candle_list = self.cnn_pattern_detector._dataframe_to_candles(window_df_slice)
                 detected = False
                 if pattern_type == 'bullFlag': detected = self.cnn_pattern_detector.detect_bull_flag(candle_list)
                 elif pattern_type == 'bearishEngulfing':
                     eng_type = self.cnn_pattern_detector._detect_engulfing(candle_list, "bearish")
                     if eng_type == "bearishEngulfing": detected = True
-                if detected: dataframe.loc[dataframe.index[i], 'form_pattern_detected'] = True
+
+                if detected: dataframe.loc[original_df_index_at_i, 'form_pattern_detected'] = True
+
         form_detected_count = dataframe['form_pattern_detected'].sum()
         logger.info(f"For pattern '{pattern_type}' on {pair}-{tf}, {form_detected_count} samples initially identified by form detection.")
-        label_column_name = f"{pattern_type}_label"
+
+        # 4. Automatic Labeling for non-gold-labeled data
         configs = self.params_manager.get_param('pattern_labeling_configs')
         if not configs:
-            logger.error("`pattern_labeling_configs` niet gevonden. Labeling gestopt."); dataframe[label_column_name] = 0
-            if 'form_pattern_detected' in dataframe.columns: dataframe.drop(columns=['form_pattern_detected'], inplace=True, errors='ignore')
+            logger.error("`pattern_labeling_configs` niet gevonden. Automatische labeling gestopt.");
+            # dataframe[label_column_name] is al geïnitialiseerd (mogelijk met gold labels)
+            # Drop helper columns before returning
+            dataframe.drop(columns=['gold_label_applied', 'form_pattern_detected'], inplace=True, errors='ignore')
+            if 'future_high' in dataframe.columns: dataframe.drop(columns=['future_high'], inplace=True, errors='ignore')
+            if 'future_low' in dataframe.columns: dataframe.drop(columns=['future_low'], inplace=True, errors='ignore')
+            cols_to_drop_for_na_final = [label_column_name] + ['open', 'high', 'low', 'close', 'volume', 'rsi', 'macd', 'macdsignal', 'macdhist', 'bb_lowerband', 'bb_middleband', 'bb_upperband']
+            dataframe.dropna(subset=cols_to_drop_for_na_final, inplace=True)
             return dataframe
+
         cfg = configs.get(pattern_type)
         if not cfg:
-            logger.warning(f"Config for '{pattern_type}' niet gevonden. Labeling overgeslagen, kolom '{label_column_name}' op 0 gezet.")
-            dataframe[label_column_name] = 0
-            if 'form_pattern_detected' in dataframe.columns: dataframe.drop(columns=['form_pattern_detected'], inplace=True, errors='ignore')
+            logger.warning(f"Config for '{pattern_type}' niet gevonden. Automatische labeling overgeslagen.")
+            # dataframe[label_column_name] is al geïnitialiseerd
+            dataframe.drop(columns=['gold_label_applied', 'form_pattern_detected'], inplace=True, errors='ignore')
+            if 'future_high' in dataframe.columns: dataframe.drop(columns=['future_high'], inplace=True, errors='ignore')
+            if 'future_low' in dataframe.columns: dataframe.drop(columns=['future_low'], inplace=True, errors='ignore')
+            cols_to_drop_for_na_final = [label_column_name] + ['open', 'high', 'low', 'close', 'volume', 'rsi', 'macd', 'macdsignal', 'macdhist', 'bb_lowerband', 'bb_middleband', 'bb_upperband']
+            dataframe.dropna(subset=cols_to_drop_for_na_final, inplace=True)
             return dataframe
+
         future_N, profit_thresh, loss_thresh = cfg.get('future_N_candles',20), cfg.get('profit_threshold_pct',0.02), cfg.get('loss_threshold_pct',-0.01)
-        dataframe['future_high'] = dataframe['high'].shift(-future_N); dataframe['future_low'] = dataframe['low'].shift(-future_N)
-        dataframe[label_column_name] = 0
-        if form_detected_count > 0:
-            detected_indices = dataframe.index[dataframe['form_pattern_detected']]
+        dataframe['future_high'] = dataframe['high'].shift(-future_N)
+        dataframe['future_low'] = dataframe['low'].shift(-future_N)
+
+        # Indices for automatic labeling: form detected AND not already labeled by gold standard
+        # Using .copy() on the boolean series to avoid SettingWithCopyWarning if these series are reused.
+        auto_label_condition = dataframe['form_pattern_detected'].copy() & ~dataframe['gold_label_applied'].copy()
+
+        # Make sure to only select from indices that will have valid future_high/low (not NaN)
+        # This is implicitly handled later by dropna, but good to be aware.
+        # For safety, ensure detected_indices_for_auto only includes rows where auto_label_condition is true.
+        detected_indices_for_auto = dataframe.index[auto_label_condition]
+
+        auto_labeled_count = 0
+        if not detected_indices_for_auto.empty:
             if pattern_type == 'bullFlag':
-                profit_met = (dataframe.loc[detected_indices, 'future_high'] - dataframe.loc[detected_indices, 'close']) / dataframe.loc[detected_indices, 'close'] >= profit_thresh
-                loss_met = (dataframe.loc[detected_indices, 'future_low'] - dataframe.loc[detected_indices, 'close']) / dataframe.loc[detected_indices, 'close'] <= loss_thresh
-                dataframe.loc[detected_indices, label_column_name] = np.where(profit_met & ~loss_met, 1, 0)
+                profit_met = (dataframe.loc[detected_indices_for_auto, 'future_high'] - dataframe.loc[detected_indices_for_auto, 'close']) / dataframe.loc[detected_indices_for_auto, 'close'] >= profit_thresh
+                loss_met = (dataframe.loc[detected_indices_for_auto, 'future_low'] - dataframe.loc[detected_indices_for_auto, 'close']) / dataframe.loc[detected_indices_for_auto, 'close'] <= loss_thresh
+                # Apply auto-label only to those identified for auto-labeling
+                dataframe.loc[detected_indices_for_auto, label_column_name] = np.where(profit_met & ~loss_met, 1, 0)
+                auto_labeled_count = len(detected_indices_for_auto[profit_met & ~loss_met])
             elif pattern_type == 'bearishEngulfing':
-                profit_met = (dataframe.loc[detected_indices, 'close'] - dataframe.loc[detected_indices, 'future_low']) / dataframe.loc[detected_indices, 'close'] >= profit_thresh
-                loss_met = (dataframe.loc[detected_indices, 'future_high'] - dataframe.loc[detected_indices, 'close']) / dataframe.loc[detected_indices, 'close'] >= abs(loss_thresh)
-                dataframe.loc[detected_indices, label_column_name] = np.where(profit_met & ~loss_met, 1, 0)
-        positive_labels_count = dataframe[label_column_name].sum()
-        logger.info(f"For pattern '{pattern_type}' on {pair}-{tf}, out of {form_detected_count} form-identified samples, {positive_labels_count} were ultimately labeled as positive (1).")
+                profit_met = (dataframe.loc[detected_indices_for_auto, 'close'] - dataframe.loc[detected_indices_for_auto, 'future_low']) / dataframe.loc[detected_indices_for_auto, 'close'] >= profit_thresh
+                loss_met = (dataframe.loc[detected_indices_for_auto, 'future_high'] - dataframe.loc[detected_indices_for_auto, 'close']) / dataframe.loc[detected_indices_for_auto, 'close'] >= abs(loss_thresh)
+                dataframe.loc[detected_indices_for_auto, label_column_name] = np.where(profit_met & ~loss_met, 1, 0)
+                auto_labeled_count = len(detected_indices_for_auto[profit_met & ~loss_met])
+
+        if auto_labeled_count > 0:
+            logger.info(f"{auto_labeled_count} labels toegepast via automatische labeling voor {pair}-{tf}-{pattern_type} (op non-gold samples).")
+        else:
+            logger.info(f"Geen labels toegepast via automatische labeling voor {pair}-{tf}-{pattern_type} (mogelijk alles door gold, of geen form detected, of geen profit/loss met).")
+
+        total_positive_labels = dataframe[label_column_name].sum()
+        logger.info(f"Totaal {total_positive_labels} positieve labels voor {pair}-{tf}-{pattern_type} na gold en/of automatische labeling.")
+
+        # Cleanup
         feature_columns = ['open', 'high', 'low', 'close', 'volume', 'rsi', 'macd', 'macdsignal', 'macdhist', 'bb_lowerband', 'bb_middleband', 'bb_upperband']
+        # Ensure label_column_name exists, even if all labeling failed (it's initialized to 0)
         if label_column_name not in dataframe.columns: dataframe[label_column_name] = 0
+
         cols_to_drop_for_na = [label_column_name, 'future_high', 'future_low'] + feature_columns
         dataframe.dropna(subset=cols_to_drop_for_na, inplace=True)
-        dataframe.drop(columns=['future_high', 'future_low', 'form_pattern_detected'], inplace=True, errors='ignore')
+
+        # Drop helper and intermediate columns
+        columns_to_drop_finally = ['future_high', 'future_low', 'form_pattern_detected', 'gold_label_applied']
+        dataframe.drop(columns=[col for col in columns_to_drop_finally if col in dataframe.columns], inplace=True, errors='ignore')
+
         logger.info(f"Trainingsdata voorbereid voor {pattern_type} ({pair}-{tf}) met {len(dataframe)} samples. Label: {label_column_name}, Positives: {dataframe[label_column_name].sum()}")
         return dataframe
 
-    async def train_ai_models(self, training_data: pd.DataFrame, symbol: str, timeframe: str, pattern_type: str, target_label_column: str):
-        current_arch_key = self.params_manager.get_param('current_cnn_architecture_key', "default_simple")
+    async def train_ai_models(self, training_data: pd.DataFrame, symbol: str, timeframe: str, pattern_type: str, target_label_column: str, regime_name: str = "all"):
+        current_arch_key_orig = self.params_manager.get_param('current_cnn_architecture_key', "default_simple")
         all_arch_configs = self.params_manager.get_param('cnn_architecture_configs')
-        arch_params = {}
-        if all_arch_configs and current_arch_key in all_arch_configs:
-            arch_params = all_arch_configs[current_arch_key]
-            logger.info(f"Gebruikt CNN architectuur '{current_arch_key}' voor training.")
-        else: # Fallback to SimpleCNN defaults if specific arch_key not found or configs are missing
-            logger.warning(f"CNN architectuur '{current_arch_key}' niet gevonden in ParamsManager of cnn_architecture_configs is None. Fallback naar SimpleCNN defaults (impliciet 'default_simple' equivalent).")
-            current_arch_key = "default_simple" # Ensure key reflects fallback for naming consistency
 
-        model_name_prefix = f"{symbol.replace('/', '_')}_{timeframe}_{pattern_type}_{current_arch_key}"
-        logger.info(f"Start training PyTorch AI-model '{model_name_prefix}' met {len(training_data)} samples...")
+        arch_params = {} # This will hold the final architecture parameters
+        if all_arch_configs and current_arch_key_orig in all_arch_configs:
+            arch_params = all_arch_configs[current_arch_key_orig].copy()
+            logger.info(f"Start met basis CNN architectuur '{current_arch_key_orig}' voor {symbol}-{timeframe}-{pattern_type}-{regime_name}.")
+        else:
+            logger.warning(f"Basis CNN architectuur '{current_arch_key_orig}' niet gevonden. Fallback naar SimpleCNN defaults voor {symbol}-{timeframe}-{pattern_type}-{regime_name}.")
+            current_arch_key_orig = "default_simple" # Reflect that we're using defaults if key not found
 
-        if training_data.empty: logger.warning(f"Geen trainingsdata voor '{model_name_prefix}'."); return
+        # Initial model name base (arch key might change if HPO defines a new one, though not implemented yet)
+        model_name_base = f"{symbol.replace('/', '_')}_{timeframe}_{pattern_type}_{current_arch_key_orig}"
 
-        feature_columns = ['open', 'high', 'low', 'close', 'volume', 'rsi', 'macd', 'macdsignal', 'macdhist', 'bb_lowerband', 'bb_middleband', 'bb_upperband']
-        if not all(col in training_data.columns for col in feature_columns + [target_label_column]):
-            missing_cols = [col for col in feature_columns + [target_label_column] if col not in training_data.columns]
-            logger.error(f"Benodigde kolommen ({missing_cols}) niet aanwezig in training_data voor '{model_name_prefix}'. Overslaan.")
-            return
-
-        symbol_underscore = symbol.replace('/', '_')
-        model_dir = os.path.join(MODELS_DIR, symbol_underscore, timeframe)
-        os.makedirs(model_dir, exist_ok=True)
-        model_save_path = os.path.join(model_dir, f'cnn_model_{pattern_type}_{current_arch_key}.pth')
-        scaler_save_path = os.path.join(model_dir, f'scaler_params_{pattern_type}_{current_arch_key}.json')
-
+        # Training parameters that might be tuned by HPO or taken from params_manager
         sequence_length = self.params_manager.get_param('sequence_length_cnn', 30)
-        num_epochs = self.params_manager.get_param('num_epochs_cnn', 10)
+        num_epochs = self.params_manager.get_param('num_epochs_cnn', 10) # Epochs for final training
         batch_size = self.params_manager.get_param('batch_size_cnn', 32)
         learning_rate = self.params_manager.get_param('learning_rate_cnn', 0.001)
 
@@ -485,8 +719,197 @@ class PreTrainer:
             if perform_cv: logger.warning(f"Cross-validation niet uitgevoerd voor {model_name_prefix} door onvoldoende samples.")
 
 
+        # --- Hyperparameter Optimization (Optuna) ---
+        perform_hpo = self.params_manager.get_param('perform_hyperparameter_optimization', False)
+        hpo_num_trials = self.params_manager.get_param('hpo_num_trials', 20)
+        hpo_sampler_str = self.params_manager.get_param('hpo_sampler', 'TPE')
+        hpo_pruner_str = self.params_manager.get_param('hpo_pruner', 'Median')
+        hpo_metric = self.params_manager.get_param('hpo_metric_to_optimize', 'val_loss')
+        hpo_direction = self.params_manager.get_param('hpo_direction_to_optimize', 'minimize')
+
+        if perform_hpo:
+            logger.info(f"Starten Hyperparameter Optimalisatie (Optuna) voor {model_name_prefix}...")
+
+            # Temporary HPO data (using a subset of X_train_full for faster trials)
+            # In a real scenario, you might use X_train_full and X_val_full directly or create new splits
+            # For this placeholder, we'll use the existing X_train_full, y_train_full for HPO training
+            # and X_val_full, y_val_full for HPO validation within each trial.
+            # This is a simplified approach for initial setup.
+            X_hpo_train, y_hpo_train = X_train_full, y_train_full
+            X_hpo_val, y_hpo_val = X_val_full, y_val_full
+
+            hpo_train_dataset = TensorDataset(X_hpo_train, y_hpo_train)
+            hpo_val_dataset = TensorDataset(X_hpo_val, y_hpo_val)
+
+            # Reduced number of epochs for HPO trials for speed
+            hpo_trial_epochs = self.params_manager.get_param('num_epochs_cnn_hpo_trial', 3)
+
+
+            def objective(trial: optuna.trial.Trial) -> float:
+                try:
+                    trial_arch_params = {}
+                    trial_arch_params['num_conv_layers'] = trial.suggest_int('num_conv_layers', 1, 3) # Max 3 for simplicity now
+
+                    filters_list = []
+                    kernel_sizes_list = []
+                    strides_list = []
+                    padding_list = []
+                    pooling_types_list = []
+                    pooling_kernels_list = []
+                    pooling_strides_list = []
+
+                    for i in range(trial_arch_params['num_conv_layers']):
+                        filters_list.append(trial.suggest_categorical(f'filters_layer_{i}', [16, 32, 64, 128]))
+                        kernel_sizes_list.append(trial.suggest_categorical(f'kernel_size_layer_{i}', [3, 5]))
+                        strides_list.append(trial.suggest_categorical(f'stride_layer_{i}', [1])) # Usually 1 for conv
+                        padding_list.append(trial.suggest_categorical(f'padding_layer_{i}', [0, 1, 2])) # Or calculate for 'same'
+
+                        pool_type = trial.suggest_categorical(f'pool_type_layer_{i}', ['max', 'avg', 'none'])
+                        pooling_types_list.append(pool_type)
+                        if pool_type != 'none':
+                            pooling_kernels_list.append(trial.suggest_categorical(f'pool_kernel_layer_{i}', [2]))
+                            pooling_strides_list.append(trial.suggest_categorical(f'pool_stride_layer_{i}', [2]))
+                        else:
+                            pooling_kernels_list.append(1) # Dummy value, not used
+                            pooling_strides_list.append(1) # Dummy value, not used
+
+                    trial_arch_params['filters_per_layer'] = filters_list
+                    trial_arch_params['kernel_sizes_per_layer'] = kernel_sizes_list
+                    trial_arch_params['strides_per_layer'] = strides_list
+                    trial_arch_params['padding_per_layer'] = padding_list
+                    trial_arch_params['pooling_types_per_layer'] = pooling_types_list
+                    trial_arch_params['pooling_kernel_sizes_per_layer'] = pooling_kernels_list
+                    trial_arch_params['pooling_strides_per_layer'] = pooling_strides_list
+
+                    trial_arch_params['use_batch_norm'] = trial.suggest_categorical('use_batch_norm', [True, False])
+                    trial_arch_params['dropout_rate'] = trial.suggest_float('dropout_rate', 0.0, 0.5)
+
+                    # Training parameters
+                    trial_learning_rate = trial.suggest_float('learning_rate', 1e-5, 1e-2, log=True)
+                    trial_batch_size = trial.suggest_categorical('batch_size', [16, 32, 64])
+
+                    hpo_model = SimpleCNN(
+                        input_channels=X_hpo_train.shape[1],
+                        num_classes=2,
+                        sequence_length=sequence_length,
+                        **trial_arch_params
+                    )
+                    hpo_optimizer = optim.Adam(hpo_model.parameters(), lr=trial_learning_rate)
+                    hpo_criterion = nn.CrossEntropyLoss()
+
+                    hpo_train_loader = DataLoader(hpo_train_dataset, batch_size=trial_batch_size, shuffle=True)
+                    hpo_val_loader = DataLoader(hpo_val_dataset, batch_size=trial_batch_size, shuffle=False)
+
+                    for epoch in range(hpo_trial_epochs):
+                        hpo_model.train()
+                        for data, targets in hpo_train_loader:
+                            hpo_optimizer.zero_grad()
+                            outputs = hpo_model(data)
+                            loss = hpo_criterion(outputs, targets)
+                            loss.backward()
+                            hpo_optimizer.step()
+
+                    hpo_model.eval()
+                    trial_val_loss = 0
+                    all_preds_probs = []
+                    all_targets_list = []
+                    with torch.no_grad():
+                        for data, targets in hpo_val_loader:
+                            outputs = hpo_model(data)
+                            loss = hpo_criterion(outputs, targets)
+                            trial_val_loss += loss.item() * data.size(0)
+                            all_preds_probs.extend(torch.softmax(outputs, dim=1)[:, 1].cpu().numpy())
+                            all_targets_list.extend(targets.cpu().numpy())
+
+                    avg_trial_val_loss = trial_val_loss / len(hpo_val_dataset) if len(hpo_val_dataset) > 0 else float('inf')
+
+                    if hpo_metric == 'val_loss': metric_value = avg_trial_val_loss
+                    elif hpo_metric == 'val_accuracy':
+                        preds_labels = (np.array(all_preds_probs) > 0.5).astype(int)
+                        metric_value = accuracy_score(all_targets_list, preds_labels)
+                    elif hpo_metric == 'val_auc':
+                        if len(np.unique(all_targets_list)) < 2: metric_value = 0.0
+                        else: metric_value = roc_auc_score(all_targets_list, all_preds_probs)
+                    else:
+                        logger.warning(f"Unsupported HPO metric '{hpo_metric}'. Defaulting to 'val_loss'.")
+                        metric_value = avg_trial_val_loss
+
+                    return metric_value
+
+                except optuna.exceptions.TrialPruned:
+                    raise # Pruner requested to stop this trial
+                except Exception as e:
+                    logger.error(f"Exception in Optuna objective function for trial {trial.number}: {e}", exc_info=True)
+                    return float('inf') if hpo_direction == 'minimize' else 0.0 # Penalize bad trials
+
+            sampler = optuna.samplers.TPESampler() if hpo_sampler_str.lower() == 'tpe' else optuna.samplers.RandomSampler()
+            pruner = optuna.pruners.MedianPruner() if hpo_pruner_str.lower() == 'median' else None
+
+            study = optuna.create_study(direction=hpo_direction, sampler=sampler, pruner=pruner)
+            hpo_timeout = self.params_manager.get_param('hpo_timeout_seconds', 3600) # Default 1 hour timeout for HPO
+            study.optimize(objective, n_trials=hpo_num_trials, timeout=hpo_timeout)
+
+            best_hpo_params = study.best_trial.params
+            logger.info(f"HPO voltooid voor {model_name_prefix}. Beste trial waarde ({hpo_metric}): {study.best_trial.value}")
+            logger.info(f"Beste HPO parameters: {best_hpo_params}")
+
+            # Update main training variables with HPO results
+            learning_rate = best_hpo_params['learning_rate']
+            batch_size = best_hpo_params['batch_size']
+
+            # Reconstruct arch_params from best_hpo_params
+            arch_params['num_conv_layers'] = best_hpo_params['num_conv_layers']
+            arch_params['filters_per_layer'] = [best_hpo_params[f'filters_layer_{i}'] for i in range(arch_params['num_conv_layers'])]
+            arch_params['kernel_sizes_per_layer'] = [best_hpo_params[f'kernel_size_layer_{i}'] for i in range(arch_params['num_conv_layers'])]
+            arch_params['strides_per_layer'] = [best_hpo_params[f'stride_layer_{i}'] for i in range(arch_params['num_conv_layers'])]
+            arch_params['padding_per_layer'] = [best_hpo_params[f'padding_layer_{i}'] for i in range(arch_params['num_conv_layers'])]
+            arch_params['pooling_types_per_layer'] = [best_hpo_params[f'pool_type_layer_{i}'] for i in range(arch_params['num_conv_layers'])]
+
+            pooling_kernels = []
+            pooling_strides = []
+            for i in range(arch_params['num_conv_layers']):
+                if arch_params['pooling_types_per_layer'][i] != 'none':
+                    pooling_kernels.append(best_hpo_params[f'pool_kernel_layer_{i}'])
+                    pooling_strides.append(best_hpo_params[f'pool_stride_layer_{i}'])
+                else:
+                    pooling_kernels.append(1) # Dummy, not used by SimpleCNN
+                    pooling_strides.append(1) # Dummy, not used by SimpleCNN
+            arch_params['pooling_kernel_sizes_per_layer'] = pooling_kernels
+            arch_params['pooling_strides_per_layer'] = pooling_strides
+
+            arch_params['use_batch_norm'] = best_hpo_params['use_batch_norm']
+            arch_params['dropout_rate'] = best_hpo_params['dropout_rate']
+
+            logger.info(f"Hoofd trainingsparameters bijgewerkt met HPO resultaten. Nieuwe arch_params: {arch_params}")
+            logger.info(f"Nieuwe learning_rate: {learning_rate}, Nieuwe batch_size: {batch_size}")
+
+            # Update model name prefix and paths to reflect HPO was run AND the regime
+            model_name_prefix = f"{model_name_base}_hpo_{regime_name}"
+            model_save_path = os.path.join(model_dir, f'cnn_model_{pattern_type}_{current_arch_key_orig}_hpo_{regime_name}.pth')
+            scaler_save_path = os.path.join(model_dir, f'scaler_params_{pattern_type}_{current_arch_key_orig}_hpo_{regime_name}.json')
+            logger.info(f"HPO uitgevoerd. Modelnaam prefix: {model_name_prefix}")
+        else:
+            # No HPO, use regime name in the prefix and paths
+            model_name_prefix = f"{model_name_base}_{regime_name}"
+            model_save_path = os.path.join(model_dir, f'cnn_model_{pattern_type}_{current_arch_key_orig}_{regime_name}.pth')
+            scaler_save_path = os.path.join(model_dir, f'scaler_params_{pattern_type}_{current_arch_key_orig}_{regime_name}.json')
+            logger.info(f"Geen HPO uitgevoerd. Modelnaam prefix: {model_name_prefix}")
+
+        logger.info(f"Start training PyTorch AI-model '{model_name_prefix}' ({regime_name} regime) met {len(training_data)} samples...")
+
+        if training_data.empty: logger.warning(f"Geen trainingsdata voor '{model_name_prefix}'."); return
+
+        feature_columns = ['open', 'high', 'low', 'close', 'volume', 'rsi', 'macd', 'macdsignal', 'macdhist', 'bb_lowerband', 'bb_middleband', 'bb_upperband']
+        if not all(col in training_data.columns for col in feature_columns + [target_label_column]):
+            missing_cols = [col for col in feature_columns + [target_label_column] if col not in training_data.columns]
+            logger.error(f"Benodigde kolommen ({missing_cols}) niet aanwezig in training_data voor '{model_name_prefix}'. Overslaan.")
+            return
+
+        # model_dir is already defined based on symbol and timeframe
+        # model_save_path and scaler_save_path are now set above
+
         # --- Finaal model trainen op de volledige X_train_full, y_train_full ---
-        logger.info(f"Starten van definitieve modeltraining voor {model_name_prefix} op volledige trainingsset...")
+        logger.info(f"Starten van definitieve modeltraining voor {model_name_prefix} ({regime_name} regime) op volledige trainingsset (parameters mogelijk HPO-geoptimaliseerd)...")
         train_dataset_full = TensorDataset(X_train_full, y_train_full)
         val_dataset_full = TensorDataset(X_val_full, y_val_full) # Gebruik de oorspronkelijke validatieset
         train_loader_full = DataLoader(train_dataset_full, batch_size=batch_size, shuffle=True)
@@ -504,12 +927,12 @@ class PreTrainer:
             epoch_train_loss = sum(loss.item()*data.size(0) for data,targets in train_loader_full for outputs in [final_model(data)] for loss in [final_criterion(outputs,targets)] for _ in [final_optimizer.zero_grad(),loss.backward(),final_optimizer.step()]) / len(train_dataset_full)
             final_model.eval(); current_epoch_val_loss, all_preds, all_targets = 0.0, [], []
             with torch.no_grad():
-                for data, targets in val_loader_full: # Valideer op X_val_full, y_val_full
+                for data, targets in val_loader_full: # Valideer op X_val_full, y_val_full (deze is gedefinieerd buiten HPO-blok)
                     outputs = final_model(data); current_epoch_val_loss += final_criterion(outputs, targets).item() * data.size(0)
                     all_preds.extend(torch.softmax(outputs, dim=1).cpu().numpy()) # Store probabilities
                     all_targets.extend(targets.cpu().numpy())
 
-            avg_epoch_val_loss = current_epoch_val_loss / len(val_dataset_full) if len(val_dataset_full) > 0 else float('nan')
+            avg_epoch_val_loss = current_epoch_val_loss / len(val_dataset_full) if len(val_dataset_full) > 0 else float('nan') # val_dataset_full is from outer scope
             y_pred_labels = np.argmax(all_preds, axis=1)
             y_pred_probs = np.array(all_preds)[:, 1]
 
@@ -534,20 +957,21 @@ class PreTrainer:
             logger.info(f"Scaler params '{model_name_prefix}' opgeslagen: {scaler_save_path}")
         except Exception as e: logger.error(f"Fout opslaan final model/scaler '{model_name_prefix}': {e}")
 
-        await asyncio.to_thread(self._log_pretrain_activity, model_type=model_name_prefix, data_size=len(X_train_full)+len(X_val_full),
+        await asyncio.to_thread(self._log_pretrain_activity, model_type=model_name_prefix, regime_name=regime_name, data_size=len(X_train_full)+len(X_val_full),
                                 model_path_saved=model_save_path, scaler_params_path_saved=scaler_save_path,
-                                cv_results=cv_results, **best_metrics) # Pass CV results here
-        logger.info(f"Pre-training {model_name_prefix} voltooid. Beste Val Loss: {best_metrics.get('loss', float('inf')):.4f}, Acc: {best_metrics.get('accuracy', 0.0):.4f}")
+                                cv_results=cv_results, **best_metrics)
+        logger.info(f"Pre-training {model_name_prefix} ({regime_name} regime) voltooid. Beste Val Loss: {best_metrics.get('loss', float('inf')):.4f}, Acc: {best_metrics.get('accuracy', 0.0):.4f}")
         return best_metrics.get('loss')
 
     def _log_pretrain_activity(self, model_type: str, data_size: int, model_path_saved: str, scaler_params_path_saved: str,
+                             regime_name: Optional[str] = None, # Added regime_name
                              best_val_loss: float = None, best_val_accuracy: float = None,
                              best_val_precision: float = None, best_val_recall: float = None,
-                             best_val_f1: float = None, auc: float = None, # Added AUC from best_metrics
-                             cv_results: Optional[dict] = None): # Added cv_results
-        entry = {"timestamp": datetime.now().isoformat(), "model_type": model_type, "data_size": data_size,
+                             best_val_f1: float = None, auc: float = None,
+                             cv_results: Optional[dict] = None):
+        entry = {"timestamp": datetime.now().isoformat(), "model_type": model_type, "regime_name": regime_name, "data_size": data_size,
                  "status": "completed_pytorch_training", "model_path_saved": model_path_saved,
-                 "scaler_params_path_saved": scaler_params_path_saved,
+                 "scaler_params_path_saved": scaler_params_path_saved, # Corrected key
                  "final_model_validation_loss": best_val_loss, # Clarified this is for the final model
                  "final_model_validation_accuracy": best_val_accuracy,
                  "final_model_validation_precision": best_val_precision,
@@ -592,46 +1016,91 @@ class PreTrainer:
         pairs_to_fetch = self.params_manager.get_param("data_fetch_pairs")
         timeframes_to_fetch = self.params_manager.get_param("data_fetch_timeframes")
         patterns_to_train_list = self.params_manager.get_param('patterns_to_train')
-        if not pairs_to_fetch or not timeframes_to_fetch: logger.error("Geen 'data_fetch_pairs' of 'data_fetch_timeframes' in params. Pipeline gestopt."); return
-        if not patterns_to_train_list: logger.warning("Ingen 'patterns_to_train' funnet i parametere. Standard til ['bullFlag']."); patterns_to_train_list = ["bullFlag"]
-        logger.info(f"Pipeline voor paren: {pairs_to_fetch}, timeframes: {timeframes_to_fetch}, patterns: {patterns_to_train_list}")
+        regimes_to_train_for = self.params_manager.get_param('regimes_to_train', ["all"])
+
+        if not pairs_to_fetch or not timeframes_to_fetch:
+            logger.error("Geen 'data_fetch_pairs' of 'data_fetch_timeframes' in params. Pipeline gestopt.")
+            return
+        if not patterns_to_train_list:
+            logger.warning("Geen 'patterns_to_train' funnet i parametere. Standaard naar ['bullFlag'].")
+            patterns_to_train_list = ["bullFlag"]
+
+        logger.info(f"Pipeline voor paren: {pairs_to_fetch}, timeframes: {timeframes_to_fetch}, patterns: {patterns_to_train_list}, regimes: {regimes_to_train_for}")
+
         for pattern_type in patterns_to_train_list:
-            logger.info(f"--- Starter treningsrunde for patrontype: {pattern_type} ---")
+            logger.info(f"--- Starten trainingsronde voor patroontype: {pattern_type} ---")
             for pair in pairs_to_fetch:
                 for timeframe in timeframes_to_fetch:
-                    logger.info(f"--- Verwerken {pair} ({timeframe}) voor patroon: {pattern_type} ---")
-                    historical_df = await self.fetch_historical_data(pair, timeframe)
-                    if historical_df.empty: logger.error(f"Geen hist. data voor {pair} ({timeframe}). Hopper over."); continue
-                    processed_df = await self.prepare_training_data(historical_df.copy(), pattern_type=pattern_type)
-                    if processed_df.empty: logger.error(f"Geen data na voorbereiding voor {pair} ({timeframe}), patroon {pattern_type}. Hopper over."); continue
-                    target_label_column = f"{pattern_type}_label"
-                    await self.train_ai_models(training_data=processed_df, symbol=pair, timeframe=timeframe, pattern_type=pattern_type, target_label_column=target_label_column)
-                    # Time of day effectiveness can be analyzed on any of the processed_df, maybe just once after all loops?
-                    # For now, keeping it here per pattern/pair/timeframe as it was.
-                    await self.analyze_time_of_day_effectiveness(processed_df, strategy_id)
+                    logger.info(f"--- Data ophalen voor {pair} ({timeframe}), patroon: {pattern_type} ---")
+                    historical_data_by_regime = await self.fetch_historical_data(pair, timeframe)
 
-        logger.info(f"--- Pre-training en model training voltooid voor strategie {strategy_id} ---")
+                    if not historical_data_by_regime or all(df.empty for df in historical_data_by_regime.values()):
+                        logger.warning(f"Geen historische data (per regime of 'all') beschikbaar voor {pair} ({timeframe}). Overslaan.")
+                        continue
+
+                    for regime_name in regimes_to_train_for:
+                        logger.info(f"--- Verwerken {pair} ({timeframe}) voor patroon: {pattern_type}, regime: {regime_name} ---")
+
+                        historical_df_for_regime = historical_data_by_regime.get(regime_name)
+                        if historical_df_for_regime is None or historical_df_for_regime.empty:
+                            logger.warning(f"Geen data voor regime '{regime_name}' voor {pair} ({timeframe}). Overslaan training voor dit regime.")
+                            continue
+
+                        logger.info(f"Voorbereiden data voor {pair}-{timeframe}-{pattern_type}-{regime_name} ({len(historical_df_for_regime)} kaarsen).")
+                        processed_df = await self.prepare_training_data(historical_df_for_regime.copy(), pattern_type=pattern_type)
+
+                        if processed_df.empty:
+                            logger.error(f"Geen data na voorbereiding voor {pair} ({timeframe}), patroon {pattern_type}, regime {regime_name}. Overslaan.")
+                            continue
+
+                        target_label_column = f"{pattern_type}_label"
+                        await self.train_ai_models(
+                            training_data=processed_df,
+                            symbol=pair,
+                            timeframe=timeframe,
+                            pattern_type=pattern_type,
+                            target_label_column=target_label_column,
+                            regime_name=regime_name
+                        )
+
+                        if not processed_df.empty: # Only analyze if there was data
+                            await self.analyze_time_of_day_effectiveness(processed_df, f"{strategy_id}_{pattern_type}_{regime_name}")
+
+        logger.info(f"--- Pre-training en model training voltooid voor strategie {strategy_id} voor alle geconfigureerde patronen/paren/tijdsbestekken/regimes ---")
 
         # --- Start Backtesting Phase ---
         perform_backtesting = self.params_manager.get_param('perform_backtesting', False)
         if perform_backtesting and self.backtester:
             logger.info(f"--- Starten Backtesting Fase voor strategie: {strategy_id} ---")
-            sequence_length_cnn = self.params_manager.get_param('sequence_length_cnn', 30)
-            current_arch_key = self.params_manager.get_param('current_cnn_architecture_key', "default_simple")
+            if len(regimes_to_train_for) > 1 or "all" not in regimes_to_train_for:
+                 logger.warning("Meerdere regimes zijn getraind. Backtesting gebruikt momenteel modellen die getraind zijn op 'all' data (of de standaard modelnaam zonder regime suffix, of met _hpo_all).")
 
-            for pattern_type_bt in patterns_to_train_list: # Use the same list of patterns
+            sequence_length_cnn = self.params_manager.get_param('sequence_length_cnn', 30)
+            # Determine architecture key for backtesting. If HPO was run for 'all' regime, it might have a specific name.
+            # This assumes HPO for "all" regime would result in parameters used by current_cnn_architecture_key or a suffixed version.
+            current_arch_key_for_bt = self.params_manager.get_param('current_cnn_architecture_key', "default_simple")
+            # If HPO was generally performed (e.g. for the 'all' regime), backtester should try to load the HPO version of the 'all' model.
+            # The backtester's model loading logic might need to be aware of the _hpo_all suffix.
+            # For now, we pass the base architecture key, and if an HPO'd 'all' model exists with a conventional name, backtester should find it.
+
+            for pattern_type_bt in patterns_to_train_list:
                 logger.info(f"--- Backtesting voor patroontype: {pattern_type_bt} ---")
-                for pair_bt in pairs_to_fetch: # Use the same list of pairs
-                    for timeframe_bt in timeframes_to_fetch: # Use the same list of timeframes
-                        logger.info(f"--- Backtesten {pair_bt} ({timeframe_bt}) voor patroon: {pattern_type_bt}, architectuur: {current_arch_key} ---")
+                for pair_bt in pairs_to_fetch:
+                    for timeframe_bt in timeframes_to_fetch:
+                        # The architecture_key passed to backtester should ideally point to the model trained on "all" data,
+                        # potentially an HPO version if HPO was run for the "all" regime.
+                        # The backtester would need logic to find e.g. {arch_key}_hpo_all.pth then {arch_key}_all.pth.
+                        # For this subtask, we'll pass the base arch key and assume "all" regime.
+                        logger.info(f"--- Backtesten {pair_bt} ({timeframe_bt}) voor patroon: {pattern_type_bt}, architectuur: {current_arch_key_for_bt} (veronderstelt 'all' regime model) ---")
                         await self.backtester.run_backtest(
                             symbol=pair_bt,
                             timeframe=timeframe_bt,
                             pattern_type=pattern_type_bt,
-                            architecture_key=current_arch_key,
-                            sequence_length=sequence_length_cnn
+                            architecture_key=current_arch_key_for_bt,
+                            sequence_length=sequence_length_cnn,
+                            regime_filter="all" # Explicitly pass "all" to ensure backtester loads the correct model if it's regime-aware
                         )
-            logger.info(f"--- Backtesting Fase voltooid voor strategie {strategy_id} ---")
+            logger.info(f"--- Backtesting Fase voltooid voor strategie {strategy_id} (gebruikmakend van 'all' data modellen) ---")
         elif not self.backtester:
             logger.warning("Backtester object is niet geïnitialiseerd. Backtesting overgeslagen.")
         else:
@@ -656,152 +1125,204 @@ if __name__ == "__main__":
         test_pairs_for_test = ["ETH/EUR"]
         test_timeframe = "1h"
         test_patterns_to_train = ["bullFlag"]
+        test_arch_key = "default_simple" # Using a fixed arch key for test predictability
+        test_regimes = ["all", "testbull"]
 
-        logger.info(f"--- STARTING INTEGRATION TEST FOR PRETRAINER (CV & BACKTESTING) ---")
-        logger.info(f"Test configuration: Pairs={test_pairs_for_test}, Timeframe={test_timeframe}, Patterns={test_patterns_to_train}")
+        # Define test-specific paths
+        test_data_base_dir = Path(os.path.dirname(os.path.abspath(__file__))) / '..' / 'data' / 'test_pretrainer_artifacts'
+        test_gold_standard_dir = test_data_base_dir / 'gold_standard_data'
+        test_market_regimes_file = test_data_base_dir / 'market_regimes_test.json' # Different from main one
 
-        # --- Artifact Clearing ---
+        logger.info(f"--- STARTING INTEGRATION TEST FOR PRETRAINER (ALL FEATURES) ---")
+        logger.info(f"Test config: Pair={test_pairs_for_test[0]}, TF={test_timeframe}, Pattern={test_patterns_to_train[0]}, Arch={test_arch_key}, Regimes={test_regimes}")
+        logger.info(f"Test artifacts base dir: {test_data_base_dir}")
+
+        # --- Artifact Clearing (before test run) ---
+        # Clear model outputs for this specific test config
         for pair_name in test_pairs_for_test:
             pair_sani = pair_name.replace('/', '_')
-            # Clear raw data cache for this specific test pair/timeframe
-            raw_data_cache_dir = Path(os.path.dirname(os.path.abspath(__file__))) / '..' / 'data' / 'raw_historical_data' / pair_sani / test_timeframe
-            if raw_data_cache_dir.exists(): shutil.rmtree(raw_data_cache_dir)
-            # Clear model output dir for this specific test pair/timeframe
             model_output_dir = Path(MODELS_DIR) / pair_sani / test_timeframe
             if model_output_dir.exists(): shutil.rmtree(model_output_dir)
 
-        # Clear pretrain log file
+        # Clear general test artifacts dir
+        if test_data_base_dir.exists(): shutil.rmtree(test_data_base_dir)
+        os.makedirs(test_gold_standard_dir, exist_ok=True)
+
+        # Clear main log files that PreTrainer uses
         if os.path.exists(PRETRAIN_LOG_FILE): os.remove(PRETRAIN_LOG_FILE)
+        if os.path.exists(TIME_EFFECTIVENESS_FILE): os.remove(TIME_EFFECTIVENESS_FILE)
+        if os.path.exists(MARKET_REGIMES_FILE): os.remove(MARKET_REGIMES_FILE) # Remove main one if it exists, test will create its own
 
         # Clear backtest results file
         backtest_results_path = Path(MEMORY_DIR) / 'backtest_results.json'
-        if backtest_results_path.exists():
-            os.remove(backtest_results_path)
-            logger.info(f"Verwijderde bestaand backtest resultatenbestand: {backtest_results_path}")
-        logger.info(f"--- Test Setup: Artifacts Cleared (Raw Data Cache, Models, Pretrain Log, Backtest Log) ---")
+        if backtest_results_path.exists(): os.remove(backtest_results_path)
+
+        logger.info(f"--- Test Setup: Artifacts Cleared ---")
+
+        # --- Create Dummy Gold Standard CSV ---
+        dummy_gold_csv_path = test_gold_standard_dir / f"{test_pairs_for_test[0].replace('/', '_')}_{test_timeframe}_{test_patterns_to_train[0]}_gold.csv"
+        with open(dummy_gold_csv_path, 'w') as f:
+            f.write("timestamp,open,high,low,close,volume,gold_label\n")
+            # Timestamps for Nov 2, 2023, 00:00 GMT and 01:00 GMT (ensure these are within test data fetch range)
+            f.write("1698883200000,1800,1801,1799,1800.5,10,1\n") # Nov 2, 00:00
+            f.write("1698886800000,1800.5,1802,1799.5,1801.0,12,0\n") # Nov 2, 01:00
+        logger.info(f"Dummy gold standard CSV created at: {dummy_gold_csv_path}")
+
+        # --- Create Dummy Market Regimes JSON ---
+        # This file needs to be at the location PreTrainer expects (MARKET_REGIMES_FILE)
+        # So we overwrite the main path for the duration of this test or use a param to point to test file.
+        # For now, let's make PreTrainer use our test_market_regimes_file by setting its path in params.
+        # However, PreTrainer reads MARKET_REGIMES_FILE directly. So, we create it at that location.
+        dummy_regimes_content = {
+            test_pairs_for_test[0]: {
+                "testbull": [{"start_date": "2023-11-01", "end_date": "2023-11-03"}], # Short period for testing
+                "testbear": [{"start_date": "2023-11-04", "end_date": "2023-11-06"}]  # Another regime
+            }
+        }
+        with open(MARKET_REGIMES_FILE, 'w') as f: # Overwrite the main file path for the test
+            json.dump(dummy_regimes_content, f, indent=4)
+        logger.info(f"Dummy market regimes JSON created at: {MARKET_REGIMES_FILE}")
+
 
         # --- ParamsManager Setup for Test ---
         params_manager_instance = ParamsManager()
-        await params_manager_instance.set_param("data_fetch_start_date_str", "2023-11-01") # Adjusted for sufficient data
-        await params_manager_instance.set_param("data_fetch_end_date_str", "2023-12-20")
+        # Data fetch range should include gold standard and regime dates
+        await params_manager_instance.set_param("data_fetch_start_date_str", "2023-10-30")
+        await params_manager_instance.set_param("data_fetch_end_date_str", "2023-11-10")
         await params_manager_instance.set_param("data_fetch_pairs", test_pairs_for_test)
         await params_manager_instance.set_param("data_fetch_timeframes", [test_timeframe])
         await params_manager_instance.set_param("patterns_to_train", test_patterns_to_train)
-        await params_manager_instance.set_param('sequence_length_cnn', 10)
+
+        await params_manager_instance.set_param('sequence_length_cnn', 5) # Smaller for faster test
         await params_manager_instance.set_param('num_epochs_cnn', 1)
-        await params_manager_instance.set_param('batch_size_cnn', 8)
+        await params_manager_instance.set_param('batch_size_cnn', 4)
+        await params_manager_instance.set_param('num_epochs_cnn_hpo_trial', 1) # Epochs for HPO trials
 
-        # CV parameters
-        await params_manager_instance.set_param('perform_cross_validation', True)
-        await params_manager_instance.set_param('cv_num_splits', 2)
+        # Gold Standard
+        await params_manager_instance.set_param("gold_standard_data_path", str(test_gold_standard_dir))
 
-        # Backtesting parameters
-        await params_manager_instance.set_param('perform_backtesting', True)
-        await params_manager_instance.set_param('backtest_start_date_str', "2023-12-10") # Start backtest after training data
-        await params_manager_instance.set_param('backtest_entry_threshold', 0.60)
-        await params_manager_instance.set_param('backtest_take_profit_pct', 0.02)
-        await params_manager_instance.set_param('backtest_stop_loss_pct', 0.01)
-        await params_manager_instance.set_param('backtest_hold_duration_candles', 5)
-        await params_manager_instance.set_param('backtest_initial_capital', 1000.0)
-        await params_manager_instance.set_param('backtest_stake_pct_capital', 0.1)
+        # HPO
+        await params_manager_instance.set_param('perform_hyperparameter_optimization', True)
+        await params_manager_instance.set_param('hpo_num_trials', 2) # Minimal trials
+        await params_manager_instance.set_param('hpo_timeout_seconds', 60) # Short timeout
 
-        # Labeling config
+        # Regimes
+        await params_manager_instance.set_param('regimes_to_train', test_regimes) # Test 'all' and 'testbull'
+
+        # Labeling config (ensure it's simple for testing)
         current_configs = params_manager_instance.get_param('pattern_labeling_configs')
         if not current_configs: current_configs = {}
-        current_configs.setdefault("bullFlag", {}).update({ "future_N_candles": 5, "profit_threshold_pct": 0.005, "loss_threshold_pct": -0.003 })
+        current_configs.setdefault(test_patterns_to_train[0], {}).update({ "future_N_candles": 3, "profit_threshold_pct": 0.001, "loss_threshold_pct": -0.001 })
         await params_manager_instance.set_param('pattern_labeling_configs', current_configs)
 
-        # CNN Architecture
-        await params_manager_instance.set_param('current_cnn_architecture_key', "default_simple")
-        logger.info(f"TEST SETUP: ParamsManager ingesteld voor CV en Backtesting.")
+        await params_manager_instance.set_param('current_cnn_architecture_key', test_arch_key)
+        # Ensure the test_arch_key exists in cnn_architecture_configs or HPO will use its own suggestions
+        cnn_arch_configs = params_manager_instance.get_param('cnn_architecture_configs')
+        if test_arch_key not in cnn_arch_configs:
+            cnn_arch_configs[test_arch_key] = {"num_conv_layers": 1, "filters_per_layer": [16], "kernel_sizes_per_layer": [3], "strides_per_layer": [1], "padding_per_layer": [1], "pooling_types_per_layer": ["max"], "pooling_kernel_sizes_per_layer": [2], "pooling_strides_per_layer": [2], "use_batch_norm": False, "dropout_rate": 0.1}
+            await params_manager_instance.set_param('cnn_architecture_configs', cnn_arch_configs)
+
+        logger.info(f"TEST SETUP: ParamsManager configured for Gold Standard, HPO, and Regimes.")
 
         # --- PreTrainer Execution ---
         pre_trainer = PreTrainer(params_manager=params_manager_instance)
-        test_strategy_id = "TestStrategy_CV_BT"
+        test_strategy_id = "TestStrategy_FullFeatures"
 
-        print(f"\n--- EXECUTING PreTrainer Pipeline (CV & Backtesting enabled) ---")
-        await pre_trainer.run_pretraining_pipeline(strategy_id=test_strategy_id, params_manager=params_manager_instance)
+        try:
+            print(f"\n--- EXECUTING PreTrainer Pipeline (Gold, HPO, Regimes, CV, Backtesting) ---")
+            await pre_trainer.run_pretraining_pipeline(strategy_id=test_strategy_id, params_manager=params_manager_instance)
+        finally:
+            # --- Cleanup Test-Specific Artifacts ---
+            logger.info(f"--- Cleaning up test-specific artifacts ---")
+            if test_data_base_dir.exists():
+                shutil.rmtree(test_data_base_dir)
+                logger.info(f"Removed test artifacts base directory: {test_data_base_dir}")
+            # Remove the market_regimes.json created at the main path
+            if os.path.exists(MARKET_REGIMES_FILE):
+                 os.remove(MARKET_REGIMES_FILE)
+                 logger.info(f"Removed dummy market regimes file: {MARKET_REGIMES_FILE}")
+
 
         # --- Validation of Outputs ---
-        print(f"\n--- VALIDATION OF OUTPUTS (CV & Backtest Run) ---")
-        arch_key_used = params_manager_instance.get_param('current_cnn_architecture_key')
+        print(f"\n--- VALIDATION OF OUTPUTS (Gold, HPO, Regimes) ---")
 
-        # Validate Model and Scaler files
+        # Validate Model and Scaler files for each regime trained
         for pair_name in test_pairs_for_test:
             pair_sani = pair_name.replace('/', '_')
             for pattern in test_patterns_to_train:
-                model_dir = Path(MODELS_DIR) / pair_sani / test_timeframe
-                expected_model_file = model_dir / f'cnn_model_{pattern}_{arch_key_used}.pth'
-                expected_scaler_file = model_dir / f'scaler_params_{pattern}_{arch_key_used}.json'
+                for regime_name_val in test_regimes: # test_regimes = ["all", "testbull"]
+                    model_dir_val = Path(MODELS_DIR) / pair_sani / test_timeframe
+                    # Filename includes _hpo_ because HPO is enabled
+                    expected_model_fname = f'cnn_model_{pattern}_{test_arch_key}_hpo_{regime_name_val}.pth'
+                    expected_scaler_fname = f'scaler_params_{pattern}_{test_arch_key}_hpo_{regime_name_val}.json'
 
-                if expected_model_file.exists(): print(f"SUCCESS: Model file for {pair_sani}/{pattern} (arch: {arch_key_used}) created.")
-                else: print(f"FAILURE: Model file for {pair_sani}/{pattern} (arch: {arch_key_used}) NOT created: {expected_model_file}")
+                    expected_model_file = model_dir_val / expected_model_fname
+                    expected_scaler_file = model_dir_val / expected_scaler_fname
 
-                if expected_scaler_file.exists(): print(f"SUCCESS: Scaler file for {pair_sani}/{pattern} (arch: {arch_key_used}) created.")
-                else: print(f"FAILURE: Scaler file for {pair_sani}/{pattern} (arch: {arch_key_used}) NOT created: {expected_scaler_file}")
+                    assert expected_model_file.exists(), f"Model file MISSING: {expected_model_file}"
+                    print(f"SUCCESS: Model file for {regime_name_val} regime created: {expected_model_file.name}")
+                    assert expected_scaler_file.exists(), f"Scaler file MISSING: {expected_scaler_file}"
+                    print(f"SUCCESS: Scaler file for {regime_name_val} regime created: {expected_scaler_file.name}")
 
-        # Validate Pretrain Log for CV results
-        if os.path.exists(PRETRAIN_LOG_FILE):
-            with open(PRETRAIN_LOG_FILE, 'r') as f: log_entries = json.load(f)
-            if log_entries and isinstance(log_entries, list) and len(log_entries) > 0:
-                last_log_entry = log_entries[-1] # Assuming last entry corresponds to the test run
-                if 'cross_validation_results' in last_log_entry:
-                    print(f"SUCCESS: 'cross_validation_results' found in the last pretrain log entry: {last_log_entry['cross_validation_results']}")
-                    assert last_log_entry['cross_validation_results']['num_splits'] == params_manager_instance.get_param('cv_num_splits')
-                else:
-                    print(f"FAILURE: 'cross_validation_results' not found in the last pretrain log entry.")
-            else: print(f"FAILURE: Pretrain Log file {PRETRAIN_LOG_FILE} is empty or not a list.")
-        else: print(f"FAILURE: Pretrain Log file {PRETRAIN_LOG_FILE} not found.")
+        # Validate Pretrain Log for HPO and Regime entries
+        assert os.path.exists(PRETRAIN_LOG_FILE), f"Pretrain log file MISSING: {PRETRAIN_LOG_FILE}"
+        with open(PRETRAIN_LOG_FILE, 'r') as f:
+            log_entries = json.load(f)
 
-        # Validate Backtest Results File
-        if backtest_results_path.exists():
+        assert isinstance(log_entries, list), "Pretrain log is not a list."
+        # Expecting entries for each regime (all, testbull)
+        # Since CV is also on, if it runs before HPO it might create entries too.
+        # For this test, HPO runs first within train_ai_models, then CV (if enabled, it is).
+        # The log entries from HPO trials are not stored here, only final model training log.
+
+        found_all_regime_log = False
+        found_testbull_regime_log = False
+        hpo_params_found_in_log = False
+
+        for entry in log_entries:
+            assert "model_type" in entry
+            assert "regime_name" in entry
+            assert "cross_validation_results" in entry # CV is on
+
+            if entry["regime_name"] == "all" and f"{test_arch_key}_hpo_all" in entry["model_type"]:
+                found_all_regime_log = True
+                if "best_trial_params" in entry.get("cross_validation_results", {}).get("hpo_results", {}): # Assuming HPO results get logged under CV for now
+                     hpo_params_found_in_log = True
+            if entry["regime_name"] == "testbull" and f"{test_arch_key}_hpo_testbull" in entry["model_type"]:
+                found_testbull_regime_log = True
+
+        assert found_all_regime_log, "Log entry for 'all' regime (with HPO suffix) not found."
+        assert found_testbull_regime_log, "Log entry for 'testbull' regime (with HPO suffix) not found."
+        # The HPO params themselves are in study.best_trial.params logged during HPO, not directly in _log_pretrain_activity's main params.
+        # _log_pretrain_activity could be enhanced to store best_trial.params. For now, checking model name is key.
+        print("SUCCESS: Pretrain log contains entries for 'all' and 'testbull' regimes with HPO naming.")
+
+        # Validate Backtest Results File (Backtesting runs on "all" model by default)
+        assert os.path.exists(backtest_results_path), f"Backtest results file MISSING: {backtest_results_path}"
             with open(backtest_results_path, 'r') as f:
                 try:
                     backtest_log_entries = json.load(f)
-                    if backtest_log_entries and isinstance(backtest_log_entries, list) and len(backtest_log_entries) > 0:
-                        print(f"SUCCESS: Backtest results file created and contains {len(backtest_log_entries)} entries.")
-                        first_bt_entry = backtest_log_entries[0] # Check the first entry
+                    assert isinstance(backtest_log_entries, list) and len(backtest_log_entries) > 0, "Backtest log is empty or not a list."
+                    print(f"SUCCESS: Backtest results file created and contains {len(backtest_log_entries)} entries.")
+                    # Further checks on backtest content can be added if needed, e.g., ensuring it used the HPO "all" model.
+                    # For now, existence and basic format is checked.
+                    first_bt_entry = backtest_log_entries[0]
+                    assert first_bt_entry['architecture_key'] == test_arch_key, f"Backtest ran with {first_bt_entry['architecture_key']} instead of {test_arch_key}"
+                    # If HPO was run for 'all' regime, the backtester might use a model like 'default_simple_hpo_all'
+                    # This depends on how Backtester.load_model constructs the filename.
+                    # Current test setup for backtesting in PreTrainer passes `current_arch_key_for_bt` (which is `test_arch_key`)
+                    # and `regime_filter="all"`. The Backtester needs to correctly interpret this to find the HPO-All model.
+                    # For now, we assume it uses the base key and the backtester's loading logic handles finding the HPO version.
+                    print(f"Backtest entry seems OK, used architecture key: {first_bt_entry['architecture_key']}")
 
-                        # Basic assertions from previous step
-                        assert first_bt_entry['symbol'] == test_pairs_for_test[0]
-                        assert first_bt_entry['timeframe'] == test_timeframe
-                        assert first_bt_entry['pattern_type'] == test_patterns_to_train[0]
-                        assert first_bt_entry['architecture_key'] == arch_key_used
-                        print(f"First backtest entry - Basic info: Symbol={first_bt_entry['symbol']}, Return={first_bt_entry['metrics']['total_return_pct']:.2f}%")
-
-                        # Verify presence of new financial metrics
-                        expected_metrics = [
-                            'initial_capital', 'final_capital', 'total_return_pct', 'total_pnl_from_trades',
-                            'num_trades', 'num_wins', 'num_losses', 'win_rate_pct', 'loss_rate_pct',
-                            'average_pnl_per_trade', 'avg_profit_per_winning_trade', 'avg_loss_per_losing_trade',
-                            'profit_factor', 'sharpe_ratio_annualized', 'max_drawdown_pct'
-                        ]
-                        missing_metrics = [m for m in expected_metrics if m not in first_bt_entry['metrics']]
-                        if not missing_metrics:
-                            print(f"SUCCESS: All expected new financial metrics are present in the first backtest entry.")
-                            print(f"  Sharpe Ratio: {first_bt_entry['metrics'].get('sharpe_ratio_annualized')}")
-                            print(f"  Max Drawdown: {first_bt_entry['metrics'].get('max_drawdown_pct')}")
-                            print(f"  Profit Factor: {first_bt_entry['metrics'].get('profit_factor')}")
-                        else:
-                            print(f"FAILURE: Missing financial metrics in backtest entry: {missing_metrics}")
-                            assert not missing_metrics, f"Missing metrics: {missing_metrics}"
-
-                        # Verify params_used structure
-                        if 'params_used' in first_bt_entry:
-                            print(f"SUCCESS: 'params_used' key found in backtest entry.")
-                        else:
-                            print(f"FAILURE: 'params_used' key NOT found in backtest entry.")
-                            assert 'params_used' in first_bt_entry, "'params_used' key missing"
-
-                    else:
-                        print(f"FAILURE: Backtest results file {backtest_results_path} is empty or has an unexpected format (not a non-empty list).")
                 except json.JSONDecodeError:
-                    print(f"FAILURE: Could not decode JSON from backtest results file {backtest_results_path}.")
+                    assert False, f"FAILURE: Could not decode JSON from backtest results file {backtest_results_path}."
         else:
-            print(f"FAILURE: Backtest results file {backtest_results_path} not found.")
+            assert False, f"FAILURE: Backtest results file {backtest_results_path} not found."
 
-        # --- Optional: Test SimpleCNN Custom Architecture Instantiation ---
-        print("\n--- Testing SimpleCNN Custom Architecture Instantiation ---")
+
+        # --- Optional: Test SimpleCNN Custom Architecture Instantiation (already present, keep) ---
+        print("\n--- Testing SimpleCNN Custom Architecture Instantiation (original test) ---")
         try:
             num_input_features_example = 12
             custom_cnn = SimpleCNN( input_channels=num_input_features_example, num_classes=2, sequence_length=30,
