@@ -116,30 +116,39 @@ class StrategyManager:
 
         adjustments = proposal.get('adjustments', {})
         parameter_changes = adjustments.get('parameterChanges')
-        roi_changes = adjustments.get('roi') # Assuming format like {0: 0.1, 60: 0.05}
-        stoploss_change = adjustments.get('stoploss') # Assuming float value
-        trailing_stop_changes = adjustments.get('trailingStop') # Assuming dict like {"enabled": True, "value": 0.01}
+        roi_changes = adjustments.get('roi')
+        stoploss_change = adjustments.get('stoploss')
+        trailing_adjustments = adjustments.get('trailingStop') # This is a dictionary
 
         changes_made = False
 
         # Update standard parameters
         if parameter_changes:
-            for param, value in parameter_changes.items():
-                # self.params_manager.set_param should handle saving these to the strategy file or its own store
-                await self.params_manager.set_param(strategy_id, param, value) # Assuming async
-                logger.debug(f"Parameter '{param}' of strategy {strategy_id} set to {value}.")
+            for param_name, param_value in parameter_changes.items():
+                # Assuming params_manager.set_param takes (strategy_id, key, value)
+                # It should be (key, value, strategy_id) based on ParamsManager implementation
+                await self.params_manager.set_param(key=param_name, value=param_value, strategy_id=strategy_id)
+                logger.debug(f"Parameter '{param_name}' of strategy {strategy_id} set to {param_value}.")
             changes_made = True
 
-        # Update ROI, Stoploss, Trailing Stop using a dedicated method in ParamsManager
-        if roi_changes or stoploss_change or trailing_stop_changes:
-            # update_strategy_roi_sl_params should handle the specifics of how these are stored/updated
+        # Prepare parameters for update_strategy_roi_sl_params
+        new_trailing_stop_value = None
+        new_trailing_offset_value = None
+
+        if trailing_adjustments: # trailing_adjustments is a dict e.g. {"value": 0.01, "offset": 0.005}
+            new_trailing_stop_value = trailing_adjustments.get('value')
+            new_trailing_offset_value = trailing_adjustments.get('offset')
+
+        # Only call if there are actual ROI/SL/Trailing changes
+        if roi_changes or stoploss_change or trailing_adjustments: # trailing_adjustments itself implies a change if present
             await self.params_manager.update_strategy_roi_sl_params(
                 strategy_id=strategy_id,
-                roi_table=roi_changes,
-                stoploss_value=stoploss_change,
-                trailing_stop_params=trailing_stop_changes
-            ) # Assuming async
-            logger.info(f"ROI/SL/TS for strategy {strategy_id} updated.")
+                new_roi=roi_changes, # Pass directly, can be None
+                new_stoploss=stoploss_change, # Pass directly, can be None
+                new_trailing_stop=new_trailing_stop_value, # Pass extracted value, can be None
+                new_trailing_only_offset_is_reached=new_trailing_offset_value # Pass extracted value, can be None
+            )
+            logger.info(f"ROI/SL/Trailing parameters for strategy {strategy_id} update initiated.")
             changes_made = True
 
         if changes_made:
@@ -249,22 +258,36 @@ if __name__ == "__main__":
             self.params[strategy_id]["buy"][param_name] = value
             logger.info(f"MockParamsManager: Set {param_name} to {value} for {strategy_id}")
 
-        async def update_strategy_roi_sl_params(self, strategy_id: str, roi_table: Optional[Dict] = None,
-                                                stoploss_value: Optional[float] = None,
-                                                trailing_stop_params: Optional[Dict] = None):
+        async def update_strategy_roi_sl_params(self, strategy_id: str,
+                                                new_roi: Optional[Dict] = None,
+                                                new_stoploss: Optional[float] = None, # Corrected param name
+                                                new_trailing_stop: Optional[float] = None,
+                                                new_trailing_only_offset_is_reached: Optional[float] = None):
             if strategy_id not in self.params:
                 self.params[strategy_id] = {}
-            if roi_table is not None:
-                self.params[strategy_id]['roi'] = roi_table
-                logger.info(f"MockParamsManager: Updated ROI for {strategy_id} to {roi_table}")
-            if stoploss_value is not None:
-                self.params[strategy_id]['stoploss'] = stoploss_value
-                logger.info(f"MockParamsManager: Updated stoploss for {strategy_id} to {stoploss_value}")
-            if trailing_stop_params is not None:
-                self.params[strategy_id]['trailing'] = trailing_stop_params
-                logger.info(f"MockParamsManager: Updated trailing stop for {strategy_id} to {trailing_stop_params}")
-            # Simulate that ParamsManager would write these to a strategy file
-            self.files_written[strategy_id] = True
+
+            if new_roi is not None: # Renamed from roi_table
+                self.params[strategy_id]['roi'] = new_roi
+                logger.info(f"MockParamsManager: Updated ROI for {strategy_id} to {new_roi}")
+            if new_stoploss is not None: # Renamed from stoploss_value
+                self.params[strategy_id]['stoploss'] = new_stoploss
+                logger.info(f"MockParamsManager: Updated stoploss for {strategy_id} to {new_stoploss}")
+
+            # Ensure 'trailing' dict exists before trying to set sub-keys
+            if 'trailing' not in self.params[strategy_id]:
+                self.params[strategy_id]['trailing'] = {} # Initialize if not present
+
+            if new_trailing_stop is not None:
+                self.params[strategy_id]['trailing']['value'] = new_trailing_stop # Store under 'value'
+                logger.info(f"MockParamsManager: Updated trailing_stop_positive for {strategy_id} to {new_trailing_stop}")
+
+            if new_trailing_only_offset_is_reached is not None:
+                self.params[strategy_id]['trailing']['offset'] = new_trailing_only_offset_is_reached # Store under 'offset'
+                logger.info(f"MockParamsManager: Updated trailing_stop_positive_offset for {strategy_id} to {new_trailing_only_offset_is_reached}")
+
+            # Simulate that ParamsManager would write these to a strategy file if any change was made
+            if new_roi or new_stoploss or new_trailing_stop or new_trailing_only_offset_is_reached:
+                self.files_written[strategy_id] = True
 
 
     class MockBiasReflector:
@@ -373,7 +396,7 @@ if __name__ == "__main__":
                 "parameterChanges": {"emaPeriod": 25, "newParam": 123},
                 "roi": {0: 0.12, 60: 0.08},
                 "stoploss": -0.15,
-                "trailingStop": {"enabled": True, "value": 0.025}
+                "trailingStop": {"value": 0.025, "offset": 0.005} # Updated structure
             },
             "confidence": 0.90,
             "rationale": "Test mutation via ParamsManager"
@@ -389,8 +412,35 @@ if __name__ == "__main__":
         assert mutated_params_from_pm['buy']['newParam'] == 123
         assert mutated_params_from_pm['roi'] == {0: 0.12, 60: 0.08}
         assert mutated_params_from_pm['stoploss'] == -0.15
-        assert mutated_params_from_pm['trailing'] == {"enabled": True, "value": 0.025}
+        # Assertions for the new trailing stop structure
+        assert 'trailing' in mutated_params_from_pm, "Trailing params should exist"
+        assert mutated_params_from_pm['trailing']['value'] == 0.025, "Trailing stop value incorrect"
+        assert mutated_params_from_pm['trailing']['offset'] == 0.005, "Trailing stop offset incorrect"
         assert strategy_manager.params_manager.files_written.get(test_strategy_id) is True
+
+        # Test case for missing trailingStop parts (optional, but good for robustness)
+        print(f"\nMutating strategy {test_strategy_id} with partial trailingStop proposal...")
+        partial_trailing_proposal = {
+            "strategyId": test_strategy_id,
+            "adjustments": {
+                "trailingStop": {"value": 0.030} # Only value, offset should remain or be None
+            },
+            "confidence": 0.90,
+            "rationale": "Test partial trailingStop mutation"
+        }
+        # Re-initialize a portion of mock params to simulate existing state for 'offset'
+        # This depends on how MockParamsManager is structured. If it merges, this is fine.
+        # If it overwrites the whole 'trailing' dict, then the previous 'offset' would be gone.
+        # Based on current MockParamsManager, it updates specific keys, so previous offset should persist if not provided.
+        # Let's ensure 'offset' was set by previous full mutation.
+        # strategy_manager.params_manager.params[test_strategy_id]['trailing']['offset'] = 0.005 # Ensure it exists
+
+        mutation_successful_partial = await strategy_manager.mutate_strategy(test_strategy_id, partial_trailing_proposal)
+        assert mutation_successful_partial
+        mutated_params_partial = await strategy_manager.params_manager.get_param("strategies", strategy_id=test_strategy_id)
+        print(f"Parameters from MockParamsManager after partial trailingStop mutation: {mutated_params_partial}")
+        assert mutated_params_partial['trailing']['value'] == 0.030 # New value
+        assert mutated_params_partial['trailing']['offset'] == 0.005 # Offset from previous full mutation should persist
 
 
         # 4. Test get_best_strategy
