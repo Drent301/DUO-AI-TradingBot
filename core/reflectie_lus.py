@@ -128,8 +128,12 @@ class ReflectieLus:
                 prompt_type=prompt_type, # Use the passed prompt_type
                 current_bias=current_bias,
                 current_confidence=current_confidence,
-                trade_context=trade_context, # Pass the full trade_context
-                pattern_data=pattern_data # Pass the received pattern_data
+                # Consolidate trade_context and pattern_data into additional_context for PromptBuilder
+                additional_context={
+                    **(trade_context or {}), # Original trade_context items
+                    'pattern_data': pattern_data, # Add pattern_data
+                    # social_sentiment_data would be in trade_context if added by AIActivationEngine
+                }
             )
         except AttributeError as e:
             logger.error(f"PromptBuilder of methode niet gevonden: {e}. Implementeer PromptBuilder eerst.")
