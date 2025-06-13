@@ -132,7 +132,9 @@ class ReflectieLus:
         trade_context: Optional[Dict[str, Any]] = None, # Context van de trade (entry/exit)
         current_bias: float = 0.5, # Huidige bias van de strategie
         current_confidence: float = 0.5, # Huidige confidence van de strategie
-        mode: str = 'live' # 'live', 'dry_run', 'backtest', 'pretrain'
+        mode: str = 'live', # 'live', 'dry_run', 'backtest', 'pretrain'
+        prompt_type: str = 'marketAnalysis',
+        pattern_data: Optional[Dict[str, Any]] = None
     ) -> Optional[Dict[str, Any]]:
         """
         Verwerkt een enkele reflectiecyclus voor een gegeven symbool.
@@ -141,7 +143,7 @@ class ReflectieLus:
         if trade_context is None:
             trade_context = {}
 
-        logger.info(f"[ReflectieCyclus] Starten reflectiecyclus voor {symbol} ({strategy_id}) in mode: {mode}")
+        logger.info(f"[ReflectieCyclus] Starten reflectiecyclus voor {symbol} ({strategy_id}) in mode: {mode} met prompt type: {prompt_type}")
 
         # 1. Gegevensverzameling
         # Freqtrade zal de DataFrames van candles_by_timeframe leveren
@@ -168,9 +170,11 @@ class ReflectieLus:
             prompt = await self.prompt_builder.generate_prompt_with_data(
                 candles_by_timeframe=candles_by_timeframe,
                 symbol=symbol,
-                prompt_type='marketAnalysis',
+                prompt_type=prompt_type, # Use the passed prompt_type
                 current_bias=current_bias,
-                current_confidence=current_confidence
+                current_confidence=current_confidence,
+                trade_context=trade_context, # Pass the full trade_context
+                pattern_data=pattern_data # Pass the received pattern_data
             )
         except AttributeError as e:
             logger.error(f"PromptBuilder of methode niet gevonden: {e}. Implementeer PromptBuilder eerst.")
@@ -422,7 +426,9 @@ if __name__ == "__main__":
             trade_context=mock_trade_context,
             current_bias=0.6,
             current_confidence=0.7,
-            mode='backtest'
+            mode='backtest',
+            prompt_type='comprehensive_analysis', # Added
+            pattern_data=None # Added, or use mock_pattern_data
         )
         print("\nResultaat van directe reflectiecyclus:")
         # Use default=str to handle any non-serializable objects like datetime
