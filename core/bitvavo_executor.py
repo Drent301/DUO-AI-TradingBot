@@ -6,6 +6,13 @@ from typing import Dict, Any, Optional, List
 import asyncio # Nodig voor de async main-test
 import dotenv # Toegevoegd voor de __main__ sectie
 
+# Import specific CCXT exceptions
+from ccxt.base.errors import (
+    AuthenticationError, RateLimitExceeded, RequestTimeout, InvalidNonce,
+    ExchangeNotAvailable, DDoSProtection, InvalidOrder, InsufficientFunds,
+    BadSymbol, NetworkError, ExchangeError
+)
+
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
 
@@ -46,14 +53,29 @@ class BitvavoExecutor:
             if currency:
                 return balance.get(currency, {'free': 0, 'used': 0, 'total': 0})
             return balance
-        except ccxt.NetworkError as e:
-            logger.error(f"Netwerkfout bij ophalen Bitvavo saldo: {e}")
+        except AuthenticationError as e:
+            logger.error(f"AuthenticationError in fetch_balance for currency '{currency}': {str(e)}")
             return {}
-        except ccxt.ExchangeError as e:
-            logger.error(f"Exchangefout bij ophalen Bitvavo saldo: {e}")
+        except RequestTimeout as e:
+            logger.error(f"RequestTimeout in fetch_balance for currency '{currency}': {str(e)}")
+            return {}
+        except ExchangeNotAvailable as e:
+            logger.error(f"ExchangeNotAvailable in fetch_balance for currency '{currency}': {str(e)}")
+            return {}
+        except DDoSProtection as e:
+            logger.error(f"DDoSProtection in fetch_balance for currency '{currency}': {str(e)}")
+            return {}
+        except RateLimitExceeded as e:
+            logger.error(f"RateLimitExceeded in fetch_balance for currency '{currency}': {str(e)}")
+            return {}
+        except NetworkError as e:
+            logger.error(f"NetworkError in fetch_balance for currency '{currency}': {str(e)}")
+            return {}
+        except ExchangeError as e:
+            logger.error(f"ExchangeError in fetch_balance for currency '{currency}': {str(e)}")
             return {}
         except Exception as e:
-            logger.error(f"Onverwachte fout bij ophalen Bitvavo saldo: {e}")
+            logger.error(f"Unexpected error in fetch_balance for currency '{currency}': {str(e)}")
             return {}
 
     async def create_market_buy_order(self, symbol: str, amount: float) -> Optional[Dict[str, Any]]:
@@ -65,22 +87,40 @@ class BitvavoExecutor:
         """
         try:
             order = await self.exchange.create_market_buy_order(symbol, amount)
-            logger.info(f"Market BUY order geplaatst voor {amount} {symbol}: {order}")
+            logger.info(f"Market BUY order placed for {amount} of {symbol}: {order}")
             return order
-        except ccxt.InsufficientFunds as e:
-            logger.warning(f"Onvoldoende saldo voor kooporder {symbol}: {e}")
+        except InsufficientFunds as e:
+            logger.warning(f"InsufficientFunds in create_market_buy_order for {amount} of {symbol}: {str(e)}")
             return None
-        except ccxt.InvalidOrder as e:
-            logger.error(f"Ongeldige kooporder {symbol}: {e}")
+        except InvalidOrder as e:
+            logger.error(f"InvalidOrder in create_market_buy_order for {amount} of {symbol}: {str(e)}")
             return None
-        except ccxt.NetworkError as e:
-            logger.error(f"Netwerkfout bij plaatsen kooporder {symbol}: {e}")
+        except AuthenticationError as e:
+            logger.error(f"AuthenticationError in create_market_buy_order for {amount} of {symbol}: {str(e)}")
             return None
-        except ccxt.ExchangeError as e:
-            logger.error(f"Exchangefout bij plaatsen kooporder {symbol}: {e}")
+        except RequestTimeout as e:
+            logger.error(f"RequestTimeout in create_market_buy_order for {amount} of {symbol}: {str(e)}")
+            return None
+        except ExchangeNotAvailable as e:
+            logger.error(f"ExchangeNotAvailable in create_market_buy_order for {amount} of {symbol}: {str(e)}")
+            return None
+        except DDoSProtection as e:
+            logger.error(f"DDoSProtection in create_market_buy_order for {amount} of {symbol}: {str(e)}")
+            return None
+        except RateLimitExceeded as e:
+            logger.error(f"RateLimitExceeded in create_market_buy_order for {amount} of {symbol}: {str(e)}")
+            return None
+        except BadSymbol as e:
+            logger.error(f"BadSymbol in create_market_buy_order for {amount} of {symbol}: {str(e)}")
+            return None
+        except NetworkError as e:
+            logger.error(f"NetworkError in create_market_buy_order for {amount} of {symbol}: {str(e)}")
+            return None
+        except ExchangeError as e:
+            logger.error(f"ExchangeError in create_market_buy_order for {amount} of {symbol}: {str(e)}")
             return None
         except Exception as e:
-            logger.error(f"Onverwachte fout bij plaatsen kooporder {symbol}: {e}")
+            logger.error(f"Unexpected error in create_market_buy_order for {amount} of {symbol}: {str(e)}")
             return None
 
     async def create_market_sell_order(self, symbol: str, amount: float) -> Optional[Dict[str, Any]]:
@@ -92,22 +132,40 @@ class BitvavoExecutor:
         """
         try:
             order = await self.exchange.create_market_sell_order(symbol, amount)
-            logger.info(f"Market SELL order geplaatst voor {amount} {symbol}: {order}")
+            logger.info(f"Market SELL order placed for {amount} of {symbol}: {order}")
             return order
-        except ccxt.InsufficientFunds as e:
-            logger.warning(f"Onvoldoende saldo voor verkooporder {symbol}: {e}")
+        except InsufficientFunds as e:
+            logger.warning(f"InsufficientFunds in create_market_sell_order for {amount} of {symbol}: {str(e)}")
             return None
-        except ccxt.InvalidOrder as e:
-            logger.error(f"Ongeldige verkooporder {symbol}: {e}")
+        except InvalidOrder as e:
+            logger.error(f"InvalidOrder in create_market_sell_order for {amount} of {symbol}: {str(e)}")
             return None
-        except ccxt.NetworkError as e:
-            logger.error(f"Netwerkfout bij plaatsen verkooporder {symbol}: {e}")
+        except AuthenticationError as e:
+            logger.error(f"AuthenticationError in create_market_sell_order for {amount} of {symbol}: {str(e)}")
             return None
-        except ccxt.ExchangeError as e:
-            logger.error(f"Exchangefout bij plaatsen verkooporder {symbol}: {e}")
+        except RequestTimeout as e:
+            logger.error(f"RequestTimeout in create_market_sell_order for {amount} of {symbol}: {str(e)}")
+            return None
+        except ExchangeNotAvailable as e:
+            logger.error(f"ExchangeNotAvailable in create_market_sell_order for {amount} of {symbol}: {str(e)}")
+            return None
+        except DDoSProtection as e:
+            logger.error(f"DDoSProtection in create_market_sell_order for {amount} of {symbol}: {str(e)}")
+            return None
+        except RateLimitExceeded as e:
+            logger.error(f"RateLimitExceeded in create_market_sell_order for {amount} of {symbol}: {str(e)}")
+            return None
+        except BadSymbol as e:
+            logger.error(f"BadSymbol in create_market_sell_order for {amount} of {symbol}: {str(e)}")
+            return None
+        except NetworkError as e:
+            logger.error(f"NetworkError in create_market_sell_order for {amount} of {symbol}: {str(e)}")
+            return None
+        except ExchangeError as e:
+            logger.error(f"ExchangeError in create_market_sell_order for {amount} of {symbol}: {str(e)}")
             return None
         except Exception as e:
-            logger.error(f"Onverwachte fout bij plaatsen verkooporder {symbol}: {e}")
+            logger.error(f"Unexpected error in create_market_sell_order for {amount} of {symbol}: {str(e)}")
             return None
 
     async def fetch_ohlcv(self, symbol: str, timeframe: str = '5m', limit: int = 100) -> List[List]:
@@ -120,10 +178,34 @@ class BitvavoExecutor:
         """
         try:
             ohlcv = await self.exchange.fetch_ohlcv(symbol, timeframe, limit=limit)
-            logger.debug(f"OHLCV data opgehaald voor {symbol} ({timeframe}, {limit} candles).")
+            logger.debug(f"OHLCV data fetched for {symbol} (timeframe: {timeframe}, limit: {limit}).")
             return ohlcv
+        except AuthenticationError as e:
+            logger.error(f"AuthenticationError in fetch_ohlcv for {symbol} (timeframe: {timeframe}, limit: {limit}): {str(e)}")
+            return []
+        except RequestTimeout as e:
+            logger.error(f"RequestTimeout in fetch_ohlcv for {symbol} (timeframe: {timeframe}, limit: {limit}): {str(e)}")
+            return []
+        except ExchangeNotAvailable as e:
+            logger.error(f"ExchangeNotAvailable in fetch_ohlcv for {symbol} (timeframe: {timeframe}, limit: {limit}): {str(e)}")
+            return []
+        except DDoSProtection as e:
+            logger.error(f"DDoSProtection in fetch_ohlcv for {symbol} (timeframe: {timeframe}, limit: {limit}): {str(e)}")
+            return []
+        except RateLimitExceeded as e:
+            logger.error(f"RateLimitExceeded in fetch_ohlcv for {symbol} (timeframe: {timeframe}, limit: {limit}): {str(e)}")
+            return []
+        except BadSymbol as e:
+            logger.error(f"BadSymbol in fetch_ohlcv for {symbol} (timeframe: {timeframe}, limit: {limit}): {str(e)}")
+            return []
+        except NetworkError as e:
+            logger.error(f"NetworkError in fetch_ohlcv for {symbol} (timeframe: {timeframe}, limit: {limit}): {str(e)}")
+            return []
+        except ExchangeError as e:
+            logger.error(f"ExchangeError in fetch_ohlcv for {symbol} (timeframe: {timeframe}, limit: {limit}): {str(e)}")
+            return []
         except Exception as e:
-            logger.error(f"Fout bij ophalen OHLCV voor {symbol}: {e}")
+            logger.error(f"Unexpected error in fetch_ohlcv for {symbol} (timeframe: {timeframe}, limit: {limit}): {str(e)}")
             return []
 
 # Voorbeeld van hoe je het zou kunnen gebruiken (voor testen)
