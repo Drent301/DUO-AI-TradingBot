@@ -433,10 +433,7 @@ class PreTrainer:
             return dataframe
 
         # Ensure technical indicators are calculated first (already seems to be the case)
-        if not hasattr(self, 'cnn_pattern_detector'):
-            from core.cnn_patterns import CNNPatterns
-            self.cnn_pattern_detector = CNNPatterns()
-            logger.info("CNNPatterns detector geïnitialiseerd in prepare_training_data.")
+        # self.cnn_pattern_detector is now initialized in the constructor
         if 'rsi' not in dataframe.columns: dataframe['rsi'] = ta.RSI(dataframe)
         if 'macd' not in dataframe.columns:
             macd_df = ta.MACD(dataframe)
