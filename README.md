@@ -99,9 +99,9 @@ De bot is opgebouwd uit de volgende kern-AI-modules in de `/core/` map:
 
 -   `gpt_reflector.py`: Communiceert met de OpenAI GPT API voor reflectie.
 -   `grok_reflector.py`: Communiceert met de Grok API voor reflectie.
--   `grok_sentiment_fetcher.py`: Haalt live nieuws- en sentimentdata op via Grok Live Search (hypothetisch API).
+-   `grok_sentiment_fetcher.py`: Haalt live nieuws- en sentimentdata op via Grok 3's live data/search functionaliteit (hypothetisch API), die vervolgens wordt opgenomen in de AI prompts.
 -   `cnn_patterns.py`: Voert patroonherkenning uit voor candlesticks en grafieken. Deze module **combineert regelgebaseerde detectie met Deep Learning CNN-voorspellingen** (indien een getraind model en bijbehorende scaler beschikbaar zijn in `/data/models/`). Hierdoor kan de module numerieke scores (bijv. waarschijnlijkheden) voor patronen genereren. **Cruciaal:** De **kwaliteit en representativiteit van de getrainde modellen en de gebruikte labels zijn absoluut essentieel** voor betrouwbare CNN-voorspellingen. Het ontwikkelen, valideren en onderhouden van deze modellen is een belangrijke en **voortdurende taak**.
--   `prompt_builder.py`: Genereert gedetailleerde AI-prompts met marktgegevens, patronen en sentiment.
+-   `prompt_builder.py`: Genereert gedetailleerde AI-prompts, nu met volledige integratie van alle standaard technische indicatoren (RSI, MACD, Bollinger Bands, EMA's, Volume Means), candlestick patronen, en CNN patroon scores, samen met marktgegevens en sentiment.
 -   `reflectie_lus.py`: De centrale AI-reflectiecyclus, coördineert promptgeneratie, AI-aanroepen en het loggen van reflecties.
 -   `reflectie_analyser.py`: Analyseert reflectielogs en haalt prestatiegegevens direct uit Freqtrade's database om bias-scores en mutatievoorstellen te genereren.
 -   `bias_reflector.py`: Beheert de leerbare voorkeur/bias van de strategie per token/strategie.
@@ -111,6 +111,7 @@ De bot is opgebouwd uit de volgende kern-AI-modules in de `/core/` map:
 -   `exit_optimizer.py`: Neemt AI-gestuurde exit-besluiten en optimaliseert dynamisch de trailing stop loss.
 -   `pre_trainer.py`: Module voor pre-learning en data-voorbereiding. Haalt historische data en trade-outcomes direct uit Freqtrade's database. Kan ook een basis CNN-model trainen en opslaan.
 -   `strategy_manager.py`: Beheert strategieparameters, prestaties (haalt uit Freqtrade DB) en mutatievoorstellen.
+-   `bitvavo_executor.py`: Module voor interactie met de Bitvavo exchange (balans, orders, data), en de integratie is verder geconsolideerd voor robuuste live-executie.
 -   `ai_activation_engine.py`: Trigger-engine voor AI-reflectie bij specifieke gebeurtenissen.
 -   `interval_selector.py`: Detecteert en beheert de beste timeframe/interval voor AI-analyse.
 -   `params_manager.py`: Centrale manager voor alle dynamisch lerende variabelen.
@@ -129,9 +130,9 @@ De AI-modules binnen dit project kunnen adviezen genereren voor diverse strategi
 *   **Interne AI-Mechanismen:** Voor bepaalde parameters, zoals cooldowns, kan de AI gebruikmaken van eigen, parallelle mechanismen (zoals `cooldown_tracker.py`) die Freqtrade's instellingen aanvullen zonder `config.json` direct te wijzigen.
 
 ### `preferredPairs` en Dynamisch Pair Management
-*   **Leerlogica Geïmplementeerd:** De leerlogica om dynamisch `preferredPairs` te identificeren is **nu geïmplementeerd** in `core/ai_optimizer.py`.
-*   **Koppeling met `pair_whitelist`:** Freqtrade laadt zijn actieve handelsparen uit `config/config.json` bij het opstarten. Een door `ai_optimizer.py` gegenereerde lijst van `preferredPairs` wordt **niet automatisch tijdens runtime gesynchroniseerd**.
-*   **Herstart Vereist:** Om geleerde `preferredPairs` actief te maken, dient de `pair_whitelist` in `config/config.json` handmatig bijgewerkt te worden, gevolgd door een **herstart van de Freqtrade bot**.
+*   **Leerlogica Geïmplementeerd:** De leerlogica om dynamisch `preferredPairs` te identificeren is **nu geïmplementeerd** en wordt beheerd door `core/ai_optimizer.py`.
+*   **Koppeling met `pair_whitelist`:** Freqtrade laadt zijn actieve handelsparen (de `pair_whitelist`) uit `config/config.json` bij het opstarten. Een door `core/ai_optimizer.py` gegenereerde lijst van `preferredPairs` wordt **niet automatisch tijdens runtime gesynchroniseerd** met deze `pair_whitelist`.
+*   **Handmatige Update en Herstart Vereist:** Om de door de AI geleerde `preferredPairs` actief te maken voor trading, dient de `pair_whitelist` in `config/config.json` handmatig bijgewerkt te worden met de aanbevelingen van de AI. Vervolgens is een **volledige herstart van de Freqtrade bot noodzakelijk**.
 
 ### Data Logging en Analyse
 Voor alle AI-gestuurde analyses, prestatie-evaluaties en het trainen van modellen wordt nu **exclusief gebruik gemaakt van Freqtrade's interne database**. Dit waarborgt een consistente en betrouwbare databron.
