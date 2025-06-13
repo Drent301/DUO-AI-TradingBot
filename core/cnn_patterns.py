@@ -427,6 +427,79 @@ class CNNPatterns:
            all(body_perc(x) > 0.6 for x in [a,b,c]): return "threeBlackCrows"
         return False
 
+    def determine_trend(self, candles: List[Dict[str, Any]], period: int = 20) -> str:
+        """
+        Determines the trend based on linear regression of closing prices.
+        """
+        if len(candles) < period:
+            return "undetermined"
+
+        # Extract closing prices from the last 'period' candles
+        # Ensure 'close' key exists and value is not None
+        closes = [c['close'] for c in candles[-period:] if c and 'close' in c and c['close'] is not None]
+
+        if len(closes) < period: # Need enough data points for a reliable trend
+            return "undetermined"
+
+        # Calculate linear regression
+        x = np.arange(len(closes))
+        y = np.array(closes)
+
+        # Fit linear regression: y = slope * x + intercept
+        # Using np.polyfit for simplicity
+        try:
+            slope, intercept = np.polyfit(x, y, 1)
+        except (np.linalg.LinAlgError, TypeError): # Catch potential errors during polyfit
+            logger.warning(f"Could not calculate polyfit for trend determination. Closes: {closes}")
+            return "undetermined"
+
+        mean_price = np.mean(y)
+        if mean_price == 0: # Avoid division by zero
+            return "undetermined"
+
+        # Define a threshold for "sideways"
+        # e.g., if abs(slope / mean_price) < 0.0005 (0.05% change per candle relative to mean price)
+        # This threshold might need tuning based on timeframe and asset volatility
+        sideways_threshold = 0.0005 * period # Adjust threshold based on period length
+
+        normalized_slope = slope / mean_price
+
+        if abs(normalized_slope) < sideways_threshold:
+            return "sideways"
+        elif slope > 0:
+            return "uptrend"
+        else:
+            return "downtrend"
+
+    def detect_volume_spike(self, candles: List[Dict[str, Any]], period: int = 20, spike_factor: float = 2.0) -> bool:
+        """
+        Detects a volume spike in the most recent candle compared to the average of previous candles.
+        """
+        if len(candles) < period:
+            return False # Not enough data to compare
+
+        # Ensure 'volume' key exists and value is not None for all relevant candles
+        volumes = [c['volume'] for c in candles[-(period):] if c and 'volume' in c and c['volume'] is not None]
+
+        if len(volumes) < period: # Need full period of valid volumes
+            return False
+
+        latest_volume = volumes[-1]
+        preceding_volumes = volumes[:-1]
+
+        if not preceding_volumes: # Should not happen if len(volumes) == period and period > 1
+            return False
+
+        average_volume_preceding = np.mean(preceding_volumes)
+
+        if average_volume_preceding == 0:
+            return False # Avoid division by zero or if all previous volumes were zero
+
+        if latest_volume > (average_volume_preceding * spike_factor):
+            return True
+
+        return False
+
     async def detect_patterns_multi_timeframe(self, candles_by_timeframe: Dict[str, pd.DataFrame], symbol: str) -> Dict[str, Any]:
         all_patterns = {"zoomPatterns": {}, "contextPatterns": {}, "patterns": {}, "cnn_predictions": {}, "context": {"trend": "unknown", "volume_spike": False}}
         TIME_FRAME_CONFIG = {"zoom": ['1m', '5m', '15m'], "context": ['1h', '4h', '1d']} # Simplified for brevity
@@ -562,6 +635,62 @@ if __name__ == "__main__":
         assert sorted(pattern_keys) == sorted(expected_keys), \
             f"Pattern keys {pattern_keys} do not match expected {expected_keys}"
         logger.info("get_all_detectable_pattern_keys test passed.")
+
+        # --- Tests for determine_trend ---
+        logger.info("Testing determine_trend...")
+        base_time = datetime.now().timestamp() * 1000
+
+        # Uptrend
+        uptrend_candles = [{'open': 50+i, 'high': 51+i, 'low': 49+i, 'close': 50+i, 'volume': 100, 'time': base_time + i*1000} for i in range(20)]
+        trend_result = cnn_detector.determine_trend(uptrend_candles)
+        logger.info(f"Uptrend detection result: {trend_result}")
+        assert trend_result == "uptrend", f"Expected 'uptrend', got {trend_result}"
+
+        # Downtrend
+        downtrend_candles = [{'open': 70-i, 'high': 71-i, 'low': 69-i, 'close': 70-i, 'volume': 100, 'time': base_time + i*1000} for i in range(20)]
+        trend_result = cnn_detector.determine_trend(downtrend_candles)
+        logger.info(f"Downtrend detection result: {trend_result}")
+        assert trend_result == "downtrend", f"Expected 'downtrend', got {trend_result}"
+
+        # Sideways Trend
+        sideways_candles = []
+        for i in range(20):
+            price = 60 + ( (i % 3 - 1) * 0.1 ) # 60, 60.1, 59.9, 60, ...
+            sideways_candles.append({'open': price, 'high': price+1, 'low': price-1, 'close': price, 'volume': 100, 'time': base_time + i*1000})
+        trend_result = cnn_detector.determine_trend(sideways_candles)
+        logger.info(f"Sideways trend detection result: {trend_result}")
+        assert trend_result == "sideways", f"Expected 'sideways', got {trend_result}"
+
+        # Insufficient Data for Trend
+        insufficient_candles_trend = uptrend_candles[:5]
+        trend_result = cnn_detector.determine_trend(insufficient_candles_trend)
+        logger.info(f"Insufficient data for trend detection result: {trend_result}")
+        assert trend_result == "undetermined", f"Expected 'undetermined', got {trend_result}"
+        logger.info("determine_trend tests passed.")
+
+        # --- Tests for detect_volume_spike ---
+        logger.info("Testing detect_volume_spike...")
+
+        # Volume Spike
+        spike_candles = [{'open': 100, 'high': 105, 'low': 95, 'close': 100, 'volume': 100, 'time': base_time + i*1000} for i in range(19)]
+        spike_candles.append({'open': 100, 'high': 105, 'low': 95, 'close': 100, 'volume': 300, 'time': base_time + 19*1000}) # Spike
+        spike_result = cnn_detector.detect_volume_spike(spike_candles)
+        logger.info(f"Volume spike detection result (should be True): {spike_result}")
+        assert spike_result is True, "Expected True for volume spike"
+
+        # No Volume Spike
+        no_spike_candles = [{'open': 100, 'high': 105, 'low': 95, 'close': 100, 'volume': 100, 'time': base_time + i*1000} for i in range(20)]
+        no_spike_candles[-1]['volume'] = 110 # Last candle not a significant spike
+        spike_result = cnn_detector.detect_volume_spike(no_spike_candles)
+        logger.info(f"No volume spike detection result (should be False): {spike_result}")
+        assert spike_result is False, "Expected False for no volume spike"
+
+        # Insufficient Data for Volume Spike
+        insufficient_candles_spike = spike_candles[:5]
+        spike_result = cnn_detector.detect_volume_spike(insufficient_candles_spike)
+        logger.info(f"Insufficient data for volume spike detection result (should be False): {spike_result}")
+        assert spike_result is False, "Expected False for insufficient data (volume spike)"
+        logger.info("detect_volume_spike tests passed.")
 
         logger.info("CNNPatterns test completed.")
 
