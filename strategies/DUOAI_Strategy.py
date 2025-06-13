@@ -57,25 +57,7 @@ class DUOAI_Strategy(IStrategy):
     # Define informative timeframes to fetch data for AI modules
     # These are required by `cnn_patterns` and `prompt_builder` for multi-timeframe context.
     # Updated to include all pairs from config.json's pair_whitelist and relevant timeframes.
-    CONCEPTUAL_PAIR_WHITELIST = [
-        "ETH/EUR", "ETH/BTC", "WETH/USDT",
-        "BTC/EUR",
-        "ZEN/EUR", "ZEN/BTC",
-        "USDC/USDT", "WBTC/USDT", "LINK/USDT", "UNI/USDT",
-        "LSK/BTC"
-    ]
     informative_timeframes = ['1h', '4h', '1d'] # These are the timeframes to merge into base DF
-
-    # Define `informative_pairs` for Freqtrade to fetch all necessary data.
-    # This list should dynamically reflect your `config.json` `pair_whitelist`.
-    # For now, hardcode based on expected pairs and common timeframes.
-    # In a production setup, this could be generated from config.json at startup.
-    informative_pairs = [
-        (pair, tf)
-        for pair in CONCEPTUAL_PAIR_WHITELIST
-        for tf in informative_timeframes
-    ]
-
 
     # Maak instanties van je AI-modules
     prompt_builder: PromptBuilder = PromptBuilder()
@@ -95,11 +77,22 @@ class DUOAI_Strategy(IStrategy):
 
     def __init__(self, config: Dict[str, Any]) -> None:
         super().__init__(config)
+
+        # Retrieve pair_whitelist from config and store it
+        self.config_pair_whitelist = config.get('pair_whitelist', [])
+
+        # Generate informative_pairs based on config_pair_whitelist and informative_timeframes
+        self.informative_pairs = [
+            (pair, tf)
+            for pair in self.config_pair_whitelist
+            for tf in DUOAI_Strategy.informative_timeframes
+        ]
+
         # Load initial parameters using a default pair from the whitelist if available
         # This ensures that even before populate_indicators, some learned params are set.
         # self.dp is not available here, so we can't fetch pair-specific data yet.
         # _load_and_apply_learned_parameters will be called again in populate_indicators.
-        initial_pair_for_params = config.get('pair_whitelist', [''])[0] if config.get('pair_whitelist') else 'default'
+        initial_pair_for_params = self.config_pair_whitelist[0] if self.config_pair_whitelist else 'default'
         self._load_and_apply_learned_parameters(initial_pair_for_params)
         logger.info(f"DUOAI_Strategy geïnitialiseerd.")
 
