@@ -46,6 +46,66 @@ class EntryDecider:
         self.cooldown_tracker = CooldownTracker() # Added CooldownTracker
         logger.info("EntryDecider geïnitialiseerd.")
 
+    def _get_dynamic_entry_conviction_threshold(
+        self,
+        base_entry_conviction_threshold: float,
+        historical_reliability_score: float,
+        market_condition_score: float,
+        current_strategy_id: str
+    ) -> float:
+        """
+        Calculates a dynamic entry conviction threshold based on AI reliability and market conditions.
+        """
+        reliability_impact_factor = self.params_manager.get_param(
+            "entryThresholdReliabilityImpactFactor",
+            strategy_id=current_strategy_id,
+            default=0.2
+        )
+        market_condition_impact_factor = self.params_manager.get_param(
+            "entryThresholdMarketConditionImpactFactor",
+            strategy_id=current_strategy_id,
+            default=0.15
+        )
+        min_threshold = self.params_manager.get_param(
+            "entryThresholdMin",
+            strategy_id=current_strategy_id,
+            default=0.5
+        )
+        max_threshold = self.params_manager.get_param(
+            "entryThresholdMax",
+            strategy_id=current_strategy_id,
+            default=0.9
+        )
+
+        logger.info(f"Dynamic Threshold Calc ({current_strategy_id}): Base={base_entry_conviction_threshold:.2f}, ReliabilityScore={historical_reliability_score:.2f}, MarketScore={market_condition_score:.2f}")
+        logger.info(f"Dynamic Threshold Params ({current_strategy_id}): ReliabilityImpact={reliability_impact_factor:.2f}, MarketImpact={market_condition_impact_factor:.2f}, Min={min_threshold:.2f}, Max={max_threshold:.2f}")
+
+        # Calculate adjustment based on reliability
+        # Perfect reliability (1.0) -> (1.0 - 0.5) * 2 * factor = 1.0 * factor
+        # Neutral reliability (0.5) -> (0.5 - 0.5) * 2 * factor = 0.0
+        # Poor reliability (0.0) -> (0.0 - 0.5) * 2 * factor = -1.0 * factor
+        reliability_adjustment = (historical_reliability_score - 0.5) * 2 * reliability_impact_factor
+        logger.info(f"Dynamic Threshold Calc ({current_strategy_id}): ReliabilityAdjustment = ({historical_reliability_score:.2f} - 0.5) * 2 * {reliability_impact_factor:.2f} = {reliability_adjustment:.2f}")
+
+        # Calculate adjustment based on market conditions
+        market_condition_adjustment = market_condition_score * market_condition_impact_factor
+        logger.info(f"Dynamic Threshold Calc ({current_strategy_id}): MarketConditionAdjustment = {market_condition_score:.2f} * {market_condition_impact_factor:.2f} = {market_condition_adjustment:.2f}")
+
+        # Calculate the new dynamic threshold
+        # Higher reliability DECREASES threshold (easier entry)
+        # Favorable market conditions DECREASES threshold (easier entry)
+        dynamic_threshold = base_entry_conviction_threshold - reliability_adjustment - market_condition_adjustment
+        logger.info(f"Dynamic Threshold Calc ({current_strategy_id}): Initial DynamicThreshold = {base_entry_conviction_threshold:.2f} - {reliability_adjustment:.2f} - {market_condition_adjustment:.2f} = {dynamic_threshold:.2f}")
+
+        # Clamp the dynamic_threshold
+        clamped_dynamic_threshold = max(min_threshold, min(dynamic_threshold, max_threshold))
+        if clamped_dynamic_threshold != dynamic_threshold:
+            logger.info(f"Dynamic Threshold Calc ({current_strategy_id}): Clamped DynamicThreshold from {dynamic_threshold:.2f} to {clamped_dynamic_threshold:.2f} (Min: {min_threshold:.2f}, Max: {max_threshold:.2f})")
+        else:
+            logger.info(f"Dynamic Threshold Calc ({current_strategy_id}): Final DynamicThreshold = {clamped_dynamic_threshold:.2f} (within Min/Max bounds)")
+
+        return clamped_dynamic_threshold
+
     async def get_consensus(self, prompt: str, token: str, strategy_id: str, current_learned_bias: float, current_learned_confidence: float) -> Dict[str, Any]:
         """
         Vraagt AI-modellen om input en combineert hun oordelen voor consensus.
@@ -116,6 +176,21 @@ class EntryDecider:
         Bepaalt of een entry moet worden geplaatst op basis van AI-consensus en drempelwaarden.
         """
         logger.debug(f"[EntryDecider] Evalueren entry voor {symbol} met strategie {current_strategy_id}...")
+
+        # --- Dynamic Entry Conviction Threshold Calculation ---
+        # Use provided scores if available (for testing), else use default mock values
+        # These would typically be fetched from other services or calculated internally
+        _historical_reliability_score = trade_context.get('historical_reliability_score', 0.75) if trade_context else 0.75
+        _market_condition_score = trade_context.get('market_condition_score', 0.0) if trade_context else 0.0
+
+        dynamic_entry_conviction_threshold = self._get_dynamic_entry_conviction_threshold(
+            base_entry_conviction_threshold=entry_conviction_threshold, # Original threshold passed as argument
+            historical_reliability_score=_historical_reliability_score,
+            market_condition_score=_market_condition_score,
+            current_strategy_id=current_strategy_id
+        )
+        logger.info(f"Symbol: {symbol}, Strategy: {current_strategy_id}, Base Entry Conviction Threshold: {entry_conviction_threshold:.2f}, Dynamic Entry Conviction Threshold: {dynamic_entry_conviction_threshold:.2f} (using Reliability: {_historical_reliability_score:.2f}, Market: {_market_condition_score:.2f})")
+        # --- End Dynamic Entry Conviction Threshold Calculation ---
 
         if dataframe.empty:
             logger.warning(f"[EntryDecider] Geen dataframe beschikbaar voor {symbol}. Kan geen entry besluit nemen.")
@@ -283,14 +358,14 @@ class EntryDecider:
 
 
         # AI-besluitvormingslogica
-        # Entry conditions: AI intent is LONG, final (time-adjusted) confidence meets threshold,
+        # Entry conditions: AI intent is LONG, final (time-adjusted) confidence meets DYNAMIC threshold,
         # learned bias is sufficiently bullish, and is_strong_pattern is True.
         if consensus_intentie == "LONG" and \
-           final_ai_confidence >= entry_conviction_threshold and \
+           final_ai_confidence >= dynamic_entry_conviction_threshold and \
            learned_bias >= entry_learned_bias_threshold and \
            is_strong_pattern:
 
-            logger.info(f"[EntryDecider] ✅ Entry GOEDKEURING voor {symbol}. Consensus: {consensus_intentie}, Final AI Conf: {final_ai_confidence:.2f} (Threshold: {entry_conviction_threshold:.2f}), Geleerde Bias: {learned_bias:.2f} (Threshold: >={entry_learned_bias_threshold:.2f}), Is Strong Pattern: {is_strong_pattern} (Weighted Score: {weighted_pattern_score:.2f} >= Threshold Param: {strong_pattern_threshold_param:.2f}).")
+            logger.info(f"[EntryDecider] ✅ Entry GOEDKEURING voor {symbol}. Consensus: {consensus_intentie}, Final AI Conf: {final_ai_confidence:.2f} (Dynamic Threshold: {dynamic_entry_conviction_threshold:.2f}), Geleerde Bias: {learned_bias:.2f} (Threshold: >={entry_learned_bias_threshold:.2f}), Is Strong Pattern: {is_strong_pattern} (Weighted Score: {weighted_pattern_score:.2f} >= Threshold Param: {strong_pattern_threshold_param:.2f}).")
             return {
                 "enter": True,
                 "reason": "AI_CONSENSUS_LONG_CONDITIONS_MET",
@@ -304,16 +379,16 @@ class EntryDecider:
             # Construct detailed reason for rejection
             reason_parts = []
             if consensus_intentie != "LONG": reason_parts.append(f"ai_intent_not_long ({consensus_intentie})")
-            if final_ai_confidence < entry_conviction_threshold: reason_parts.append(f"final_ai_conf_low ({final_ai_confidence:.2f}_vs_{entry_conviction_threshold:.2f})")
+            if final_ai_confidence < dynamic_entry_conviction_threshold: reason_parts.append(f"final_ai_conf_low ({final_ai_confidence:.2f}_vs_{dynamic_entry_conviction_threshold:.2f})")
             if learned_bias < entry_learned_bias_threshold: reason_parts.append(f"learned_bias_low ({learned_bias:.2f}_vs_{entry_learned_bias_threshold:.2f})")
             if not is_strong_pattern: reason_parts.append(f"pattern_score_low ({weighted_pattern_score:.2f}_vs_{strong_pattern_threshold_param:.2f})") # Use strong_pattern_threshold_param
 
             full_reason_str = "_".join(reason_parts) if reason_parts else "entry_conditions_not_met"
             if not reason_parts and consensus_intentie == "LONG": # If intent was long but other conditions failed
-                 full_reason_str = f"intent_long_other_conditions_failed_conf{final_ai_confidence:.2f}_bias{learned_bias:.2f}_pattern_score{weighted_pattern_score:.2f}_vs_bias_thresh{entry_learned_bias_threshold:.2f}_pattern_thresh{strong_pattern_threshold_param:.2f}" # Use strong_pattern_threshold_param
+                 full_reason_str = f"intent_long_other_conditions_failed_conf{final_ai_confidence:.2f}_bias{learned_bias:.2f}_pattern_score{weighted_pattern_score:.2f}_vs_dyn_thresh{dynamic_entry_conviction_threshold:.2f}_bias_thresh{entry_learned_bias_threshold:.2f}_pattern_thresh{strong_pattern_threshold_param:.2f}"
 
 
-            logger.info(f"[EntryDecider] ❌ Entry GEWEIGERD voor {symbol}. Reden: {full_reason_str}. AI Intentie: {consensus_intentie}, Final AI Conf: {final_ai_confidence:.2f}, Geleerde Bias: {learned_bias:.2f} (Threshold: {entry_learned_bias_threshold:.2f}), Is Strong Pattern: {is_strong_pattern} (Weighted Score: {weighted_pattern_score:.2f} vs Threshold Param: {strong_pattern_threshold_param:.2f}).")
+            logger.info(f"[EntryDecider] ❌ Entry GEWEIGERD voor {symbol}. Reden: {full_reason_str}. AI Intentie: {consensus_intentie}, Final AI Conf: {final_ai_confidence:.2f} (Dynamic Threshold: {dynamic_entry_conviction_threshold:.2f}), Geleerde Bias: {learned_bias:.2f} (Threshold: {entry_learned_bias_threshold:.2f}), Is Strong Pattern: {is_strong_pattern} (Weighted Score: {weighted_pattern_score:.2f} vs Threshold Param: {strong_pattern_threshold_param:.2f}).")
             return {
                 "enter": False,
                 "reason": full_reason_str,
@@ -451,12 +526,17 @@ if __name__ == "__main__":
             params = {
                 "timeOfDayEffectiveness": {str(datetime.now().hour): 0.0}, # Neutral time effectiveness
                 "cnnPatternWeight": 0.8,
-                "entryLearnedBiasThreshold": 0.55, # Default
-                "entryTimeEffectivenessImpactFactor": 0.5, # Default
-                "entryRulePatternScore": 0.7, # Default
-                "strongPatternThreshold": 0.7 # NEW: Add this for the test
+                "entryLearnedBiasThreshold": 0.55,
+                "entryTimeEffectivenessImpactFactor": 0.5,
+                "entryRulePatternScore": 0.7,
+                "strongPatternThreshold": 0.7,
+                # Dynamic threshold params
+                "entryThresholdReliabilityImpactFactor": 0.2,
+                "entryThresholdMarketConditionImpactFactor": 0.15,
+                "entryThresholdMin": 0.5,
+                "entryThresholdMax": 0.9
             }
-            return params.get(key, default) # Use default from call if key not in mock
+            return params.get(key, default)
         decider.params_manager.get_param = mock_get_param_s1
 
         # CALCULATION FOR SCENARIO 1 (Updated for new logic):
@@ -474,26 +554,85 @@ if __name__ == "__main__":
         # AI conf from mock_ask_ai_positive = 0.85. learned_bias = 0.7 (passed to should_enter).
         # time_adjusted_confidence_multiplier = 1.0 + (0.0 * 0.5) = 1.0
         # final_ai_confidence = 0.85 * 1.0 = 0.85
-        # entry_conviction_threshold = 0.7 (passed as argument to should_enter)
+        # Base entry_conviction_threshold = 0.7
+        # MOCK RELIABILITY = 0.75 (default in should_enter), MOCK MARKET = 0.0 (default in should_enter)
+        # ReliabilityImpactFactor = 0.2, MarketImpactFactor = 0.15
+        # ReliabilityAdjustment = (0.75 - 0.5) * 2 * 0.2 = 0.25 * 0.4 = 0.10
+        # MarketAdjustment = 0.0 * 0.15 = 0.0
+        # Dynamic Threshold = 0.7 - 0.10 - 0.0 = 0.60. Clamped to [0.5, 0.9] -> 0.60
         # Conditions for entry:
-        # consensus_intentie == "LONG" (True, from mock_ask_ai_positive)
-        # final_ai_confidence (0.85) >= entry_conviction_threshold (0.7) (True)
+        # consensus_intentie == "LONG" (True)
+        # final_ai_confidence (0.85) >= dynamic_entry_conviction_threshold (0.60) (True)
         # learned_bias (0.7) >= entry_learned_bias_threshold (0.55) (True)
         # is_strong_pattern (True)
         # All True.
         entry_decision_s1 = await decider.should_enter(
             dataframe=mock_df_5m, symbol=test_symbol, current_strategy_id=test_strategy_id,
-            trade_context=mock_trade_context,
-            learned_bias=0.7, learned_confidence=0.8, entry_conviction_threshold=0.7
+            trade_context=mock_trade_context, # Uses default reliability/market scores from should_enter
+            learned_bias=0.7, learned_confidence=0.8, entry_conviction_threshold=0.7 # This is base
         )
-        print(f"Resultaat (Scenario 1 - ML + Rule): {json.dumps(entry_decision_s1, indent=2, default=str)}")
+        print(f"Resultaat (Scenario 1 - ML + Rule, Default Dynamic): {json.dumps(entry_decision_s1, indent=2, default=str)}")
         assert entry_decision_s1['enter'] is True
         assert "AI_CONSENSUS_LONG_CONDITIONS_MET" in entry_decision_s1['reason']
-        assert entry_decision_s1['confidence'] == 0.85
+        assert entry_decision_s1['confidence'] == 0.85 # Final AI confidence after time adjustment
         assert abs(entry_decision_s1['weighted_pattern_score'] - 1.32) < 0.001
+        # Check that the dynamic threshold was calculated and used (approx, due to logging format)
+        # Example log: Dynamic Entry Conviction Threshold: 0.60
+        # We can't directly assert the threshold from the return, but logs will show it.
 
-        # --- Test Scenario 2: Low Weighted Pattern Score (CNN only, low score) ---
-        print("\n--- Test Scenario 2: Low Weighted Pattern Score (CNN only, low score) ---")
+        # --- Test Scenario 1b: Positive Entry (High Reliability, Favorable Market) ---
+        print("\n--- Test Scenario 1b: Positive Entry (High Reliability, Favorable Market) ---")
+        # Same AI, CNN, and base params as S1, but override reliability/market scores
+        mock_trade_context_s1b = mock_trade_context.copy()
+        mock_trade_context_s1b['historical_reliability_score'] = 0.9 # High reliability
+        mock_trade_context_s1b['market_condition_score'] = 0.5 # Favorable market
+
+        # CALCULATION FOR SCENARIO 1b:
+        # Base entry_conviction_threshold = 0.7
+        # Reliability = 0.9, Market = 0.5
+        # ReliabilityImpactFactor = 0.2, MarketImpactFactor = 0.15 (from mock_get_param_s1)
+        # ReliabilityAdjustment = (0.9 - 0.5) * 2 * 0.2 = 0.4 * 0.4 = 0.16
+        # MarketAdjustment = 0.5 * 0.15 = 0.075
+        # Dynamic Threshold = 0.7 - 0.16 - 0.075 = 0.465. Clamped to [0.5, 0.9] -> 0.5
+        # final_ai_confidence (0.85) >= dynamic_entry_conviction_threshold (0.50) (True)
+        entry_decision_s1b = await decider.should_enter(
+            dataframe=mock_df_5m, symbol=test_symbol, current_strategy_id=test_strategy_id,
+            trade_context=mock_trade_context_s1b,
+            learned_bias=0.7, learned_confidence=0.8, entry_conviction_threshold=0.7
+        )
+        print(f"Resultaat (Scenario 1b - High Rel, Fav Market): {json.dumps(entry_decision_s1b, indent=2, default=str)}")
+        assert entry_decision_s1b['enter'] is True
+        # The dynamic threshold should be lower (0.50 in this case), making entry conditions easier to meet.
+        # We expect the log to show "Dynamic Entry Conviction Threshold: 0.50"
+
+        # --- Test Scenario 1c: Borderline case (Low Reliability, Unfavorable Market makes it harder) ---
+        print("\n--- Test Scenario 1c: Borderline case (Low Reliability, Unfavorable Market) ---")
+        mock_trade_context_s1c = mock_trade_context.copy()
+        mock_trade_context_s1c['historical_reliability_score'] = 0.2 # Low reliability
+        mock_trade_context_s1c['market_condition_score'] = -0.5 # Unfavorable market
+
+        # CALCULATION FOR SCENARIO 1c:
+        # Base entry_conviction_threshold = 0.7
+        # AI final_ai_confidence = 0.85 (still high from AI mock)
+        # Reliability = 0.2, Market = -0.5
+        # ReliabilityImpactFactor = 0.2, MarketImpactFactor = 0.15 (from mock_get_param_s1)
+        # ReliabilityAdjustment = (0.2 - 0.5) * 2 * 0.2 = -0.3 * 0.4 = -0.12
+        # MarketAdjustment = -0.5 * 0.15 = -0.075
+        # Dynamic Threshold = 0.7 - (-0.12) - (-0.075) = 0.7 + 0.12 + 0.075 = 0.895. Clamped to [0.5, 0.9] -> 0.895, then effectively 0.9 due to max_threshold
+        # Expected dynamic threshold ~0.895, clamped to 0.9 by mock_get_param_s1's entryThresholdMax
+        # final_ai_confidence (0.85) >= dynamic_entry_conviction_threshold (0.9) (FALSE)
+        # This should now be a REJECT due to increased dynamic threshold.
+        entry_decision_s1c = await decider.should_enter(
+            dataframe=mock_df_5m, symbol=test_symbol, current_strategy_id=test_strategy_id,
+            trade_context=mock_trade_context_s1c,
+            learned_bias=0.7, learned_confidence=0.8, entry_conviction_threshold=0.7 # Base threshold
+        )
+        print(f"Resultaat (Scenario 1c - Low Rel, Unfav Market): {json.dumps(entry_decision_s1c, indent=2, default=str)}")
+        assert entry_decision_s1c['enter'] is False
+        assert "final_ai_conf_low" in entry_decision_s1c['reason'] # e.g. (0.85_vs_0.89) or (0.85_vs_0.90)
+
+        # --- Test Scenario 2: Low Weighted Pattern Score (Dynamic Threshold doesn't change outcome) ---
+        print("\n--- Test Scenario 2: Low Weighted Pattern Score (Dynamic Threshold doesn't change outcome) ---")
         async def mock_cnn_low_score_only(*args, **kwargs):
             # Updated structure for cnn_predictions, no rule-based patterns
             return {
@@ -518,65 +657,80 @@ if __name__ == "__main__":
         # weighted_pattern_score = 0.08
         # is_strong_pattern = weighted_pattern_score (0.08) >= strongPatternThreshold (0.7) -> False.
         # This is the primary reason for rejection.
+        # Dynamic threshold will be calculated (0.60 as in S1 default) but pattern score is too low.
         entry_decision_s2 = await decider.should_enter(
             dataframe=mock_df_5m, symbol=test_symbol, current_strategy_id=test_strategy_id,
-            trade_context=mock_trade_context,
-            learned_bias=0.7, learned_confidence=0.8, entry_conviction_threshold=0.7
+            trade_context=mock_trade_context, # Uses default reliability/market scores
+            learned_bias=0.7, learned_confidence=0.8, entry_conviction_threshold=0.7 # Base
         )
-        print(f"Resultaat (Scenario 2 - Low CNN Score): {json.dumps(entry_decision_s2, indent=2, default=str)}")
+        print(f"Resultaat (Scenario 2 - Low CNN Score, Default Dynamic): {json.dumps(entry_decision_s2, indent=2, default=str)}")
         assert entry_decision_s2['enter'] is False
-        # The reason string includes the score vs threshold. The threshold is now strongPatternThreshold (0.7 from mock).
         assert "pattern_score_low (0.08_vs_0.70)" in entry_decision_s2['reason']
 
 
-        # --- Test Scenario 3: Negative Time-of-Day Effectiveness Blocks Entry (Custom Impact Factor) ---
-        print("\n--- Test Scenario 3: Negative Time-of-Day Effectiveness Blocks Entry (Custom Impact Factor) ---")
-        decider.cnn_patterns_detector.detect_patterns_multi_timeframe = mock_cnn_ml_and_rule
+        # --- Test Scenario 3: Negative Time-of-Day Effectiveness Blocks Entry ---
+        # (Dynamic threshold might be favorable, but time-of-day is dominant)
+        print("\n--- Test Scenario 3: Negative Time-of-Day Blocks Entry (Favorable Dynamic Threshold) ---")
+        decider.cnn_patterns_detector.detect_patterns_multi_timeframe = mock_cnn_ml_and_rule # Strong pattern
+
+        # Use a mock_trade_context that would otherwise lead to a low (favorable) dynamic threshold
+        mock_trade_context_s3_dyn_favorable = mock_trade_context.copy()
+        mock_trade_context_s3_dyn_favorable['historical_reliability_score'] = 0.9 # High reliability
+        mock_trade_context_s3_dyn_favorable['market_condition_score'] = 0.5 # Favorable market
 
         def mock_get_param_s3(key, strategy_id=None, default=None):
             params = {
-                "timeOfDayEffectiveness": {str(datetime.now().hour): -0.8}, # Strong negative
+                "timeOfDayEffectiveness": {str(datetime.now().hour): -0.8}, # Strong negative time effect
                 "cnnPatternWeight": 0.8,
-                "entryLearnedBiasThreshold": 0.55, # Default
-                "entryTimeEffectivenessImpactFactor": 0.7, # Custom, higher impact
-                "entryRulePatternScore": 0.7, # Default
-                "strongPatternThreshold": 0.7 # Add this for the test
+                "entryLearnedBiasThreshold": 0.55,
+                "entryTimeEffectivenessImpactFactor": 0.7, # High impact for time
+                "entryRulePatternScore": 0.7,
+                "strongPatternThreshold": 0.7,
+                # Dynamic threshold params (same as s1, leading to 0.50 dyn_threshold with scores above)
+                "entryThresholdReliabilityImpactFactor": 0.2,
+                "entryThresholdMarketConditionImpactFactor": 0.15,
+                "entryThresholdMin": 0.5,
+                "entryThresholdMax": 0.9
             }
             return params.get(key, default)
         decider.params_manager.get_param = mock_get_param_s3
 
         # CALCULATION FOR SCENARIO 3:
+        # Base entry_conviction_threshold = 0.7
+        # Reliability = 0.9, Market = 0.5
+        # Dynamic Threshold = 0.7 - (0.9-0.5)*2*0.2 - 0.5*0.15 = 0.7 - 0.16 - 0.075 = 0.465 -> clamped to 0.50
+        # So, dynamic_entry_conviction_threshold = 0.50 (favorable)
+        #
         # Params from mock_get_param_s3:
-        # entryTimeEffectivenessImpactFactor = 0.7
-        # cnnPatternWeight = 0.8
-        # strongPatternThreshold = 0.7
-        # weighted_pattern_score = 1.32 (as per mock_cnn_ml_and_rule and cnnPatternWeight=0.8 from S3 mock)
-        # is_strong_pattern = 1.32 >= strongPatternThreshold (0.7) -> True.
+        # timeOfDayEffectiveness = -0.8, entryTimeEffectivenessImpactFactor = 0.7
         # AI conf 0.85 (from mock_ask_ai_positive).
         # Time mult = 1 + (-0.8 * 0.7) = 1 - 0.56 = 0.44.
         # final_ai_conf = 0.85 * 0.44 = 0.374.
-        # entry_conviction_threshold = 0.7 (passed to should_enter)
-        # Primary failure: final_ai_conf (0.374) < entry_conviction_threshold (0.7).
+        #
+        # is_strong_pattern = True (weighted_pattern_score = 1.32 >= 0.7)
+        # learned_bias = 0.7 >= 0.55 (True)
+        #
+        # Primary failure: final_ai_conf (0.374) < dynamic_entry_conviction_threshold (0.50).
         entry_decision_s3 = await decider.should_enter(
             dataframe=mock_df_5m, symbol=test_symbol, current_strategy_id=test_strategy_id,
-            trade_context=mock_trade_context,
-            learned_bias=0.7, learned_confidence=0.8, entry_conviction_threshold=0.7
+            trade_context=mock_trade_context_s3_dyn_favorable, # uses high rel, fav market for dyn_thresh calc
+            learned_bias=0.7, learned_confidence=0.8, entry_conviction_threshold=0.7 # Base
         )
-        print(f"Resultaat (Scenario 3 - Negative Time): {json.dumps(entry_decision_s3, indent=2, default=str)}")
+        print(f"Resultaat (Scenario 3 - Negative Time, Favorable Dynamic): {json.dumps(entry_decision_s3, indent=2, default=str)}")
         assert entry_decision_s3['enter'] is False
-        assert "final_ai_conf_low" in entry_decision_s3['reason']
+        assert "final_ai_conf_low (0.37_vs_0.50)" in entry_decision_s3['reason'] # Compare against dynamic threshold
 
-        # --- Test Scenario 4: Cooldown Active Blocks Entry ---
-        print("\n--- Test Scenario 4: Cooldown Active Blocks Entry ---")
+        # --- Test Scenario 4: Cooldown Active Blocks Entry (Dynamic threshold not relevant) ---
+        print("\n--- Test Scenario 4: Cooldown Active Blocks Entry (Dynamic threshold not relevant) ---")
         decider.cooldown_tracker.is_cooldown_active = lambda t, s: True # Cooldown active
-        # Reset other mocks to generally positive conditions
-        decider.cnn_patterns_detector.detect_patterns_multi_timeframe = mock_cnn_ml_and_rule # uses 0.95 CNN score
-        decider.params_manager.get_param = mock_get_param_s1 # cnnPatternWeight=0.8, neutral time
+        # Reset other mocks to generally positive conditions but it won't matter due to cooldown
+        decider.cnn_patterns_detector.detect_patterns_multi_timeframe = mock_cnn_ml_and_rule
+        decider.params_manager.get_param = mock_get_param_s1 # Back to S1 params (neutral time, default dynamic params)
 
         entry_decision_s4 = await decider.should_enter(
             dataframe=mock_df_5m, symbol=test_symbol, current_strategy_id=test_strategy_id,
-            trade_context=mock_trade_context,
-            learned_bias=0.7, learned_confidence=0.8, entry_conviction_threshold=0.7
+            trade_context=mock_trade_context, # Default reliability/market scores
+            learned_bias=0.7, learned_confidence=0.8, entry_conviction_threshold=0.7 # Base
         )
         print(f"Resultaat (Scenario 4 - Cooldown): {json.dumps(entry_decision_s4, indent=2, default=str)}")
         assert entry_decision_s4['enter'] is False
