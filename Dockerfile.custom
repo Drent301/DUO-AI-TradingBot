@@ -1,0 +1,19 @@
+# Gebruik de officiële Freqtrade stable image als basis
+FROM freqtradeorg/freqtrade:stable
+
+# Zorg ervoor dat pip up-to-date is voor betrouwbare installaties
+RUN pip install --upgrade pip
+
+# Kopieer het requirements.txt bestand naar de /freqtrade/ map in de container
+COPY requirements.txt /freqtrade/requirements.txt
+
+# Installeer alle Python afhankelijkheden die in requirements.txt staan
+# Gebruik --break-system-packages om potentieel conflicten op te lossen.
+# Dit is veilig binnen een geïsoleerde Docker-container.
+RUN pip install --no-cache-dir -r /freqtrade/requirements.txt --break-system-packages
+
+# Optioneel, voor debugging als het probleem aanhoudt:
+# Voeg deze regels toe om te controleren waar Python naar modules zoekt en waar freqtrade is geïnstalleerd.
+# Deze kun je uncommenten als de volgende stappen het probleem niet oplossen.
+# RUN python -c "import sys; print(sys.path)"
+# RUN python -c "import freqtrade; print(freqtrade.__file__)"
