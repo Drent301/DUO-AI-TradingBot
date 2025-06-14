@@ -111,6 +111,12 @@ class ExitOptimizer:
         gpt_intentie = str(gpt_response.get('intentie', '')).upper()
         grok_intentie = str(grok_response.get('intentie', '')).upper()
 
+        # Enhanced logging for individual AI responses in should_exit
+        logger.info(f"GPT Raw Reflectie for {symbol} (should_exit, first 200 chars): {gpt_response.get('reflectie', '')[:200]}")
+        logger.info(f"Grok Raw Reflectie for {symbol} (should_exit, first 200 chars): {grok_response.get('reflectie', '')[:200]}")
+        logger.info(f"GPT Parsed for {symbol} (should_exit): Intentie='{gpt_intentie}', Confidence={gpt_confidence:.2f}")
+        logger.info(f"Grok Parsed for {symbol} (should_exit): Intentie='{grok_intentie}', Confidence={grok_confidence:.2f}")
+
         num_valid_confidences = sum(1 for conf in [gpt_confidence, grok_confidence] if isinstance(conf, (float, int)) and conf >= 0)
         if num_valid_confidences > 0:
             combined_confidence = (gpt_confidence + grok_confidence) / num_valid_confidences
@@ -283,6 +289,10 @@ class ExitOptimizer:
         # Vraag AI om SL-advies
         gpt_response = await self.gpt_reflector.ask_ai(prompt, context={"symbol": symbol, "strategy_id": current_strategy_id, "trade": trade})
         grok_response = await self.grok_reflector.ask_grok(prompt, context={"symbol": symbol, "strategy_id": current_strategy_id, "trade": trade})
+
+        # Enhanced logging for individual AI responses in optimize_trailing_stop_loss
+        logger.info(f"GPT Raw Reflectie for {symbol} (optimize_SL, first 200 chars): {gpt_response.get('reflectie', '')[:200]}")
+        logger.info(f"Grok Raw Reflectie for {symbol} (optimize_SL, first 200 chars): {grok_response.get('reflectie', '')[:200]}")
 
         ai_recommended_sl_pct: Optional[float] = None
         highest_confidence_for_sl = 0.0

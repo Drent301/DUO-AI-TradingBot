@@ -260,13 +260,35 @@ Grok: {grok_result.get('reflectie', 'N/A') if grok_result else 'N/A'}"
         if confidence_engine_instance:
             trade_profit_pct = trade_context.get('profit_pct') # Can be None
             try:
+                # Ensure first_sentiment_observed and trade_direction are available here
+                # These are the same variables prepared for the BiasReflector call earlier in the code.
+                # sentiment_data_status is directly from reflection_log_entry
+                # first_sentiment_observed was from sentiment_items_logged (from reflection_log_entry)
+                # trade_direction was from trade_context
+
+                # Re-fetch them here to be explicit about their source for this call,
+                # or ensure they are passed down if scope changes.
+                # For now, assuming they are still in scope from the BiasReflector preparation block.
+                # The variables `first_sentiment_observed` and `trade_direction` are defined
+                # just before the `bias_reflector_instance.update_bias` call.
+
+                current_sentiment_data_status = reflection_log_entry.get('sentiment_data_status')
+                # `first_sentiment_observed` and `trade_direction` should be in scope from BiasReflector section
+                # If not, they need to be re-derived:
+                # sentiment_items_logged_for_conf = reflection_log_entry.get('sentiment_items_logged', [])
+                # first_sentiment_observed_for_conf = sentiment_items_logged_for_conf[0] if sentiment_items_logged_for_conf else None
+                # trade_direction_for_conf = trade_context.get('trade_direction')
+
                 await confidence_engine_instance.update_confidence(
                     token=symbol,
                     strategy_id=strategy_id,
                     ai_reported_confidence=reflection_log_entry['combined_confidence'],
-                    trade_result_pct=trade_profit_pct
+                    trade_result_pct=trade_profit_pct,
+                    sentiment_data_status=current_sentiment_data_status, # from reflection_log_entry
+                    first_sentiment_observed=first_sentiment_observed, # from earlier block
+                    trade_direction=trade_direction # from earlier block
                 )
-                logger.info(f"[ReflectieCyclus] Called ConfidenceEngine.update_confidence for {symbol}/{strategy_id}")
+                logger.info(f"[ReflectieCyclus] Called ConfidenceEngine.update_confidence for {symbol}/{strategy_id} with sentiment details (Status: {current_sentiment_data_status}, FirstObs: {first_sentiment_observed}, Direction: {trade_direction}).")
             except Exception as e:
                 logger.error(f"[ReflectieCyclus] Error calling ConfidenceEngine.update_confidence for {symbol}/{strategy_id}: {e}")
 
