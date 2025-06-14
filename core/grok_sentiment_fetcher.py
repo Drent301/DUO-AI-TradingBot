@@ -1,7 +1,7 @@
 # core/grok_sentiment_fetcher.py
-# This module is dependent on GROK_API_URL for fetching live social data.
-# Grok's 'Live Feat' is expected to provide access to platforms like X (Twitter)
-# and potentially TradingView for sentiment analysis.
+# Dit module is afhankelijk van GROK_API_URL voor het ophalen van live sociale data.
+# Grok's 'Live Feat' wordt verwacht toegang te hebben tot platforms zoals X (Twitter)
+# en mogelijk TradingView voor de sentimentanalyse.
 import os
 import json
 import logging
@@ -89,7 +89,7 @@ class GrokSentimentFetcher:
         }
         params = {
             'query': query,
-            'limit': 10, # Haal iets meer op om te filteren
+            'limit': 20, # Haal iets meer op om te filteren (increased from 10)
             'sortBy': 'date'
         }
 
@@ -103,8 +103,11 @@ class GrokSentimentFetcher:
             # Filter for relevance (symbol in content) first
             relevant_api_results = []
             for result in data.get('results', []):
-                content_check_text = result.get('content', '') # Text to check for symbol presence
-                if symbol.lower() in content_check_text.lower(): # Sticking to original check for now
+                content_lower = result.get('content', '').lower()
+                description_lower = result.get('description', '').lower()
+                # Check if symbol is in content, or if content is empty, check in description
+                if symbol.lower() in content_lower or \
+                   (not result.get('content') and symbol.lower() in description_lower):
                     relevant_api_results.append(result)
 
             # Sort by timestamp (newest first)
