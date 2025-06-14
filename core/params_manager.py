@@ -9,7 +9,7 @@ from datetime import datetime
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
 
-MEMORY_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'user_data', 'memory')
+MEMORY_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '..', 'user_data', 'memory')
 PARAMS_FILE = os.path.join(MEMORY_DIR, 'learned_params.json')
 
 os.makedirs(MEMORY_DIR, exist_ok=True)
