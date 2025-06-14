@@ -46,6 +46,7 @@ try:
     from core.bitvavo_executor import BitvavoExecutor
     from core.cnn_patterns import CNNPatterns
     from core.pre_trainer import PreTrainer
+    from core.reflectie_lus import ReflectieLus
 except ImportError as e:
     logger.error(f"Failed to import core modules: {e}. Ensure PYTHONPATH is set correctly or run from project root.")
     sys.exit(1)
@@ -62,6 +63,9 @@ async def main():
     parser.add_argument('--pretrain-cnn', action='store_true', help='Run CNN pre-training process.')
     parser.add_argument('--pretrain-pair', type=str, default='ETH/BTC', help='Pair to use for CNN pre-training (e.g., ETH/BTC).')
     parser.add_argument('--pretrain-timeframe', type=str, default='5m', help='Timeframe to use for CNN pre-training (e.g., 5m).')
+    parser.add_argument('--start-reflection-loop', action='store_true', help='Start the continuous AI reflection loop.')
+    parser.add_argument('--reflection-symbols', type=str, default='ETH/USDT,BTC/USDT', help='Comma-separated list of symbols for the reflection loop (e.g., ETH/USDT,BTC/USDT).')
+    parser.add_argument('--reflection-interval', type=int, default=60, help='Interval in minutes for the reflection loop.')
     # Potentially add other arguments from core components if needed, or let them use ParamsManager
     args = parser.parse_args()
 
@@ -288,6 +292,21 @@ async def main():
     logger.info("===================================================================")
     logger.info("=== Full Data and Training Pipeline Run Finished Successfully ===")
     logger.info("===================================================================")
+
+    if args.start_reflection_loop:
+        logger.info("--- Initiating AI Reflection Loop ---")
+        logger.info("The script will now enter the reflection loop. Other operations will not proceed past this point if this is the final operation.")
+        try:
+            parsed_symbols = [symbol.strip() for symbol in args.reflection_symbols.split(',')]
+            if not parsed_symbols or all(s == '' for s in parsed_symbols):
+                logger.error("Reflection symbols are empty or invalid. Please provide a comma-separated list, e.g., --reflection-symbols ETH/USDT,BTC/USDT")
+            else:
+                reflection_loop = ReflectieLus() # Assuming ReflectieLus() doesn't require params_manager or other complex init for now
+                await reflection_loop.start_reflection_loop(symbols=parsed_symbols, interval_minutes=args.reflection_interval)
+                # The line above is an infinite loop, so code below this in the if block won't be reached.
+        except Exception as e:
+            logger.error(f"Error during reflection loop initialization or execution: {e}", exc_info=True)
+        logger.info("--- AI Reflection Loop Finished (or encountered an error) ---") # This line might only be reached if the loop breaks due to error
 
 if __name__ == "__main__":
     # Check for environment variables needed by BitvavoExecutor early
