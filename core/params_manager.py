@@ -172,6 +172,18 @@ class ParamsManager:
             "timeOfDayEffectiveness": {}
         }
 
+    def get_all_strategy_ids(self) -> list[str]:
+        """Retourneert een lijst van alle strategie-ID's beschikbaar in de parameters."""
+        if "strategies" in self._params and isinstance(self._params["strategies"], dict):
+            return list(self._params["strategies"].keys())
+        return []
+
+    def get_strategy_params(self, strategy_id: str) -> Optional[Dict[str, Any]]:
+        """Retourneert alle parameters voor een specifieke strategie-ID."""
+        if "strategies" in self._params and isinstance(self._params["strategies"], dict):
+            return self._params["strategies"].get(strategy_id)
+        return None
+
     async def _save_params(self):
         """Slaat de huidige leerbare parameters op naar een JSON-bestand."""
         try:
@@ -362,6 +374,90 @@ if __name__ == "__main__":
         fetched_time_effectiveness = params_manager.get_param('timeOfDayEffectiveness')
         print(f"Tijd-van-dag effectiviteit: {fetched_time_effectiveness}")
         assert fetched_time_effectiveness == time_data_str_keys
+
+        print("\n--- Test get_all_strategy_ids ---")
+        all_ids = params_manager.get_all_strategy_ids()
+        print(f"Alle strategie ID's (huidige manager): {all_ids}")
+
+        # Get expected IDs from the default parameters method
+        default_params_instance = params_manager._get_default_params() # Use self._get_default_params() if inside class method
+        expected_ids_from_default = list(default_params_instance.get("strategies", {}).keys())
+        print(f"Verwachte ID's van defaults: {expected_ids_from_default}")
+
+        assert isinstance(all_ids, list)
+        # Check if all expected default IDs are present in the loaded params.
+        # The loaded params might have more strategies if learned_params.json is pre-populated.
+        for sid in expected_ids_from_default:
+            assert sid in all_ids, f"Default strategy ID {sid} not found in {all_ids}"
+
+        # Test with a manager that simulates no strategies
+        # Create a new instance for this test to avoid altering the main params_manager's state affecting other tests
+        temp_manager_for_empty_test = ParamsManager()
+
+        # Simulate 'strategies' key missing
+        # Make a copy of _params to modify, or carefully restore
+        original_params_in_temp_manager = dict(temp_manager_for_empty_test._params) # shallow copy
+
+        if "strategies" in temp_manager_for_empty_test._params:
+            del temp_manager_for_empty_test._params["strategies"]
+        assert temp_manager_for_empty_test.get_all_strategy_ids() == []
+        print(f"ID's van manager zonder 'strategies' key: {temp_manager_for_empty_test.get_all_strategy_ids()}")
+
+        # Restore original _params for the next test case on the same temp_manager_for_empty_test instance
+        temp_manager_for_empty_test._params = original_params_in_temp_manager # Restore
+
+        # Simulate 'strategies' key present but an empty dictionary
+        # Ensure 'strategies' exists before trying to assign to it, or handle if it was deleted.
+        # Re-initialize or use a fresh copy if state is too complex to manage.
+        # For simplicity, let's assume original_params_in_temp_manager had 'strategies' or we set it.
+        temp_manager_for_empty_test._params["strategies"] = {} # Now set it to empty
+        assert temp_manager_for_empty_test.get_all_strategy_ids() == []
+        print(f"ID's van manager met lege 'strategies' dict: {temp_manager_for_empty_test.get_all_strategy_ids()}")
+
+        # Restore _params again if further tests on temp_manager_for_empty_test would need original state
+        # temp_manager_for_empty_test._params = original_params_in_temp_manager
+
+        print("\n--- Test get_strategy_params ---")
+        # Test with a known strategy ID
+        # Note: params_manager might have modified "DUOAI_Strategy" params from earlier tests (e.g. entryConvictionThreshold was set to 0.8)
+        # So for checking defaults, we should compare against what _get_default_params() provides,
+        # or ensure the test strategy_id used here was not modified earlier, or re-initialize params_manager.
+        # For simplicity, we'll fetch current params and check existence, and for one specific default that wasn't changed.
+
+        # Let's use the params_manager that has changes from previous tests.
+        # We set entryConvictionThreshold to 0.8 for DUOAI_Strategy earlier.
+        duoai_params_current = params_manager.get_strategy_params("DUOAI_Strategy")
+        print(f"Parameters voor DUOAI_Strategy (uit huidige manager): {duoai_params_current}")
+        assert isinstance(duoai_params_current, dict)
+        assert duoai_params_current.get("entryConvictionThreshold") == 0.8 # This was changed in a previous test
+
+        # To check against pure defaults, let's fetch from a fresh default set
+        default_params_for_duoai = params_manager._get_default_params()["strategies"]["DUOAI_Strategy"]
+        # The stoploss for DUOAI_Strategy was changed to -0.12 in a previous test step.
+        assert duoai_params_current.get("stoploss") == -0.12 # Check against the modified value
+        # We can also check an unchanged parameter against its default
+        assert duoai_params_current.get("cnn_bullFlag_weight") == default_params_for_duoai.get("cnn_bullFlag_weight")
+
+
+        # Test with a non-existent strategy ID
+        non_existent_params = params_manager.get_strategy_params("NonExistentStrategy")
+        print(f"Parameters voor NonExistentStrategy: {non_existent_params}")
+        assert non_existent_params is None
+
+        # Test with a manager that simulates 'strategies' key missing
+        # Create a new ParamsManager instance to avoid interfering with PARAMS_FILE state used by reloaded_manager later
+        temp_manager_for_missing_strategies_key = ParamsManager()
+        # This new instance will load from PARAMS_FILE if it exists and is not empty,
+        # or fall back to defaults. The PARAMS_FILE currently reflects changes made by 'params_manager'.
+        # For a clean test of missing 'strategies' key, we should ensure it's operating on a known state or clear _params.
+        # The simplest is to directly manipulate its _params after initialization.
+
+        if "strategies" in temp_manager_for_missing_strategies_key._params:
+            del temp_manager_for_missing_strategies_key._params["strategies"]
+
+        params_after_del = temp_manager_for_missing_strategies_key.get_strategy_params("DUOAI_Strategy")
+        print(f"Parameters voor DUOAI_Strategy na verwijderen 'strategies' key: {params_after_del}")
+        assert params_after_del is None
 
         # Verify loaded state
         print("\nVerifiëren van opgeslagen staat (door opnieuw te laden)...")
