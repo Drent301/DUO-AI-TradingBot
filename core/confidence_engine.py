@@ -59,7 +59,11 @@ class ConfidenceEngine:
         return self.confidence_memory.get(token, {}).get(strategy_id, {}).get('max_per_trade_pct', 0.1) # Default 10%
 
 
-    async def update_confidence(self, token: str, strategy_id: str, ai_reported_confidence: float, trade_result_pct: Optional[float] = None):
+    async def update_confidence(self, token: str, strategy_id: str, ai_reported_confidence: float,
+                                trade_result_pct: Optional[float] = None,
+                                sentiment_data_status: Optional[str] = None,
+                                first_sentiment_observed: Optional[str] = None,
+                                trade_direction: Optional[str] = None):
         """
         Werkt de confidence score bij op basis van AI-reflectie en trade resultaat.
         Implementeert een cooldown.
@@ -125,8 +129,45 @@ class ConfidenceEngine:
             adjustment_weight = 0.1 # Hoeveel de nieuwe AI observatie de geleerde confidence beinvloedt
             adjusted_learned_confidence = (current_learned_confidence * (1 - adjustment_weight) + ai_reported_confidence * adjustment_weight)
 
+        # Sentiment-Based Adjustment (only if trade_result_pct is present)
+        if trade_result_pct is not None and sentiment_data_status == "present_and_not_empty" and first_sentiment_observed and trade_direction:
+            sentiment_confidence_impact_on_learned_conf = 0.02
+            sentiment_confidence_impact_on_stake_pct = 0.005
+
+            sentiment_aligned_with_profit = False
+            sentiment_misaligned_with_profit = False
+
+            if trade_direction == "long":
+                if first_sentiment_observed == "positive" and trade_result_pct > 0: sentiment_aligned_with_profit = True
+                elif first_sentiment_observed == "negative" and trade_result_pct <= 0: sentiment_aligned_with_profit = True
+                elif first_sentiment_observed == "positive" and trade_result_pct <= 0: sentiment_misaligned_with_profit = True
+                elif first_sentiment_observed == "negative" and trade_result_pct > 0: sentiment_misaligned_with_profit = True
+            elif trade_direction == "short":
+                # Aligned for short: (Negative sent AND Profit) OR (Positive sent AND Loss)
+                if (first_sentiment_observed == "negative" and trade_result_pct > 0) or \
+                   (first_sentiment_observed == "positive" and trade_result_pct <= 0):
+                    sentiment_aligned_with_profit = True
+                # Misaligned for short: (Negative sent AND Loss) OR (Positive sent AND Profit)
+                elif (first_sentiment_observed == "negative" and trade_result_pct <= 0) or \
+                     (first_sentiment_observed == "positive" and trade_result_pct > 0):
+                    sentiment_misaligned_with_profit = True
+
+            if sentiment_aligned_with_profit:
+                learned_conf_nudge = sentiment_confidence_impact_on_learned_conf * ai_reported_confidence
+                adjusted_learned_confidence += learned_conf_nudge
+                max_per_trade_pct += sentiment_confidence_impact_on_stake_pct
+                logger.info(f"[ConfidenceEngine] Sentiment ALIGNED ({first_sentiment_observed} for {trade_direction}, outcome {trade_result_pct:.2%}). Nudging learned_confidence by +{learned_conf_nudge:.4f}, max_per_trade_pct by +{sentiment_confidence_impact_on_stake_pct:.4f}.")
+            elif sentiment_misaligned_with_profit:
+                learned_conf_nudge = sentiment_confidence_impact_on_learned_conf * ai_reported_confidence
+                adjusted_learned_confidence -= learned_conf_nudge
+                max_per_trade_pct -= sentiment_confidence_impact_on_stake_pct
+                logger.info(f"[ConfidenceEngine] Sentiment MISALIGNED ({first_sentiment_observed} for {trade_direction}, outcome {trade_result_pct:.2%}). Nudging learned_confidence by -{learned_conf_nudge:.4f}, max_per_trade_pct by -{sentiment_confidence_impact_on_stake_pct:.4f}.")
+            else: # Neutral sentiment or other unhandled cases
+                logger.info(f"[ConfidenceEngine] Sentiment ({first_sentiment_observed}) for {trade_direction} considered neutral or no strong alignment/misalignment signal for outcome {trade_result_pct:.2%}. No additional sentiment nudge.")
 
         adjusted_learned_confidence = max(0.0, min(1.0, adjusted_learned_confidence)) # Houd tussen 0 en 1
+        max_per_trade_pct = max(0.01, min(0.5, max_per_trade_pct)) # Clamp max_per_trade_pct (e.g., 1% to 50%)
+
 
         current_data['confidence'] = adjusted_learned_confidence
         current_data['max_per_trade_pct'] = round(max_per_trade_pct, 4) # Afronden voor consistentie

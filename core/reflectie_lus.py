@@ -123,6 +123,14 @@ class ReflectieLus:
         # 2. Prompt Generatie
         # De prompt_builder haalt al de sentiment en patroondata op intern.
         # This will fail if PromptBuilder or its methods are not defined/implemented
+
+        # Prepare additional_context for prompt builder
+        additional_context_for_prompt = {
+            **(trade_context or {}), # Original trade_context items
+            'pattern_data': pattern_data, # Add pattern_data
+            # social_sentiment_grok would be in trade_context if added by AIActivationEngine / strategy
+        }
+
         try:
             prompt = await self.prompt_builder.generate_prompt_with_data(
                 candles_by_timeframe=candles_by_timeframe,
@@ -130,12 +138,7 @@ class ReflectieLus:
                 prompt_type=prompt_type, # Use the passed prompt_type
                 current_bias=current_bias,
                 current_confidence=current_confidence,
-                # Consolidate trade_context and pattern_data into additional_context for PromptBuilder
-                additional_context={
-                    **(trade_context or {}), # Original trade_context items
-                    'pattern_data': pattern_data, # Add pattern_data
-                    # social_sentiment_data would be in trade_context if added by AIActivationEngine
-                }
+                additional_context=additional_context_for_prompt
             )
         except AttributeError as e:
             logger.error(f"PromptBuilder of methode niet gevonden: {e}. Implementeer PromptBuilder eerst.")
@@ -175,6 +178,40 @@ Grok: {grok_result.get('reflectie', 'N/A') if grok_result else 'N/A'}"
         combined_intentie = (gpt_result.get('intentie') if gpt_result else None) or                             (grok_result.get('intentie') if grok_result else None) or 'N/A'
         combined_emotie = (gpt_result.get('emotie') if gpt_result else None) or                           (grok_result.get('emotie') if grok_result else None) or 'N/A'
 
+        # Determine Sentiment Data Status and Content for logging
+        sentiment_data_status = "absent"
+        sentiment_items_for_log = []
+        social_sentiment_grok_data = additional_context_for_prompt.get('social_sentiment_grok')
+
+        if social_sentiment_grok_data is not None: # Key is present
+            if isinstance(social_sentiment_grok_data, list):
+                if social_sentiment_grok_data: # List is not empty
+                    sentiment_data_status = "present_and_not_empty"
+                    sentiment_items_for_log = [item.get('sentiment', 'unknown') for item in social_sentiment_grok_data]
+                else: # List is empty
+                    sentiment_data_status = "present_but_empty"
+            else: # Not a list (e.g., could be None if key exists with None value, or other type)
+                sentiment_data_status = "present_malformed_or_unexpected"
+
+        # Evaluate Basic Sentiment-Trade Correlation
+        sentiment_trade_correlation_notes = "N/A"
+        if sentiment_data_status == "present_and_not_empty" and trade_context:
+            trade_is_profitable = trade_context.get('profit_pct', 0) > 0
+            first_sentiment = social_sentiment_grok_data[0].get('sentiment', 'unknown') # Already checked not empty
+
+            outcome_str = "Profitable" if trade_is_profitable else "Not Profitable"
+            simplified_correlation = "N/A"
+
+            if first_sentiment == "positive":
+                simplified_correlation = "positive_sentiment_aligned_with_profit" if trade_is_profitable else "positive_sentiment_misaligned_with_profit"
+            elif first_sentiment == "negative":
+                simplified_correlation = "negative_sentiment_aligned_with_loss" if not trade_is_profitable else "negative_sentiment_misaligned_with_loss"
+            elif first_sentiment == "neutral":
+                simplified_correlation = f"neutral_sentiment_outcome_{outcome_str.lower().replace(' ', '_')}"
+            else: # unknown sentiment
+                simplified_correlation = f"unknown_sentiment_({first_sentiment})_outcome_{outcome_str.lower().replace(' ', '_')}"
+
+            sentiment_trade_correlation_notes = f"Trade: {outcome_str}. First sentiment: {first_sentiment}. Correlation: {simplified_correlation}. All sentiments: {sentiment_items_for_log}"
 
         # 4. Reflectie Loggen
         reflection_log_entry = {
@@ -188,7 +225,10 @@ Grok: {grok_result.get('reflectie', 'N/A') if grok_result else 'N/A'}"
             "combined_intentie": combined_intentie,
             "combined_emotie": combined_emotie,
             "trade_context": trade_context,
-            "mode": mode
+            "mode": mode,
+            "sentiment_data_status": sentiment_data_status,
+            "sentiment_items_logged": sentiment_items_for_log,
+            "sentiment_trade_correlation_notes": sentiment_trade_correlation_notes
         }
         await self._store_reflection(reflection_log_entry)
         self._update_last_reflection_timestamp(symbol)
@@ -198,14 +238,22 @@ Grok: {grok_result.get('reflectie', 'N/A') if grok_result else 'N/A'}"
         if bias_reflector_instance:
             trade_profit_pct = trade_context.get('profit_pct') # Can be None
             try:
+                # Extract data needed for the enhanced update_bias call
+                sentiment_items_logged = reflection_log_entry.get('sentiment_items_logged', [])
+                first_sentiment_observed = sentiment_items_logged[0] if sentiment_items_logged else None
+                trade_direction = trade_context.get('trade_direction') # Assumes 'trade_direction' is in trade_context
+
                 await bias_reflector_instance.update_bias(
                     token=symbol,
                     strategy_id=strategy_id,
                     new_ai_bias=reflection_log_entry['combined_bias'],
                     confidence=reflection_log_entry['combined_confidence'],
-                    trade_result_pct=trade_profit_pct
+                    trade_result_pct=trade_profit_pct,
+                    sentiment_data_status=reflection_log_entry.get('sentiment_data_status'),
+                    first_sentiment_observed=first_sentiment_observed,
+                    trade_direction=trade_direction
                 )
-                logger.info(f"[ReflectieCyclus] Called BiasReflector.update_bias for {symbol}/{strategy_id}")
+                logger.info(f"[ReflectieCyclus] Called BiasReflector.update_bias for {symbol}/{strategy_id} with sentiment details.")
             except Exception as e:
                 logger.error(f"[ReflectieCyclus] Error calling BiasReflector.update_bias for {symbol}/{strategy_id}: {e}")
 
@@ -402,11 +450,15 @@ if __name__ == "__main__":
         mock_trade_context = {
             "entry_price": 2500,
             "exit_price": 2550,
-            "profit_pct": 0.02,
-            "trade_id": "mock_trade_123"
+            "profit_pct": 0.02, # Profitable trade
+            "trade_id": "mock_trade_123",
+            "social_sentiment_grok": [ # Add this
+                {"source": "TestFeed", "text": "Sample positive news for ETH.", "sentiment": "positive"},
+                {"source": "AnotherFeed", "text": "Another positive one.", "sentiment": "positive"}
+            ]
         }
 
-        print("\n--- Testen van process_reflection_cycle direct ---")
+        print("\n--- Testen van process_reflection_cycle direct (Positive Sentiment / Profit) ---")
         mock_candles = ref_lus._create_mock_dataframe_for_reflection("ETH/USDT")
 
         result = await ref_lus.process_reflection_cycle(
@@ -423,6 +475,54 @@ if __name__ == "__main__":
         print("\nResultaat van directe reflectiecyclus:")
         # Use default=str to handle any non-serializable objects like datetime
         print(json.dumps(result, indent=2, default=str))
+
+        print("\n--- Testen van process_reflection_cycle direct (Negative Sentiment / Loss) ---")
+        mock_trade_context_loss = {
+            "entry_price": 2500,
+            "exit_price": 2450,
+            "profit_pct": -0.02, # Losing trade
+            "trade_id": "mock_trade_456",
+            "social_sentiment_grok": [
+                {"source": "TestFeed", "text": "Sample negative news for ETH.", "sentiment": "negative"}
+            ]
+        }
+        result_loss = await ref_lus.process_reflection_cycle(
+            symbol="ETH/USDT",
+            candles_by_timeframe=mock_candles, # re-use
+            strategy_id="DUOAI_Strategy",
+            trade_context=mock_trade_context_loss, # use new context
+            current_bias=0.4,
+            current_confidence=0.6,
+            mode='backtest',
+            prompt_type='comprehensive_analysis',
+            pattern_data=None
+        )
+        print("\nResultaat van reflectiecyclus (Negative Sentiment / Loss):")
+        print(json.dumps(result_loss, indent=2, default=str))
+
+        print("\n--- Testen van process_reflection_cycle direct (Neutral Sentiment / Profit) ---")
+        mock_trade_context_neutral_profit = {
+            "entry_price": 2500,
+            "exit_price": 2550,
+            "profit_pct": 0.02, # Profitable trade
+            "trade_id": "mock_trade_789",
+            "social_sentiment_grok": [
+                {"source": "NeutralNews", "text": "Market is stable.", "sentiment": "neutral"}
+            ]
+        }
+        result_neutral_profit = await ref_lus.process_reflection_cycle(
+            symbol="ETH/USDT",
+            candles_by_timeframe=mock_candles, # re-use
+            strategy_id="DUOAI_Strategy",
+            trade_context=mock_trade_context_neutral_profit, # use new context
+            current_bias=0.5,
+            current_confidence=0.5,
+            mode='backtest',
+            prompt_type='comprehensive_analysis',
+            pattern_data=None
+        )
+        print("\nResultaat van reflectiecyclus (Neutral Sentiment / Profit):")
+        print(json.dumps(result_neutral_profit, indent=2, default=str))
 
 
         # print("\n--- Starten van de periodieke reflectie loop (met mock data) ---")

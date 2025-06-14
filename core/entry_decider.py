@@ -250,7 +250,8 @@ class EntryDecider:
                 symbol=symbol,
                 prompt_type='marketAnalysis', # Or 'entrySignal'
                 current_bias=learned_bias,
-                current_confidence=learned_confidence
+                current_confidence=learned_confidence,
+                additional_context=trade_context # Pass trade_context here
             )
         else:
             logger.error("[EntryDecider] PromptBuilder not available. Cannot generate prompt for entry decision.")
@@ -259,6 +260,16 @@ class EntryDecider:
         if not prompt: # Should be redundant if PromptBuilder error is caught, but as a safeguard
             logger.warning(f"[EntryDecider] Geen prompt gegenereerd voor {symbol}. Entry geweigerd.")
             return {"enter": False, "reason": "no_prompt_generated", "confidence": learned_confidence, "learned_bias": learned_bias, "ai_intent": "HOLD", "pattern_details": {}}
+        else:
+            # New log statement
+            sentiment_status = "absent"
+            if trade_context and 'social_sentiment_grok' in trade_context:
+                if trade_context['social_sentiment_grok']: # Check if list is not empty
+                    sentiment_status = "present and not empty"
+                else:
+                    sentiment_status = "present but empty"
+
+            logger.info(f"[EntryDecider] AI prompt for {symbol} generated for marketAnalysis. Social sentiment data was {sentiment_status} in the prompt context.")
 
         # Vraag AI-consensus
         consensus_result = await self.get_consensus(prompt, symbol, current_strategy_id, learned_bias, learned_confidence)
@@ -485,7 +496,15 @@ if __name__ == "__main__":
             '5m': mock_df_5m,
             '1h': create_mock_dataframe_for_entry_decider('1h', 60)
         }
-        mock_trade_context = {"stake_amount": 100, "candles_by_timeframe": mock_candles_by_timeframe, "current_price": mock_df_5m['close'].iloc[-1]}
+        mock_trade_context = {
+            "stake_amount": 100,
+            "candles_by_timeframe": mock_candles_by_timeframe,
+            "current_price": mock_df_5m['close'].iloc[-1],
+            "social_sentiment_grok": [ # Add this
+                {"source": "TestFeed", "text": "Sample positive news for ETH.", "sentiment": "positive"},
+                {"source": "AnotherFeed", "text": "Neutral outlook observed.", "sentiment": "neutral"}
+            ]
+        }
 
 
         # Store original methods to restore after test

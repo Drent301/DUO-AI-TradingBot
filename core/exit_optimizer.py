@@ -57,7 +57,8 @@ class ExitOptimizer:
         learned_bias: float = 0.5,
         learned_confidence: float = 0.5,
         exit_conviction_drop_trigger: float = 0.4, # Default if not passed
-        candles_by_timeframe: Optional[Dict[str, pd.DataFrame]] = None # Relevant voor AI, made Optional with default
+        candles_by_timeframe: Optional[Dict[str, pd.DataFrame]] = None, # Relevant voor AI, made Optional with default
+        additional_context_data: Optional[Dict[str, Any]] = None
     ) -> Dict[str, Any]:
         """
         Bepaalt of een exit moet worden geplaatst op basis van AI-consensus en drempelwaarden.
@@ -83,12 +84,23 @@ class ExitOptimizer:
                 prompt_type='riskManagement', # Or 'marketAnalysis' for exit
                 current_bias=learned_bias,
                 current_confidence=learned_confidence,
+                additional_context=additional_context_data # Pass the new parameter
             )
 
         if not prompt:
             logger.warning(f"[ExitOptimizer] Geen prompt gegenereerd voor {symbol}. Exit evaluatie kan minder accuraat zijn.")
+            # Fallback prompt generation remains if prompt is None
             prompt = f"Analyseer de huidige markt voor {symbol} en de openstaande trade ({trade.get('id','N/A')}) voor een mogelijk exit signaal. Huidige profit: {trade.get('profit_pct',0):.2%}"
+        else:
+            # New log statement
+            sentiment_status = "absent"
+            if additional_context_data and 'social_sentiment_grok' in additional_context_data:
+                if additional_context_data['social_sentiment_grok']: # Check if list is not empty
+                    sentiment_status = "present and not empty"
+                else:
+                    sentiment_status = "present but empty"
 
+            logger.info(f"[ExitOptimizer] AI prompt for {symbol} (should_exit) generated. Social sentiment data was {sentiment_status} in the prompt context.")
 
         # Vraag AI-consensus
         gpt_response = await self.gpt_reflector.ask_ai(prompt, context={"symbol": symbol, "strategy_id": current_strategy_id, "trade": trade})
@@ -231,7 +243,8 @@ class ExitOptimizer:
         # Doorsturen van geleerde parameters en candles_by_timeframe
         learned_bias: float = 0.5,
         learned_confidence: float = 0.5,
-        candles_by_timeframe: Optional[Dict[str, pd.DataFrame]] = None # Made Optional with default
+        candles_by_timeframe: Optional[Dict[str, pd.DataFrame]] = None, # Made Optional with default
+        additional_context_data: Optional[Dict[str, Any]] = None
     ) -> Optional[Dict[str, float]]:
         """
         Optimaliseert dynamisch de trailing stop loss op basis van AI-inzichten.
@@ -251,10 +264,21 @@ class ExitOptimizer:
                 prompt_type='riskManagement',
                 current_bias=learned_bias,
                 current_confidence=learned_confidence,
+                additional_context=additional_context_data # Pass the new parameter
             )
         if not prompt:
             logger.warning(f"[ExitOptimizer] Geen risicomanagement prompt gegenereerd voor {symbol}. SL niet geoptimaliseerd.")
             return None
+        else:
+            # New log statement
+            sentiment_status = "absent"
+            if additional_context_data and 'social_sentiment_grok' in additional_context_data:
+                if additional_context_data['social_sentiment_grok']: # Check if list is not empty
+                    sentiment_status = "present and not empty"
+                else:
+                    sentiment_status = "present but empty"
+
+            logger.info(f"[ExitOptimizer] AI prompt for {symbol} (optimize_trailing_stop_loss) generated. Social sentiment data was {sentiment_status} in the prompt context.")
 
         # Vraag AI om SL-advies
         gpt_response = await self.gpt_reflector.ask_ai(prompt, context={"symbol": symbol, "strategy_id": current_strategy_id, "trade": trade})
@@ -560,6 +584,14 @@ if __name__ == "__main__":
         # Use deepcopy if the mock data is mutable and modified by tests, not strictly needed here as returning new dict
         optimizer.cnn_patterns_detector.detect_patterns_multi_timeframe = lambda *args, **kwargs: default_cnn_mock_data.copy()
 
+        mock_additional_context_for_exit = {
+            "current_trade_duration_hours": 2.5, # Example other data
+            "market_volatility_index": 0.7,    # Example other data
+            "social_sentiment_grok": [
+                {"source": "ExitFeed", "text": "Market looks shaky for ETH.", "sentiment": "negative"},
+                {"source": "NewsSite", "text": "Neutral to bearish sentiment overall.", "sentiment": "neutral"}
+            ]
+        }
 
         # --- Test should_exit ---
         print("\n--- Test ExitOptimizer (should_exit) ---")
@@ -596,7 +628,8 @@ if __name__ == "__main__":
         exit_decision_strong_pattern = await optimizer.should_exit(
             mock_df, mock_trade_profitable, test_symbol, test_strategy_id,
             learned_bias=0.5, learned_confidence=0.5, # Neutral bias/conf for direct param effect
-            candles_by_timeframe=mock_candles_by_timeframe
+            candles_by_timeframe=mock_candles_by_timeframe,
+            additional_context_data=mock_additional_context_for_exit # Add this
         )
         print(f"Resultaat (Strong Bearish Pattern): {json.dumps(exit_decision_strong_pattern, indent=2, default=str)}")
         assert exit_decision_strong_pattern['exit'] is True
@@ -646,7 +679,8 @@ if __name__ == "__main__":
         exit_decision_low_score = await optimizer.should_exit(
             mock_df, mock_trade_profitable, test_symbol, test_strategy_id,
             learned_bias=0.5, learned_confidence=0.5,
-            candles_by_timeframe=mock_candles_by_timeframe
+            candles_by_timeframe=mock_candles_by_timeframe,
+            additional_context_data=mock_additional_context_for_exit # Add this
         )
         print(f"Resultaat (Pattern Score Too Low): {json.dumps(exit_decision_low_score, indent=2, default=str)}")
         assert exit_decision_low_score['exit'] is False
@@ -681,7 +715,8 @@ if __name__ == "__main__":
             dataframe=mock_df, trade=mock_trade_profitable, symbol=test_symbol, current_strategy_id=test_strategy_id,
             learned_bias=0.4, learned_confidence=0.6, # These don't affect this path
             exit_conviction_drop_trigger=0.4, # Explicitly passed, but mock_params_get_for_tests also provides it
-            candles_by_timeframe=mock_candles_by_timeframe
+            candles_by_timeframe=mock_candles_by_timeframe,
+            additional_context_data=mock_additional_context_for_exit # Add this
         )
         print(f"Resultaat (Low AI Conf Profit): {json.dumps(exit_decision_low_conf_profit, indent=2, default=str)}")
         assert exit_decision_low_conf_profit['exit'] is True
@@ -712,7 +747,8 @@ if __name__ == "__main__":
         exit_decision_ai_sell = await optimizer.should_exit(
             dataframe=mock_df, trade=mock_trade_profitable, symbol=test_symbol, current_strategy_id=test_strategy_id,
             learned_bias=0.5, learned_confidence=0.5,
-            candles_by_timeframe=mock_candles_by_timeframe
+            candles_by_timeframe=mock_candles_by_timeframe,
+            additional_context_data=mock_additional_context_for_exit # Add this
         )
         print(f"Resultaat (AI Sell Intent): {json.dumps(exit_decision_ai_sell, indent=2, default=str)}")
         assert exit_decision_ai_sell['exit'] is True
@@ -789,7 +825,8 @@ if __name__ == "__main__":
 
             sl_optimization_result = await optimizer.optimize_trailing_stop_loss(
                 dataframe=mock_df, trade=mock_trade_profitable, symbol=test_symbol, current_strategy_id=test_strategy_id,
-                learned_bias=0.5, learned_confidence=0.5, candles_by_timeframe=mock_candles_by_timeframe
+                learned_bias=0.5, learned_confidence=0.5, candles_by_timeframe=mock_candles_by_timeframe,
+                additional_context_data=mock_additional_context_for_exit # Add this
             )
 
             if expected_sl_pct is not None:
@@ -840,7 +877,8 @@ if __name__ == "__main__":
         sl_optimization_result_custom = await optimizer.optimize_trailing_stop_loss(
             mock_df, mock_trade_profitable, test_symbol, test_strategy_id,
             learned_bias=0.5, learned_confidence=0.5, # Neutral bias/conf
-            candles_by_timeframe=mock_candles_by_timeframe
+            candles_by_timeframe=mock_candles_by_timeframe,
+            additional_context_data=mock_additional_context_for_exit # Add this
         )
 
         # Expected: ai_recommended_sl_pct = 0.05. Bias/Conf factors are 1.0.
