@@ -149,30 +149,36 @@ class ParamsManager:
 
     def get_param(self, key: str, strategy_id: Optional[str] = None) -> Any:
         """Haalt een specifieke leerbare parameter op."""
+        # Handle request for the entire strategies dictionary
+        if key == "strategies" and strategy_id is None:
+            return self._params.get("strategies", {}) # Return empty dict if not found
+
         # Eerst proberen strategie-specifieke parameter op te halen
         if strategy_id and "strategies" in self._params and strategy_id in self._params["strategies"]:
             if key in self._params["strategies"][strategy_id]:
                 return self._params["strategies"][strategy_id][key]
 
         # Fallback naar globale parameters als strategie-specifiek niet gevonden of niet van toepassing
-        if key in self._params.get("global", {}): # Ensure "global" key exists
+        # Ensure "global" key exists before accessing
+        if "global" in self._params and key in self._params["global"]:
             return self._params["global"][key]
 
         # Check root level for keys like timeOfDayEffectiveness that might not be under "global"
-        if key in self._params and key not in ["strategies", "global"]:
-            return self._params[key]
-
+        # Only if strategy_id is None, to avoid misinterpreting a key within a strategy as a root-level key.
+        if strategy_id is None and key in self._params and key not in ["global", "strategies"]:
+             return self._params[key]
 
         # Als niets gevonden, haal op uit default params
-        default_global = self._get_default_params()["global"].get(key)
+        default_global = self._get_default_params().get("global", {}).get(key)
         if default_global is not None: return default_global
 
-        default_strategy_params = self._get_default_params()["strategies"].get(strategy_id, {})
-        default_strategy_value = default_strategy_params.get(key)
-        if default_strategy_value is not None: return default_strategy_value
+        if strategy_id: # Only try to get strategy defaults if strategy_id was given
+            default_strategy_params = self._get_default_params().get("strategies", {}).get(strategy_id, {})
+            default_strategy_value = default_strategy_params.get(key)
+            if default_strategy_value is not None: return default_strategy_value
 
-        # Fallback for timeOfDayEffectiveness if not in global or strategy specific
-        if key == "timeOfDayEffectiveness" and key in self._get_default_params():
+        # Fallback for root-level default keys if strategy_id was None or strategy-specific not found
+        if strategy_id is None and key in self._get_default_params() and key not in ["global", "strategies"]:
             return self._get_default_params()[key]
 
         return None # Return None if parameter is not found anywhere
@@ -235,8 +241,98 @@ class ParamsManager:
         await self._save_params()
         logger.info("Tijd-van-dag effectiviteit bijgewerkt.")
 
+    async def add_strategy(self, strategy_id: str, strategy_params: Dict[str, Any]) -> bool:
+        """Voegt een nieuwe strategieconfiguratie toe of werkt een bestaande bij."""
+        if not isinstance(strategy_params, dict):
+            logger.error(f"Kan strategie {strategy_id} niet toevoegen: strategy_params is geen dictionary.")
+            return False
+
+        if "strategies" not in self._params or not isinstance(self._params.get("strategies"), dict):
+            logger.warning("De 'strategies' sectie bestond niet of was geen dictionary. Initialiseren...")
+            self._params["strategies"] = {}
+
+        if strategy_id in self._params["strategies"]:
+            logger.warning(f"Strategie {strategy_id} bestaat al en wordt overschreven.")
+
+        # Maak een kopie om de originele input niet te wijzigen en voeg last_updated toe
+        params_to_store = strategy_params.copy()
+        params_to_store["last_updated"] = datetime.now().isoformat()
+
+        self._params["strategies"][strategy_id] = params_to_store
+
+        await self._save_params()
+        logger.info(f"Strategie {strategy_id} succesvol toegevoegd/geüpdatet en opgeslagen.")
+        return True
+
 
 # Voorbeeld van hoe je het zou kunnen gebruiken (voor testen)
+
+async def test_add_strategy():
+    logger.info("\n--- Test add_strategy Methode ---")
+    # Assuming PARAMS_FILE is cleaned by the calling function run_test_params_manager
+
+    params_manager_add_test = ParamsManager() # New instance for this test
+
+    test_strategy_id_add = "TestAddStrat"
+    test_params_add = {
+        "description": "Test strategy for add_strategy",
+        "buy_params": {"param_buy": 10, "another_buy": "abc"},
+        "sell_params": {"param_sell": 100.5},
+        "minimal_roi": {"0": 0.1, "30": 0.05},
+        "stoploss": -0.05
+    }
+
+    logger.info(f"Toevoegen van nieuwe strategie: {test_strategy_id_add}")
+    result_add = await params_manager_add_test.add_strategy(test_strategy_id_add, test_params_add)
+    assert result_add is True, "add_strategy should return True on success"
+
+    added_strategy_direct = params_manager_add_test._params.get("strategies", {}).get(test_strategy_id_add)
+    assert added_strategy_direct is not None, "Strategie niet gevonden in _params na toevoegen"
+    assert added_strategy_direct["buy_params"] == test_params_add["buy_params"]
+    assert "last_updated" in added_strategy_direct
+    first_timestamp = added_strategy_direct["last_updated"]
+    logger.info(f"Strategie {test_strategy_id_add} succesvol toegevoegd met timestamp: {first_timestamp}")
+
+    # Test overschrijven
+    await asyncio.sleep(0.01) # Zorg voor een tijdverschil
+    test_params_overwrite = {
+        "description": "Overwritten test strategy",
+        "buy_params": {"param_buy": 20, "new_param": "xyz"}, # Gewijzigd en nieuw
+        "minimal_roi": {"0": 0.2}, # Gewijzigd
+        "stoploss": -0.02 # Gewijzigd
+        # sell_params is intentionally omitted to test if it's removed
+    }
+    logger.info(f"Overschrijven van strategie: {test_strategy_id_add}")
+    result_overwrite = await params_manager_add_test.add_strategy(test_strategy_id_add, test_params_overwrite)
+    assert result_overwrite is True, "add_strategy should return True on overwrite success"
+
+    overwritten_strategy_direct = params_manager_add_test._params.get("strategies", {}).get(test_strategy_id_add)
+    assert overwritten_strategy_direct is not None, "Strategie niet gevonden na overschrijven"
+    assert overwritten_strategy_direct["buy_params"] == test_params_overwrite["buy_params"]
+    assert overwritten_strategy_direct["minimal_roi"] == test_params_overwrite["minimal_roi"]
+    assert "sell_params" not in overwritten_strategy_direct, "sell_params should have been removed as it was not in overwrite data"
+
+    second_timestamp = overwritten_strategy_direct["last_updated"]
+    assert "last_updated" in overwritten_strategy_direct
+    assert second_timestamp > first_timestamp, f"Timestamp niet geüpdatet na overschrijven. Old: {first_timestamp}, New: {second_timestamp}"
+    logger.info(f"Strategie {test_strategy_id_add} succesvol overschreven met nieuwe timestamp: {second_timestamp}")
+
+    # Verificatie door herladen
+    logger.info("Verifiëren door herladen van ParamsManager...")
+    reloaded_manager_for_add_test = ParamsManager()
+    reloaded_strategy_config = reloaded_manager_for_add_test._params.get("strategies", {}).get(test_strategy_id_add)
+
+    assert reloaded_strategy_config is not None, "Strategie niet gevonden na herladen"
+    assert reloaded_strategy_config["description"] == test_params_overwrite["description"]
+    assert reloaded_strategy_config["buy_params"] == test_params_overwrite["buy_params"]
+    assert reloaded_strategy_config["minimal_roi"] == test_params_overwrite["minimal_roi"]
+    assert "sell_params" not in reloaded_strategy_config, "Reloaded sell_params should also be absent"
+    assert reloaded_strategy_config["last_updated"] == second_timestamp
+    logger.info(f"Strategie {test_strategy_id_add} succesvol geverifieerd na herladen.")
+
+    logger.info("--- Test add_strategy Methode succesvol afgerond ---")
+
+
 if __name__ == "__main__":
     import dotenv
     import sys
@@ -253,11 +349,21 @@ if __name__ == "__main__":
             os.remove(PARAMS_FILE)
             print(f"Verwijderde bestaand parameterbestand: {PARAMS_FILE}")
 
-        params_manager = ParamsManager()
-        test_strategy_id = "DUOAI_Strategy"
-        other_strategy_id = "OTHER_Strategy" # For testing fallback
+        # Run the new add_strategy test first on a clean slate
+        await test_add_strategy()
 
-        print("--- Test ParamsManager ---")
+        # Proceed with existing tests; they will use their own ParamsManager instances
+        # or operate on the file potentially modified by test_add_strategy.
+        # For true isolation, each test function should manage its own file state or use unique keys.
+        # However, test_add_strategy uses its own ParamsManager instance and saves,
+        # so subsequent ParamsManager() will load what it saved.
+        # The original tests below also re-initialize ParamsManager after the initial global one.
+
+        params_manager = ParamsManager() # This will load what test_add_strategy saved
+        test_strategy_id = "DUOAI_Strategy"
+        other_strategy_id = "OTHER_Strategy"
+
+        print("\n--- Voortzetting Test ParamsManager (na test_add_strategy) ---")
 
         # Get default global parameter
         max_risk = params_manager.get_param("maxTradeRiskPct")
@@ -366,6 +472,6 @@ if __name__ == "__main__":
         print(f"Hergeladen Tijd-van-dag effectiviteit: {fetched_time_effectiveness_reloaded}")
         assert fetched_time_effectiveness_reloaded == time_data_str_keys
 
-        print("\nParamsManager tests succesvol afgerond.")
+        print("\nParamsManager tests (hoofdgedeelte) succesvol afgerond.")
 
     asyncio.run(run_test_params_manager())
