@@ -10,14 +10,12 @@ load_dotenv() # Load default .env file
 
 # Util imports
 from utils.data_downloader import download_data
+# VERWIJDERD: calculate_indicators uit deze importregel
 from utils.data_validator import load_data_for_pair, validate_ohlcv_data, check_cnn_data_suitability
-# from strategies.DUOAI_Strategy import DUOAI_Strategy # For type hinting and strategy loading - Defer if Freqtrade is missing
-# from freqtrade.data.dataprovider import DataProvider # Defer if Freqtrade is missing
-# from freqtrade.configuration import Configuration # Defer if Freqtrade is missing
 import pandas as pd
 
 # Configure logging
-# Define log directory and file path
+# AANGEPAST: Schrijf logbestanden naar user_data/logs/pipeline_run.log
 log_dir = "user_data/logs"
 log_file_path = os.path.join(log_dir, "pipeline_run.log")
 
@@ -57,7 +55,6 @@ try:
 except ImportError as e:
     logger.error(f"Failed to import core modules: {e}. Ensure PYTHONPATH is set correctly or run from project root.")
     sys.exit(1)
-
 
 async def main():
     logger.info("======================================================================")
@@ -120,6 +117,7 @@ async def main():
                 if df_pair_data is not None and not df_pair_data.empty:
                     # Pass pair and timeframe to validation functions as they expect them
                     if validate_ohlcv_data(df_pair_data, pair, timeframe):
+                        # VERWIJDERD: De aanroep naar calculate_indicators
                         check_cnn_data_suitability(df_pair_data, pair, timeframe)
                 else:
                     logger.warning(f"No data loaded for {pair} - {timeframe}. Skipping further validation for this item.")
@@ -145,8 +143,6 @@ async def main():
             if base_ohlcv_df is None or base_ohlcv_df.empty:
                 logger.error(f"Failed to load base OHLCV data for {args.pretrain_pair} - {args.pretrain_timeframe} from user_data/data/{exchange_name_for_loading}. Skipping pre-training.")
             else:
-                logger.info(f"Successfully loaded base OHLCV data for {args.pretrain_pair} - {args.pretrain_timeframe}. Shape: {base_ohlcv_df.shape}")
-
                 logger.info(f"Successfully loaded base OHLCV data for {args.pretrain_pair} - {args.pretrain_timeframe}. Shape: {base_ohlcv_df.shape}")
 
                 logger.info(f"Instantiating CNNPatterns and preparing features for {args.pretrain_pair} - {args.pretrain_timeframe}...")
@@ -186,70 +182,19 @@ async def main():
             logger.error(f"Error during simplified CNN pre-training data loading/processing for {args.pretrain_pair} - {args.pretrain_timeframe}: {e}", exc_info=True)
             logger.info(f"--- CNN Pre-training Process for {args.pretrain_pair} - {args.pretrain_timeframe} Failed ---")
 
-
     # Initialize Core Components
     logger.info("Initializing core components...")
     try:
         # ParamsManager is now initialized inside PreTrainer and potentially other components if needed
         # If a global instance is required by other parts of the pipeline, it can be initialized here.
         # For now, assuming components that need it will initialize it or receive it.
-        # params_manager = ParamsManager() # This was the old line.
-
-        # Initialize ParamsManager for other parts of the pipeline if they rely on a central instance
-        # If run_pipeline.py's later stages need params_manager, it should be instantiated here.
-        # For now, we'll assume that the main pipeline logic (after pre-training) will instantiate it
-        # or that components like DUOAI_Strategy already do.
         # DUOAI_Strategy initializes its own ParamsManager.
-        pass # Not initializing a global params_manager here for now.
-        # params_manager = ParamsManager() # This was the old line.
-
-        # Initialize ParamsManager for other parts of the pipeline if they rely on a central instance
-        # If run_pipeline.py's later stages need params_manager, it should be instantiated here.
-        # For now, we'll assume that the main pipeline logic (after pre-training) will instantiate it
-        # or that components like DUOAI_Strategy already do.
-        # DUOAI_Strategy initializes its own ParamsManager.
-        pass # Not initializing a global params_manager here for now.
-
-        # The following initializations are for the main trading pipeline,
-        # not directly for the pre-training step if it's run exclusively.
-        # Consider if these should be conditional (e.g., if not args.pretrain_cnn).
-        # For now, keeping them as they are part of the original main flow.
-
-        # DUOAI_Strategy already initializes its own ParamsManager, CNNPatterns, PreTrainer etc.
-        # We are calling a specific pre-training path if --pretrain-cnn is set.
-        # The main pipeline run (without --pretrain-cnn) would use the strategy's internal instances.
-
-        # If --pretrain-cnn is the *only* action, we might not need to init these here.
-        # However, if the pipeline can run pre-training AND then proceed, they are needed.
-        # Assuming for now that --pretrain-cnn is an auxiliary action and the main pipeline might still run.
-
-        # If not running pre-training, or if pipeline continues after pre-training,
-        # the original core component initialization would occur.
-        # However, the original PreTrainer instantiation is complex.
-        # The subtask is about integrating CNNPatterns with PreTrainer via the new pretrain method.
-        # The existing main pipeline part below this might need adjustment if its PreTrainer usage changes.
-        # For now, let's focus on the --pretrain-cnn path.
+        pass
 
         # If we are ONLY pre-training, we might not want to initialize the full strategy's components here.
         # Let's assume the script can either pre-train OR run the main pipeline.
         if not args.pretrain_cnn: # Only run main pipeline components if not in pre-training mode
             logger.info("Initializing core components for main trading pipeline...")
-            # This section needs to be reviewed in context of how PreTrainer is used by DUOAI_Strategy.
-            # DUOAI_Strategy initializes its own instances of ParamsManager, CNNPatterns, PreTrainer.
-            # The PreTrainer instance here might be redundant if DUOAI_Strategy handles its own.
-            # This was the old block:
-            # params_manager = ParamsManager()
-            # try:
-            #     bitvavo_executor = BitvavoExecutor() ...
-            # except ValueError: ...
-            # cnn_pattern_detector = CNNPatterns(params_manager=params_manager) ...
-            # pre_trainer_main_pipeline = PreTrainer( # Renamed to avoid conflict
-            #     params_manager=params_manager,
-            #     cnn_pattern_detector=cnn_pattern_detector,
-            #     bitvavo_executor=bitvavo_executor
-            # )
-            # logger.info("PreTrainer (for main pipeline) initialized successfully.")
-            # The above block is now largely handled by DUOAI_Strategy's own __init__
             logger.info("Core components for main pipeline are initialized within DUOAI_Strategy itself if strategy is run.")
 
     except Exception as e:
@@ -260,40 +205,16 @@ async def main():
     try:
         logger.info("--- Running Pre-training & Backtesting Pipeline ---")
 
-        # Get the strategy ID to run from ParamsManager or use a default
-        # (This default_strategy_id should ideally be part of your ParamsManager defaults)
-
         # The main pipeline execution logic. This should only run if not in a specific pre-training mode,
         # or if pre-training is a step before this.
         # For now, let's assume if --pretrain-cnn is passed, we don't run this main flow.
         if not args.pretrain_cnn:
             logger.info("--- Attempting to run main trading pipeline (DUOAI_Strategy flow) ---")
-            # This part would involve instantiating DUOAI_Strategy and running it,
-            # which is typically handled by Freqtrade itself when live/dry running.
-            # For a script like run_pipeline.py, it implies a more direct invocation of strategy methods
-            # or a simulated Freqtrade environment.
-            # The existing code calls `pre_trainer.run_pretraining_pipeline(strategy_id=strategy_id_to_run)`
-            # This `pre_trainer` was the one initialized above.
-            # DUOAI_Strategy has its own `pre_trainer` instance.
-            # This section needs clarification on how the main pipeline is triggered vs. Freqtrade's own execution.
-            # For now, let's assume this part is about triggering the DUOAI_Strategy's internal PreTrainer's pipeline.
-
-            # To align with the structure, we'd need a Freqtrade-like environment or a specific
-            # method in DUOAI_Strategy that kicks off its operations including its PreTrainer.
-            # This is beyond the scope of `--pretrain-cnn` integration.
-            # The old code:
-            # strategy_id_to_run = params_manager.get_param('default_strategy_id')
-            # if not strategy_id_to_run:
-            #     strategy_id_to_run = "DefaultPipelineRunStrategy" # Fallback if not in params
-            #     logger.warning(f"'default_strategy_id' not found in ParamsManager, using fallback: {strategy_id_to_run}")
-            # await pre_trainer_main_pipeline.run_pretraining_pipeline(strategy_id=strategy_id_to_run)
-            # logger.info("--- Pre-training & Backtesting Pipeline completed. ---")
             logger.info("Main pipeline execution (strategy's own PreTrainer, etc.) would occur here if invoked.")
             logger.info("This script's primary role for the main pipeline might be for specific utility tasks like pre-training.")
 
     except Exception as e:
         logger.error(f"Error during main pipeline operations: {e}", exc_info=True)
-        # Depending on the error, you might want to exit or attempt cleanup
 
     logger.info("===================================================================")
     logger.info("=== Full Data and Training Pipeline Run Finished Successfully ===")
