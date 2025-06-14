@@ -17,11 +17,18 @@ from utils.data_validator import load_data_for_pair, validate_ohlcv_data, check_
 import pandas as pd
 
 # Configure logging
+# Define log directory and file path
+log_dir = "user_data/logs"
+log_file_path = os.path.join(log_dir, "pipeline_run.log")
+
+# Create log directory if it doesn't exist
+os.makedirs(log_dir, exist_ok=True)
+
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     handlers=[
-        logging.FileHandler("pipeline_run.log"), # Log to a file
+        logging.FileHandler(log_file_path), # Log to a file
         logging.StreamHandler(sys.stdout) # Log also to console
     ]
 )
