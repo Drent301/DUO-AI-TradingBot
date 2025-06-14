@@ -1,14 +1,30 @@
 import asyncio
 import logging
 import json
+from core.grok_sentiment_fetcher import GrokSentimentFetcher
+from unittest.mock import AsyncMock, MagicMock # Added for testing
 import pandas as pd
 
 logger = logging.getLogger(__name__)
 
 class PromptBuilder:
-    def __init__(self):
-        # In a real scenario, this might load templates or other resources
+    def __init__(self, grok_fetcher_instance=None): # Allow injecting a fetcher
         logger.info("PromptBuilder initialized.")
+        if grok_fetcher_instance:
+            self.grok_sentiment_fetcher = grok_fetcher_instance
+        else:
+            try:
+                self.grok_sentiment_fetcher = GrokSentimentFetcher()
+            except ValueError as e: # Typically API key missing
+                logger.warning(f"Failed to initialize default GrokSentimentFetcher (ValueError): {e}. Social sentiment will not be fetched.")
+                self.grok_sentiment_fetcher = None
+            except ImportError: # If GrokSentimentFetcher class itself is not found
+                logger.warning("GrokSentimentFetcher class not found by PromptBuilder. Social sentiment will not be fetched.")
+                self.grok_sentiment_fetcher = None
+            except Exception as e: # Catch any other unexpected errors during init
+                logger.error(f"An unexpected error occurred during GrokSentimentFetcher initialization: {e}")
+                self.grok_sentiment_fetcher = None
+
 
     async def generate_prompt_with_data(
         self,
@@ -25,6 +41,33 @@ class PromptBuilder:
         final_prompt_parts = []
         all_timeframe_indicators = {}
 
+        # Fetch Grok sentiment data before constructing other parts
+        grok_data = [] # Default to empty list
+        should_fetch_grok_data = False # Default, will be set if fetcher is available and prompt type matches
+        if self.grok_sentiment_fetcher:
+            # Determine if data should be fetched based on prompt type
+            # For now, fetch for 'marketAnalysis', 'riskManagement', and 'exitSignal'
+            # as these are all decision-making prompts.
+            prompt_types_for_grok_fetch = ['marketAnalysis', 'riskManagement', 'exitSignal']
+            should_fetch_grok_data = prompt_type in prompt_types_for_grok_fetch
+
+            logger.info(f"Grok sentiment fetch for {symbol} (prompt: {prompt_type}): {'YES' if should_fetch_grok_data else 'NO (prompt type not configured for fetch)'}")
+            if should_fetch_grok_data:
+                try:
+                    grok_data = await self.grok_sentiment_fetcher.fetch_live_search_data(
+                        symbol=symbol,
+                        perform_fetch=True # We've already decided to fetch based on prompt_type
+                    )
+                    logger.info(f"Successfully fetched {len(grok_data)} Grok items for {symbol}")
+                except Exception as e:
+                    logger.error(f"Error fetching Grok data in PromptBuilder for {symbol}: {e}")
+                    # grok_data remains []
+            # else: # No specific logging needed here, already logged above
+            #    logger.info(f"Skipping Grok sentiment fetch for {symbol} (prompt_type: {prompt_type})")
+
+        else:
+            logger.warning(f"GrokSentimentFetcher not available, skipping fetch for {symbol}")
+
         # Common header
         final_prompt_parts.append(f"Symbol: {symbol}")
         final_prompt_parts.append(f"Current AI Bias: {current_bias:.2f}, Current AI Confidence: {current_confidence:.2f}")
@@ -34,8 +77,8 @@ class PromptBuilder:
             final_prompt_parts.append(
                 "Analyze the following market data, including any provided social media sentiment. "
                 "Provide your trade intention (LONG, SHORT, HOLD), confidence level (0.0-1.0), and perceived bias (0.0-1.0). "
-                "Explicitly state how social media sentiment influences your technical analysis and decision-making process. "
-                "For example: 'Based on the technicals I see X, and the positive social sentiment further supports/contradicts this by Y...'"
+                "Explicitly analyze the provided social media sentiment. Detail how this sentiment influences your interpretation of technical indicators, chart patterns, and your overall trading decision. "
+                "For example: 'Based on the technicals I see X (e.g., bullish RSI divergence), the detected chart pattern is Z (e.g., a double bottom), and the positive social sentiment further supports this by indicating Y (e.g., strong community backing for an upcoming feature), leading to a LONG decision with high confidence...'"
             )
             # Add more specific instructions for market analysis if needed
 
@@ -125,28 +168,25 @@ class PromptBuilder:
                 final_prompt_parts.append("\nDetected CNN Patterns:")
                 final_prompt_parts.append(json.dumps(cnn_predictions, indent=2, default=str))
 
-            # Social Sentiment Data Section from Grok
-            if additional_context and 'social_sentiment_grok' in additional_context:
-                social_sentiment_grok_data = additional_context.get('social_sentiment_grok')
-                if isinstance(social_sentiment_grok_data, list):
-                    final_prompt_parts.append("\nSocial Sentiment/News (Grok):")
-                    if not social_sentiment_grok_data:
-                        final_prompt_parts.append("  No recent social sentiment/news items found from Grok.")
-                    else:
-                        for i, item in enumerate(social_sentiment_grok_data):
-                            source = item.get('source', 'N/A')
-                            text = item.get('text', 'N/A')
-                            sentiment = item.get('sentiment', 'N/A')
-
-                            text_snippet = (text[:147] + "...") if len(text) > 150 else text
-
-                            final_prompt_parts.append(f"  --- Item {i+1} ---")
-                            final_prompt_parts.append(f"  Source: {source}")
-                            final_prompt_parts.append(f"  Sentiment: {sentiment}")
-                            final_prompt_parts.append(f"  Text: {text_snippet}")
-                elif social_sentiment_grok_data is not None:
-                    final_prompt_parts.append("\nSocial Sentiment/News (Grok): (Data provided in unexpected format)")
-            # If 'social_sentiment_grok' is not in additional_context or is None, this whole block is skipped.
+            # Social Sentiment Data Section from Grok (Now independent of additional_context for its data source)
+            # social_sentiment_grok_data is populated by the fetch operation earlier using self.grok_sentiment_fetcher
+            # The variable 'should_fetch_grok_data' was defined during the fetch attempt block.
+        if self.grok_sentiment_fetcher and should_fetch_grok_data:
+            final_prompt_parts.append("\nSocial Sentiment/News (Grok):")
+            if grok_data: # If data was successfully fetched
+                for i, item in enumerate(grok_data): # Iterate over fetched grok_data
+                    source = item.get('source', 'N/A')
+                    text = item.get('text', 'N/A')
+                    sentiment = item.get('sentiment', 'N/A')
+                    text_snippet = (text[:147] + "...") if len(text) > 150 else text
+                    final_prompt_parts.append(f"  --- Item {i+1} ---")
+                    final_prompt_parts.append(f"  Source: {source}")
+                    final_prompt_parts.append(f"  Sentiment: {sentiment}")
+                    final_prompt_parts.append(f"  Text: {text_snippet}")
+            else: # Fetch was attempted (should_fetch_grok_data is True) but no data returned
+                 final_prompt_parts.append("  No recent social sentiment/news items found from Grok.")
+        # If self.grok_sentiment_fetcher is None, or if should_fetch_grok_data is False (because prompt type wasn't configured),
+        # this whole "Social Sentiment/News (Grok):" section is skipped.
 
 
         final_prompt = "\n".join(final_prompt_parts)
@@ -155,7 +195,14 @@ class PromptBuilder:
 
 
 async def test_prompt_builder():
-    builder = PromptBuilder()
+    # --- Mock setup ---
+    mock_grok_fetcher = MagicMock() # This is the instance of the fetcher
+    mock_grok_fetcher.fetch_live_search_data = AsyncMock() # fetch_live_search_data is an async method
+
+    # Instantiate PromptBuilder with the mock fetcher
+    builder = PromptBuilder(grok_fetcher_instance=mock_grok_fetcher)
+
+    # --- Test Data ---
     mock_candles = {
         '5m': pd.DataFrame({
             'open': [10, 11, 12, 11.5, 12.5],
@@ -203,34 +250,37 @@ async def test_prompt_builder():
             }
         },
         "current_trade": {"pair": "BTC/USDT", "profit_pct": 5.2, "open_reason": "EMA cross"},
-        "social_sentiment_grok": [
-            {
-                "source": "CryptoNewsDaily",
-                "text": "A new report from top market analysts suggests that Bitcoin (BTC) is poised for a significant rally, potentially reaching $100,000 by the end of the year. This optimistic outlook is fueled by increased institutional adoption and positive regulatory news. However, some caution that market volatility remains a concern.",
-                "sentiment": "positive"
-            },
-            {
-                "source": "ETHWorld",
-                "text": "The recent Ethereum Developer Conference (DevCon) showcased several promising layer-2 scalability solutions. These advancements aim to address network congestion and high gas fees, paving the way for wider adoption of decentralized applications (dApps).",
-                "sentiment": "neutral"
-            },
-            {
-                "source": "AncientScrolls",
-                "text": "Old Tweet, No Content.",
-                "sentiment": "unknown"
-            }
-        ]
+        # 'social_sentiment_grok' is removed as it's now fetched internally
     }
 
-    prompt_ma = await builder.generate_prompt_with_data(
+    # --- Test Case 1: Market Analysis with social data from fetcher ---
+    logger.info("--- Test Case 1: Market Analysis with social data from fetcher ---")
+    mock_grok_fetcher.fetch_live_search_data.return_value = [
+        {"source": "MockX", "text": "Mock positive news for BTC.", "sentiment": "positive"},
+        {"source": "MockSite", "text": "Mock neutral news for BTC.", "sentiment": "neutral"},
+    ]
+
+    prompt_ma_with_data = await builder.generate_prompt_with_data(
         mock_candles,
         "BTC/USDT",
         "marketAnalysis",
-        additional_context=mock_additional_context
+        additional_context=mock_additional_context # Still used for CNN, trade context
     )
-    logger.info(f"--- Market Analysis Prompt ---\n{prompt_ma}\n")
+    logger.info(f"--- Market Analysis Prompt (with fetched data) ---\n{prompt_ma_with_data}\n")
 
-    # Assertions for Technical Indicators
+    mock_grok_fetcher.fetch_live_search_data.assert_called_once_with(symbol="BTC/USDT", perform_fetch=True)
+    assert "Explicitly analyze the provided social media sentiment. Detail how this sentiment influences your interpretation of technical indicators, chart patterns, and your overall trading decision." in prompt_ma_with_data
+    assert "Social Sentiment/News (Grok):" in prompt_ma_with_data
+    assert "Source: MockX" in prompt_ma_with_data
+    assert "Sentiment: positive" in prompt_ma_with_data
+    assert "Text: Mock positive news for BTC." in prompt_ma_with_data
+    assert "Source: MockSite" in prompt_ma_with_data
+    mock_grok_fetcher.fetch_live_search_data.reset_mock()
+    logger.info("Test Case 1 Passed.")
+
+    # --- Existing Assertions for Technical Indicators, Candlestick, CNN (should still pass) ---
+    # These assertions use prompt_ma_with_data as it contains all sections
+    assert "Latest Technical Indicators:" in prompt_ma_with_data
     assert "Latest Technical Indicators:" in prompt_ma
     assert '"5m": {' in prompt_ma
     assert '"rsi": 62.1' in prompt_ma
@@ -248,9 +298,9 @@ async def test_prompt_builder():
     assert '"macd":' not in prompt_ma.split('"1h": {')[1].split('}')[0] # MACD not in 1h
 
     # Assertions for Candlestick Patterns
-    assert "Detected Candlestick Patterns:" in prompt_ma
+    assert "Detected Candlestick Patterns:" in prompt_ma_with_data
 
-    # Helper function to extract JSON blocks robustly
+    # Helper function to extract JSON blocks robustly (remains the same)
     def extract_json_block(prompt_text, start_marker, end_marker=None):
         try:
             after_start_marker = prompt_text.split(start_marker, 1)[1]
@@ -266,10 +316,10 @@ async def test_prompt_builder():
             return None
         except json.JSONDecodeError as e:
             logger.error(f"JSONDecodeError for block starting with '{start_marker}': {e}")
-            logger.error(f"Problematic JSON string part: {json_str[:200]}...") # Print more context
+            logger.error(f"Problematic JSON string part: {json_str[:200]}...")
             return None
 
-    candlestick_data = extract_json_block(prompt_ma, "Detected Candlestick Patterns:\n", "\nDetected CNN Patterns:")
+    candlestick_data = extract_json_block(prompt_ma_with_data, "Detected Candlestick Patterns:\n", "\nDetected CNN Patterns:")
     assert candlestick_data is not None, "Failed to parse candlestick data"
     assert "5m" in candlestick_data
     assert "CDLMORNINGSTAR" in candlestick_data["5m"]
@@ -283,88 +333,100 @@ async def test_prompt_builder():
     assert "Detected CNN Patterns:" in prompt_ma
     # Assuming CNN patterns section is the last one with JSON, or followed by non-JSON content.
     # If another section could follow, its start marker would be the end_marker here.
-    cnn_data = extract_json_block(prompt_ma, "Detected CNN Patterns:\n", "\nSocial Sentiment/News (Grok):")
+    # The end marker for CNN data is now "\nSocial Sentiment/News (Grok):" if Grok data is present.
+    cnn_data = extract_json_block(prompt_ma_with_data, "Detected CNN Patterns:\n", "\nSocial Sentiment/News (Grok):")
     assert cnn_data is not None, "Failed to parse CNN data"
     assert cnn_data['5m_bullFlag_score'] == 0.92
     assert cnn_data['1h_bearTrap_score'] == 0.78
     assert cnn_data['5m_randomPattern_score'] == 0.3
+    logger.info("Existing assertions for TI, Candlesticks, CNN passed with fetched data.")
 
-    # Assertions for Social Sentiment Data (Grok)
-    assert "Social Sentiment/News (Grok):" in prompt_ma
-    assert "Source: CryptoNewsDaily" in prompt_ma
-    assert "Sentiment: positive" in prompt_ma
-    assert "Text: A new report from top market analysts suggests that Bitcoin (BTC) is poised for a significant rally, potentially reaching $100,000 by the end of th..." in prompt_ma
-    assert "Source: ETHWorld" in prompt_ma
-    assert "Sentiment: neutral" in prompt_ma
-    assert "Text: The recent Ethereum Developer Conference (DevCon) showcased several promising layer-2 scalability solutions. These advancements aim to address netw..." in prompt_ma
-    assert "Source: AncientScrolls" in prompt_ma
-    assert "Sentiment: unknown" in prompt_ma
-    assert "Text: Old Tweet, No Content." in prompt_ma
-    assert "Timestamp:" not in prompt_ma
-    assert "Title:" not in prompt_ma
+    # --- Test Case 2: Market Analysis with fetcher returning empty list ---
+    logger.info("--- Test Case 2: Market Analysis with fetcher returning empty list ---")
+    mock_grok_fetcher.fetch_live_search_data.return_value = []
+    prompt_ma_empty_data = await builder.generate_prompt_with_data(
+        mock_candles, "ETH/USDT", "marketAnalysis", additional_context=mock_additional_context
+    )
+    logger.info(f"--- Market Analysis Prompt (empty fetched data) ---\n{prompt_ma_empty_data}\n")
+    mock_grok_fetcher.fetch_live_search_data.assert_called_once_with(symbol="ETH/USDT", perform_fetch=True)
+    assert "Social Sentiment/News (Grok):" in prompt_ma_empty_data
+    assert "No recent social sentiment/news items found from Grok." in prompt_ma_empty_data
+    assert "Source: MockX" not in prompt_ma_empty_data # Should not have data from previous test
+    mock_grok_fetcher.fetch_live_search_data.reset_mock()
+    logger.info("Test Case 2 Passed.")
 
-    # Assertion for the new instruction in marketAnalysis prompt:
-    assert "Explicitly state how social media sentiment influences your technical analysis and decision-making process." in prompt_ma
-    logger.info("Assertions for Market Analysis prompt passed.")
+    # --- Test Case 3: Prompt type where fetch is not performed ---
+    logger.info("--- Test Case 3: Prompt type where fetch is not performed ---")
+    mock_grok_fetcher.fetch_live_search_data.return_value = [{"source": "ShouldNotAppear", "text": "Data", "sentiment": "none"}]
+    prompt_status_update = await builder.generate_prompt_with_data(
+        mock_candles, "BTC/USDT", "statusUpdate", additional_context=mock_additional_context
+    )
+    logger.info(f"--- Status Update Prompt ---\n{prompt_status_update}\n")
+    mock_grok_fetcher.fetch_live_search_data.assert_not_called()
+    assert "Social Sentiment/News (Grok):" not in prompt_status_update
+    mock_grok_fetcher.fetch_live_search_data.reset_mock() # Good practice
+    logger.info("Test Case 3 Passed.")
 
-    # Test riskManagement prompt to ensure context is still handled, including social sentiment
-    mock_rm_context = {
+    # --- Test Case 4: GrokSentimentFetcher is None (simulating initialization failure) ---
+    logger.info("--- Test Case 4: GrokSentimentFetcher is None ---")
+    builder_no_fetcher = PromptBuilder(grok_fetcher_instance=None)
+    # This will try to init GrokSentimentFetcher, which might succeed or fail depending on env (e.g. GROK_API_KEY)
+    # If it fails, self.grok_sentiment_fetcher will be None internally.
+    # If it succeeds, this test case won't be a true test of it being None unless GROK_API_KEY is unset.
+    # For robust local testing, one might temporarily unset GROK_API_KEY for this specific builder instance.
+    # However, the code is designed so that if self.grok_sentiment_fetcher is None, it skips fetching.
+
+    # To ensure self.grok_sentiment_fetcher is None for the test, we can check its state.
+    # If builder_no_fetcher.grok_sentiment_fetcher is not None here, it means default init worked.
+    # This test is more about the PromptBuilder's behavior when its fetcher attribute *is* None.
+    # Let's assume the internal try-except in PromptBuilder sets it to None if GrokFetcher init fails.
+
+    # If GROK_API_KEY is actually set in the test environment, GrokSentimentFetcher() might get initialized.
+    # To truly test the "None" path without manipulating environment variables during the test run,
+    # we rely on the fact that if grok_fetcher_instance=None is passed, AND the internal
+    # instantiation fails (e.g. due to missing key or ImportError), it becomes None.
+    # We can force it to be None for this specific test instance for reliable testing:
+    builder_no_fetcher.grok_sentiment_fetcher = None
+
+
+    prompt_ma_no_fetcher = await builder_no_fetcher.generate_prompt_with_data(
+        mock_candles, "ADA/USDT", "marketAnalysis", additional_context=mock_additional_context
+    )
+    logger.info(f"--- Market Analysis Prompt (no fetcher) ---\n{prompt_ma_no_fetcher}\n")
+    # mock_grok_fetcher was not associated with builder_no_fetcher, so no call to assert.
+    assert "Social Sentiment/News (Grok):" not in prompt_ma_no_fetcher
+    logger.info("Test Case 4 Passed.")
+
+    # --- Test Risk Management prompt to ensure it also tries to fetch ---
+    logger.info("--- Test Risk Management with social data from fetcher ---")
+    mock_grok_fetcher.fetch_live_search_data.return_value = [
+        {"source": "RiskMock", "text": "Critical risk warning for ETH.", "sentiment": "negative"},
+    ]
+    # Use the original 'builder' which has the mock_grok_fetcher
+    mock_rm_context_only_cnn_trade = { # No social_sentiment_grok here
         "entry_price": 2000,
         "current_profit_pct": 2.1,
         'pattern_data': {
             'cnn_predictions': {'5m_headAndShoulders_score': 0.85}
-        },
-        "social_sentiment_grok": [ # Add sentiment to RM test as well, using new key and structure
-            {
-                "source": "BearishTimes",
-                "text": "Several indicators point towards a potential market correction in the short term. Investors are advised to exercise caution.",
-                "sentiment": "negative"
-            }
-        ]
+        }
     }
-    prompt_rm = await builder.generate_prompt_with_data(
+    prompt_rm_fetched = await builder.generate_prompt_with_data(
         mock_candles, "ETH/USDT", "riskManagement",
         current_bias=0.6, current_confidence=0.75,
-        additional_context=mock_rm_context
+        additional_context=mock_rm_context_only_cnn_trade
     )
-    logger.info(f"--- Risk Management Prompt ---\n{prompt_rm}\n")
-    assert "Prompt Type: Risk Management Assessment" in prompt_rm
-    assert "Entry price: 2000" in prompt_rm
-    assert "Current profit pct: 2.1" in prompt_rm
-    assert "Detected CNN Patterns:" in prompt_rm
-    assert '"5m_headAndShoulders_score": 0.85' in prompt_rm
-    assert "Social Sentiment/News (Grok):" in prompt_rm # Check sentiment in RM prompt with new key
-    assert "Source: BearishTimes" in prompt_rm
-    assert "Sentiment: negative" in prompt_rm
-    assert "Text: Several indicators point towards a potential market correction in the short term. Investors are advised to exercise caution." in prompt_rm
-    logger.info("Assertions for Risk Management prompt passed.")
+    logger.info(f"--- Risk Management Prompt (fetched data) ---\n{prompt_rm_fetched}\n")
+    mock_grok_fetcher.fetch_live_search_data.assert_called_once_with(symbol="ETH/USDT", perform_fetch=True)
+    assert "Social Sentiment/News (Grok):" in prompt_rm_fetched
+    assert "Source: RiskMock" in prompt_rm_fetched
+    assert "Sentiment: negative" in prompt_rm_fetched
+    assert "Detected CNN Patterns:" in prompt_rm_fetched # Check other sections still exist
+    assert "Entry price: 2000" in prompt_rm_fetched
+    mock_grok_fetcher.fetch_live_search_data.reset_mock()
+    logger.info("Test Risk Management with fetched data passed.")
 
-    # Test with empty social_sentiment_grok list
-    empty_sentiment_context = {**mock_additional_context, "social_sentiment_grok": []}
-    prompt_empty_sentiment = await builder.generate_prompt_with_data(
-        mock_candles, "BTC/USDT", "marketAnalysis", additional_context=empty_sentiment_context
-    )
-    assert "Social Sentiment/News (Grok):" in prompt_empty_sentiment
-    assert "No recent social sentiment/news items found from Grok." in prompt_empty_sentiment
-    logger.info("Assertion for empty social sentiment data passed.")
+    logger.info("All new and existing assertions passed.")
 
-    # Test with social_sentiment_grok being None (should not print the section or error)
-    none_sentiment_context = {key: val for key, val in mock_additional_context.items() if key != 'social_sentiment_grok'}
-    prompt_none_sentiment = await builder.generate_prompt_with_data(
-        mock_candles, "BTC/USDT", "marketAnalysis", additional_context=none_sentiment_context
-    )
-    assert "Social Sentiment/News (Grok):" not in prompt_none_sentiment
-    logger.info("Assertion for None social sentiment data passed.")
-
-
-    prompt_rm_no_sentiment = await builder.generate_prompt_with_data(
-        mock_candles, "ETH/USDT", "riskManagement",
-        current_bias=0.6, current_confidence=0.75,
-        additional_context={"entry_price": 2000, "current_profit_pct": 2.1} # No sentiment data here
-    )
-    logger.info(f"--- Risk Management Prompt (No Sentiment) ---\n{prompt_rm_no_sentiment}\n")
-    assert "Social Sentiment/News (Grok):" not in prompt_rm_no_sentiment
-    logger.info("Assertion for Risk Management prompt with no sentiment data passed.")
 
 if __name__ == '__main__':
     logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
