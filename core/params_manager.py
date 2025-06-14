@@ -107,7 +107,35 @@ class ParamsManager:
                 "hpo_pruner": "Median", # Optuna pruner: 'Median', 'None'
                 "hpo_metric_to_optimize": "val_loss", # Metric to optimize: 'val_loss', 'val_accuracy', 'val_f1', 'val_auc'
                 "hpo_direction_to_optimize": "minimize", # Direction: 'minimize' for loss, 'maximize' for acc/f1/auc
-                "regimes_to_train": ["all"] # List of market regimes to train models for (e.g., ["bull", "bear", "all"])
+                "regimes_to_train": ["all"], # List of market regimes to train models for (e.g., ["bull", "bear", "all"])
+
+                # --- Parameters for PatternPerformanceAnalyzer ---
+                # Time window (in minutes) for matching pattern entry logs with closed trades.
+                "pattern_log_trade_match_window_minutes": 2,
+                # Path to the log file where contributing patterns for entries are recorded.
+                "pattern_performance_log_path": "user_data/logs/pattern_performance_log.json",
+                # Path to the Freqtrade database, used by PatternPerformanceAnalyzer.
+                "freqtrade_db_path_analyzer": "user_data/freqtrade.sqlite",
+
+                # --- Parameters for PatternWeightOptimizer ---
+                # Minimum allowable value for any learned pattern weight.
+                "min_pattern_weight": 0.1,
+                # Maximum allowable value for any learned pattern weight.
+                "max_pattern_weight": 2.0,
+                # Learning rate for adjusting pattern weights (e.g., 0.05 means 5% change per adjustment).
+                "pattern_weight_learning_rate": 0.05,
+                # Metric from PatternPerformanceAnalyzer to drive weight adjustments ('win_rate_pct' or 'avg_profit_pct').
+                "pattern_performance_metric_to_optimize": "win_rate_pct",
+                # If 'win_rate_pct' is metric, this is the threshold below which a pattern is underperforming.
+                "low_performance_threshold_win_rate": 40.0,
+                # If 'avg_profit_pct' is metric, this is the threshold below which a pattern is underperforming.
+                "low_performance_threshold_avg_profit": 0.0, # e.g., 0.0 for break-even or worse
+                # If 'win_rate_pct' is metric, this is the threshold above which a pattern is well-performing.
+                "high_performance_threshold_win_rate": 60.0,
+                # If 'avg_profit_pct' is metric, this is the threshold above which a pattern is well-performing.
+                "high_performance_threshold_avg_profit": 1.0, # e.g., 1.0 for 1% average profit
+                # Minimum number of trades a pattern must have contributed to before its weight is adjusted.
+                "min_trades_for_weight_adjustment": 10
             },
             "strategies": {
                 "DUOAI_Strategy": {

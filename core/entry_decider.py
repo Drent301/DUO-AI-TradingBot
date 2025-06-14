@@ -179,6 +179,21 @@ class EntryDecider:
     ) -> Dict[str, Any]:
         """
         Bepaalt of een entry moet worden geplaatst op basis van AI-consensus en drempelwaarden.
+
+        Returns:
+            Dict[str, Any]: Een dictionary met de beslissing en gerelateerde data.
+                            Bijvoorbeeld:
+                            {
+                                "enter": bool, # True als entry, False anders
+                                "reason": str, # Reden voor beslissing
+                                "confidence": float, # AI confidence score
+                                "learned_bias": float, # Huidige geleerde bias
+                                "ai_intent": str, # AI consensus intentie (LONG, SHORT, HOLD)
+                                "ai_details": dict, # Gedetailleerde AI response data
+                                "pattern_details": dict, # Gedetailleerde info over gedetecteerde rule-based patronen
+                                "contributing_patterns": list[str], # Lijst van patronen die bijgedragen hebben aan de score
+                                "weighted_pattern_score": float # De gewogen pattern score
+                            }
         """
         logger.debug(f"[EntryDecider] Evalueren entry voor {symbol} met strategie {current_strategy_id}...")
 
@@ -301,7 +316,8 @@ class EntryDecider:
 
         weighted_pattern_score = 0.0
         weighted_cnn_score_contribution = 0.0 # Initialize new variable
-        detected_patterns_summary = [] # For logging
+        detected_patterns_summary = [] # For detailed logging of score calculation
+        contributing_patterns = [] # Initialize list to store identifiers of patterns that influence the decision
         cnn_predictions_data = pattern_data.get('cnn_predictions', {})
         rule_patterns_data = pattern_data.get('patterns', {})
 
@@ -344,6 +360,10 @@ class EntryDecider:
                         weighted_cnn_score_contribution += contribution
                         logger.info(f"Symbol: {symbol}, CNN Contribution: Pattern '{extracted_pattern_name}' (from key '{key}') Score: {score:.2f} * Weight: {current_pattern_weight:.2f} = {contribution:.2f}. Cumulative CNN score: {weighted_cnn_score_contribution:.2f}")
                         detected_patterns_summary.append(f"CNN_{key}({score:.2f},w:{current_pattern_weight:.2f})")
+                        # Add to contributing_patterns if the score contributes positively.
+                        # TF (timeframe) is extracted from the key_parts[0] if available (e.g., '5m' from '5m_bullFlag_score').
+                        tf_prefix = key_parts[0] if len(key_parts) > 2 and key_parts[-1] == 'score' else 'unknown_tf'
+                        contributing_patterns.append(f"cnn_{tf_prefix}_{extracted_pattern_name}")
                     elif score is not None:
                         logger.info(f"Symbol: {symbol}, CNN Pattern '{extracted_pattern_name}' (from key '{key}') Score {score} is not positive or invalid, not contributing.")
                 elif extracted_pattern_name:
@@ -390,6 +410,7 @@ class EntryDecider:
                     rule_based_contribution_total += contribution # Summing rule-based contributions before adding to main score
                     logger.info(f"Symbol: {symbol}, Detected rule-based pattern: '{p_name}'. Contribution: {entry_rule_pattern_score:.2f} * {rule_based_pattern_weight_to_use:.2f} = {contribution:.2f}.")
                     detected_patterns_summary.append(f"rule({p_name},s:{entry_rule_pattern_score:.2f},w:{rule_based_pattern_weight_to_use:.2f})")
+                    contributing_patterns.append(f"rule_{p_name}") # Add detected rule-based pattern to contributing_patterns
                     break  # Only the first detected rule-based pattern contributes (as per original logic)
         else:
             logger.warning(f"Symbol: {symbol}, 'patterns' key missing or not a dict in pattern_data. Skipping rule-based pattern check.")
@@ -439,7 +460,8 @@ class EntryDecider:
                 "learned_bias": learned_bias,
                 "ai_intent": consensus_intentie,
                 "ai_details": consensus_result, # Full AI consensus details
-                "pattern_details": pattern_data.get('patterns', {})
+                "pattern_details": pattern_data.get('patterns', {}), # Original rule-based patterns
+                "contributing_patterns": contributing_patterns # Added list
             }
         else:
             # Construct detailed reason for rejection
@@ -466,7 +488,8 @@ class EntryDecider:
                     "rules": rule_patterns_data,
                     "cnn_predictions": cnn_predictions_data
                 },
-                "weighted_pattern_score": weighted_pattern_score
+                "weighted_pattern_score": weighted_pattern_score,
+                "contributing_patterns": contributing_patterns # Also return on False for completeness, maybe empty
             }
 
 # Voorbeeld van hoe je het zou kunnen gebruiken (voor testen)

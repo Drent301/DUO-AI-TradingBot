@@ -17,6 +17,8 @@ try:
     # These functions are assumed to be in reflectie_analyser.py
     from core.reflectie_analyser import analyse_reflecties, generate_mutation_proposal, analyze_timeframe_bias
     from core.market_data_provider import get_recent_market_data # Added import
+    from core.pattern_performance_analyzer import PatternPerformanceAnalyzer # Added import
+    from core.pattern_weight_optimizer import PatternWeightOptimizer # Added import
 except ImportError as e:
     logging.warning(f"AIOptimizer: Error importing dependency: {e}. Some features may not work.")
     # Define placeholders if imports fail, to allow basic structure testing
@@ -48,9 +50,18 @@ DEFAULT_STRATEGY_ID = "DUOAI_Strategy"
 class AIOptimizer:
     """
     Orchestrates AI-driven optimization cycles, including pre-training,
-    strategy performance analysis, reflection, and mutation.
+    strategy performance analysis, reflection, mutation, and pattern weight tuning.
     """
     def __init__(self, pre_trainer: PreTrainer, strategy_manager: StrategyManager):
+        """
+        Initializes the AIOptimizer.
+
+        Args:
+            pre_trainer: An instance of PreTrainer for model pre-training.
+            strategy_manager: An instance of StrategyManager for managing strategy parameters
+                              and performance. This manager's ParamsManager is also used by
+                              PatternPerformanceAnalyzer and PatternWeightOptimizer.
+        """
         if pre_trainer is None or strategy_manager is None:
             logger.error("AIOptimizer could not be initialized: PreTrainer or StrategyManager is None.")
             # Or raise ValueError, as PreTrainer/StrategyManager types are expected from type hints
@@ -58,6 +69,27 @@ class AIOptimizer:
 
         self.pre_trainer = pre_trainer
         self.strategy_manager = strategy_manager
+
+        # Instantiate PatternPerformanceAnalyzer and PatternWeightOptimizer
+        # Use the params_manager from strategy_manager for consistency.
+        # Pass None for paths to let PatternPerformanceAnalyzer use its defaults or fetch from params_manager.
+        try:
+            self.pattern_analyzer = PatternPerformanceAnalyzer(
+                params_manager=self.strategy_manager.params_manager,
+                freqtrade_db_path=None, # Let PPA handle default/param fetching
+                pattern_log_path=None   # Let PPA handle default/param fetching
+            )
+            self.pattern_weight_optimizer = PatternWeightOptimizer(
+                params_manager=self.strategy_manager.params_manager,
+                pattern_performance_analyzer=self.pattern_analyzer
+            )
+            logger.info("PatternPerformanceAnalyzer and PatternWeightOptimizer initialized.")
+        except Exception as e:
+            logger.error(f"Error initializing PPA or PWO in AIOptimizer: {e}", exc_info=True)
+            # Decide if these are critical. For now, log and continue, optimizers might fail later.
+            self.pattern_analyzer = None
+            self.pattern_weight_optimizer = None
+
         logger.info("AIOptimizer initialized.")
 
     def _log_optimization_activity(self, activity_type: str, details: Dict[str, Any]):
@@ -131,9 +163,11 @@ class AIOptimizer:
     async def run_periodic_optimization(self, symbols: List[str], timeframes: List[str]):
         """
         Runs a periodic optimization cycle:
-        1. Pre-trains models for each symbol and timeframe.
-        2. Analyzes reflections and current strategy performance.
-        3. Proposes and applies mutations if deemed beneficial.
+        1. Pre-trains models for each symbol and timeframe. (Commented out for current focus)
+        2. Analyzes reflections and current strategy performance for each symbol/timeframe.
+        3. Proposes and applies mutations to strategy parameters if deemed beneficial.
+        4. Optimizes CNN pattern weights based on overall performance.
+        5. Learns and updates preferred trading pairs.
         """
         logger.info("Starting periodic optimization cycle...")
         self._log_optimization_activity("cycle_start", {"symbols": symbols, "timeframes": timeframes})
@@ -234,6 +268,27 @@ class AIOptimizer:
                     self._log_optimization_activity("no_mutation_proposed", {
                         "strategy_id": strategy_id, "symbol": symbol, "timeframe": timeframe
                     })
+
+        # --- CNN Pattern Weight Optimization ---
+        # This step runs once per cycle, after individual symbol/timeframe analysis & mutations,
+        # to adjust pattern weights based on their overall collected performance.
+        if self.pattern_weight_optimizer:
+            logger.info("Attempting to optimize CNN pattern weights...")
+            try:
+                # PatternWeightOptimizer.optimize_pattern_weights is a synchronous method.
+                # It's run in a separate thread to avoid blocking the asyncio event loop.
+                weights_optimized = await asyncio.to_thread(self.pattern_weight_optimizer.optimize_pattern_weights)
+                if weights_optimized:
+                    logger.info("CNN pattern weights optimized successfully.")
+                    self._log_optimization_activity("pattern_weights_optimized", {"success": True})
+                else:
+                    logger.info("CNN pattern weights optimization did not result in changes or encountered an issue.")
+                    self._log_optimization_activity("pattern_weights_optimization_no_change", {"success": False})
+            except Exception as e:
+                logger.error(f"Error during CNN pattern weight optimization: {e}", exc_info=True)
+                self._log_optimization_activity("pattern_weights_optimization_error", {"error": str(e)})
+        else:
+            logger.warning("PatternWeightOptimizer not available. Skipping pattern weight optimization.")
 
         await self._learn_preferred_pairs() # Added call
         logger.info("Periodic optimization cycle finished.") # Ensure this is the final log msg as per instr.
