@@ -93,6 +93,13 @@ Een zelflerende, AI-gestuurde crypto trading bot, gebouwd bovenop Freqtrade, die
         ```
         **WAARSCHUWING:** Zet `dry_run: false` in `config.json` en begrijp de risico's van live trading voordat je deze modus gebruikt.
 
+    * **Starten van de AI Reflectie Lus (onafhankelijk proces):**
+        De AI reflectie lus kan als een apart, continu proces worden gestart om periodiek AI-reflecties uit te voeren. Dit is nuttig voor het continu leren en aanpassen van de AI-modellen, los van directe Freqtrade trade-executie.
+        ```bash
+        python run_pipeline.py --start-reflection-loop --reflection-symbols ETH/USDT,BTC/USDT --reflection-interval 60
+        ```
+        Pas `--reflection-symbols` aan met de gewenste handelsparen (komma-gescheiden) en `--reflection-interval` met het gewenste interval in minuten.
+
 ## Modules Overzicht
 
 De bot is opgebouwd uit de volgende kern-AI-modules in de `/core/` map:
@@ -111,8 +118,9 @@ De bot is opgebouwd uit de volgende kern-AI-modules in de `/core/` map:
 -   `exit_optimizer.py`: Neemt AI-gestuurde exit-besluiten en optimaliseert dynamisch de trailing stop loss.
 -   `backtester.py`: Biedt een custom backtesting-omgeving, los van Freqtrade's ingebouwde backtest-functionaliteit. Het haalt OHLCV data op en gebruikt de `DUOAI_Strategy.py` (via `advise_all_indicators`) om alle benodigde indicatoren te berekenen en toe te voegen voor het simuleren van trades.
 -   `pre_trainer.py`: Module voor data-voorbereiding en het pre-trainen van AI-modellen. Haalt historische OHLCV data op en verrijkt deze met technische indicatoren en candlestickpatronen door gebruik te maken van de logica in `DUOAI_Strategy.py` (via `advise_all_indicators`). Deze verrijkte data wordt vervolgens gebruikt voor het trainen van modellen, zoals de CNNs.
--   `strategy_manager.py`: Beheert strategieparameters, prestaties (haalt uit Freqtrade DB) en mutatievoorstellen.
+-   `strategy_manager.py`: Beheert strategieparameters, prestaties (haalt uit Freqtrade DB) en mutatievoorstellen. Kan nu proberen Freqtrade actief te informeren over parameterwijzigingen via een API-aanroep. Hiervoor dienen de omgevingsvariabelen `FREQTRADE_API_URL` (bijv. `http://localhost:8080`) en optioneel `FREQTRADE_API_TOKEN` (voor authenticatie) ingesteld te zijn. De specifieke Freqtrade API endpoint (standaard geprobeerd: `/api/v1/reloadconfig`) moet overeenkomen met de actieve Freqtrade-configuratie.
 -   `bitvavo_executor.py`: Module voor interactie met de Bitvavo exchange (balans, orders, data), en de integratie is verder geconsolideerd voor robuuste live-executie.
+-   `ai_optimizer.py`: Orchestreert AI-gedreven optimalisatiecycli. Maakt nu gebruik van `core/market_data_provider.py` om recente marktdata op te halen, die nodig is voor het genereren van contextuele mutatievoorstellen. Deze provider kan data lokaal laden of, indien nodig, downloaden via Freqtrade. De afhankelijkheden (zoals `PreTrainer` en `StrategyManager`) worden nu via dependency injection beheerd voor verbeterde modulariteit en testbaarheid.
 -   `ai_activation_engine.py`: Trigger-engine voor AI-reflectie bij specifieke gebeurtenissen.
 -   `interval_selector.py`: Detecteert en beheert de beste timeframe/interval voor AI-analyse.
 -   `params_manager.py`: Centrale manager voor alle dynamisch lerende variabelen.
