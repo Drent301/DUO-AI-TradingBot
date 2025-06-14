@@ -100,13 +100,25 @@ class ParamsManager:
                 "backtest_stake_pct_capital": 0.1,
                 "default_strategy_id": "DefaultPipelineRunStrategy", # Added default strategy ID
 
-                # Hyperparameter Optimization (HPO) settings
-                "perform_hyperparameter_optimization": False, # Whether to run HPO
-                "hpo_num_trials": 20, # Number of HPO trials to run (e.g., 10-50)
-                "hpo_sampler": "TPE",   # Optuna sampler: 'TPE', 'Random'
-                "hpo_pruner": "Median", # Optuna pruner: 'Median', 'None'
-                "hpo_metric_to_optimize": "val_loss", # Metric to optimize: 'val_loss', 'val_accuracy', 'val_f1', 'val_auc'
-                "hpo_direction_to_optimize": "minimize", # Direction: 'minimize' for loss, 'maximize' for acc/f1/auc
+                # Optimizer settings (formerly HPO and pattern weight adjustments)
+                "optimizerMinPatternWeight": 0.1,  # Minimum weight for a pattern
+                "optimizerMaxPatternWeight": 10.0,  # Maximum weight for a pattern
+                "optimizerPatternWeightLearningRate": 0.01, # Learning rate for adjusting pattern weights
+                "optimizerPatternPerfMetric": "win_rate", # Metric to optimize: 'win_rate', 'avg_profit', 'total_profit'
+                "optimizerLowPerformanceThresholdWinRate": 0.4, # Win rate below which pattern is considered low-performing
+                "optimizerLowPerformanceThresholdAvgProfit": 0.001, # Avg profit below which pattern is considered low-performing
+                "optimizerHighPerformanceThresholdWinRate": 0.7, # Win rate above which pattern is considered high-performing
+                "optimizerHighPerformanceThresholdAvgProfit": 0.01, # Avg profit above which pattern is considered high-performing
+                "optimizerMinTradesForWeightAdjustment": 20, # Minimum trades needed to adjust pattern weight
+                "patternPerformanceLogPath": "memory/pattern_performance_log.csv", # Path to log pattern performance
+
+                # Hyperparameter Optimization (HPO) settings (now prefixed with hpo_)
+                "hpoPerformHyperparameterOptimization": False, # Whether to run HPO
+                "hpoNumTrials": 20, # Number of HPO trials to run (e.g., 10-50)
+                "hpoSampler": "TPE",   # Optuna sampler: 'TPE', 'Random'
+                "hpoPruner": "Median", # Optuna pruner: 'Median', 'None'
+                "hpoMetricToOptimize": "val_loss", # Metric to optimize: 'val_loss', 'val_accuracy', 'val_f1', 'val_auc'
+                "hpoDirectionToOptimize": "minimize", # Direction: 'minimize' for loss, 'maximize' for acc/f1/auc
                 "regimes_to_train": ["all"] # List of market regimes to train models for (e.g., ["bull", "bear", "all"])
             },
             "strategies": {
