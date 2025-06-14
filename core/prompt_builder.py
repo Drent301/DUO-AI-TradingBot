@@ -31,7 +31,12 @@ class PromptBuilder:
 
         if prompt_type == 'marketAnalysis':
             final_prompt_parts.append("Prompt Type: Market Analysis for Potential Entry")
-            final_prompt_parts.append("Analyze the following market data. Provide your trade intention (LONG, SHORT, HOLD), confidence level (0.0-1.0), and perceived bias (0.0-1.0).")
+            final_prompt_parts.append(
+                "Analyze the following market data, including any provided social media sentiment. "
+                "Provide your trade intention (LONG, SHORT, HOLD), confidence level (0.0-1.0), and perceived bias (0.0-1.0). "
+                "Explicitly state how social media sentiment influences your technical analysis and decision-making process. "
+                "For example: 'Based on the technicals I see X, and the positive social sentiment further supports/contradicts this by Y...'"
+            )
             # Add more specific instructions for market analysis if needed
 
         elif prompt_type == 'riskManagement':
@@ -120,32 +125,28 @@ class PromptBuilder:
                 final_prompt_parts.append("\nDetected CNN Patterns:")
                 final_prompt_parts.append(json.dumps(cnn_predictions, indent=2, default=str))
 
-            # Social Sentiment Data Section
-            if additional_context and 'social_sentiment_data' in additional_context: # Check key existence first
-                social_sentiment_data = additional_context.get('social_sentiment_data')
-                if isinstance(social_sentiment_data, list):
-                    final_prompt_parts.append("\nLatest Social Sentiment/News:")
-                    if not social_sentiment_data: # Empty list
-                        final_prompt_parts.append("  No recent social sentiment/news items found.")
+            # Social Sentiment Data Section from Grok
+            if additional_context and 'social_sentiment_grok' in additional_context:
+                social_sentiment_grok_data = additional_context.get('social_sentiment_grok')
+                if isinstance(social_sentiment_grok_data, list):
+                    final_prompt_parts.append("\nSocial Sentiment/News (Grok):")
+                    if not social_sentiment_grok_data:
+                        final_prompt_parts.append("  No recent social sentiment/news items found from Grok.")
                     else:
-                        for i, item in enumerate(social_sentiment_data):
-                            title = item.get('title', 'N/A')
+                        for i, item in enumerate(social_sentiment_grok_data):
                             source = item.get('source', 'N/A')
-                            content = item.get('content')
-                            if not content:
-                                content = item.get('description', 'N/A')
+                            text = item.get('text', 'N/A')
+                            sentiment = item.get('sentiment', 'N/A')
 
-                            content_snippet = (content[:147] + "...") if len(content) > 150 else content
-                            timestamp = item.get('timestamp', item.get('publishedAt', 'N/A'))
+                            text_snippet = (text[:147] + "...") if len(text) > 150 else text
 
                             final_prompt_parts.append(f"  --- Item {i+1} ---")
-                            final_prompt_parts.append(f"  Title: {title}")
                             final_prompt_parts.append(f"  Source: {source}")
-                            final_prompt_parts.append(f"  Timestamp: {timestamp}")
-                            final_prompt_parts.append(f"  Snippet: {content_snippet}")
-                elif social_sentiment_data is not None: # Data is present but not a list, and not None
-                    final_prompt_parts.append("\nLatest Social Sentiment/News: (Data provided in unexpected format)")
-            # If 'social_sentiment_data' is not in additional_context or is None, this whole block is skipped.
+                            final_prompt_parts.append(f"  Sentiment: {sentiment}")
+                            final_prompt_parts.append(f"  Text: {text_snippet}")
+                elif social_sentiment_grok_data is not None:
+                    final_prompt_parts.append("\nSocial Sentiment/News (Grok): (Data provided in unexpected format)")
+            # If 'social_sentiment_grok' is not in additional_context or is None, this whole block is skipped.
 
 
         final_prompt = "\n".join(final_prompt_parts)
@@ -202,23 +203,21 @@ async def test_prompt_builder():
             }
         },
         "current_trade": {"pair": "BTC/USDT", "profit_pct": 5.2, "open_reason": "EMA cross"},
-        "social_sentiment_data": [
+        "social_sentiment_grok": [
             {
-                "title": "BTC to the moon! Analysts predict $100k by EOY.",
                 "source": "CryptoNewsDaily",
-                "content": "A new report from top market analysts suggests that Bitcoin (BTC) is poised for a significant rally, potentially reaching $100,000 by the end of the year. This optimistic outlook is fueled by increased institutional adoption and positive regulatory news. However, some caution that market volatility remains a concern.",
-                "timestamp": "2023-10-27T10:30:00Z"
+                "text": "A new report from top market analysts suggests that Bitcoin (BTC) is poised for a significant rally, potentially reaching $100,000 by the end of the year. This optimistic outlook is fueled by increased institutional adoption and positive regulatory news. However, some caution that market volatility remains a concern.",
+                "sentiment": "positive"
             },
             {
-                "title": "Ethereum DevCon highlights scalability solutions.",
                 "source": "ETHWorld",
-                "description": "The recent Ethereum Developer Conference (DevCon) showcased several promising layer-2 scalability solutions. These advancements aim to address network congestion and high gas fees, paving the way for wider adoption of decentralized applications (dApps).", # Using description here
-                "publishedAt": "2023-10-26T15:00:00Z" # Using publishedAt here
+                "text": "The recent Ethereum Developer Conference (DevCon) showcased several promising layer-2 scalability solutions. These advancements aim to address network congestion and high gas fees, paving the way for wider adoption of decentralized applications (dApps).",
+                "sentiment": "neutral"
             },
             {
-                "title": "Old Tweet, No Content", # No content/description
                 "source": "AncientScrolls",
-                "timestamp": "2020-01-01T00:00:00Z"
+                "text": "Old Tweet, No Content.",
+                "sentiment": "unknown"
             }
         ]
     }
@@ -284,27 +283,28 @@ async def test_prompt_builder():
     assert "Detected CNN Patterns:" in prompt_ma
     # Assuming CNN patterns section is the last one with JSON, or followed by non-JSON content.
     # If another section could follow, its start marker would be the end_marker here.
-    cnn_data = extract_json_block(prompt_ma, "Detected CNN Patterns:\n", "\nLatest Social Sentiment/News:")
+    cnn_data = extract_json_block(prompt_ma, "Detected CNN Patterns:\n", "\nSocial Sentiment/News (Grok):")
     assert cnn_data is not None, "Failed to parse CNN data"
     assert cnn_data['5m_bullFlag_score'] == 0.92
     assert cnn_data['1h_bearTrap_score'] == 0.78
     assert cnn_data['5m_randomPattern_score'] == 0.3
 
-    # Assertions for Social Sentiment Data
-    assert "Latest Social Sentiment/News:" in prompt_ma
-    assert "Title: BTC to the moon!" in prompt_ma
+    # Assertions for Social Sentiment Data (Grok)
+    assert "Social Sentiment/News (Grok):" in prompt_ma
     assert "Source: CryptoNewsDaily" in prompt_ma
-    # Corrected Snippet Assertion 1
-    assert "Snippet: A new report from top market analysts suggests that Bitcoin (BTC) is poised for a significant rally, potentially reaching $100,000 by the end of th..." in prompt_ma
-    assert "Timestamp: 2023-10-27T10:30:00Z" in prompt_ma
-    assert "Title: Ethereum DevCon highlights scalability solutions." in prompt_ma
+    assert "Sentiment: positive" in prompt_ma
+    assert "Text: A new report from top market analysts suggests that Bitcoin (BTC) is poised for a significant rally, potentially reaching $100,000 by the end of th..." in prompt_ma
     assert "Source: ETHWorld" in prompt_ma
-    # Corrected Snippet Assertion 2
-    assert "Snippet: The recent Ethereum Developer Conference (DevCon) showcased several promising layer-2 scalability solutions. These advancements aim to address netw..." in prompt_ma
-    assert "Timestamp: 2023-10-26T15:00:00Z" in prompt_ma # Check alias for timestamp
-    assert "Title: Old Tweet, No Content" in prompt_ma
-    assert "Snippet: N/A" in prompt_ma # Check fallback for missing content/description
+    assert "Sentiment: neutral" in prompt_ma
+    assert "Text: The recent Ethereum Developer Conference (DevCon) showcased several promising layer-2 scalability solutions. These advancements aim to address netw..." in prompt_ma
+    assert "Source: AncientScrolls" in prompt_ma
+    assert "Sentiment: unknown" in prompt_ma
+    assert "Text: Old Tweet, No Content." in prompt_ma
+    assert "Timestamp:" not in prompt_ma
+    assert "Title:" not in prompt_ma
 
+    # Assertion for the new instruction in marketAnalysis prompt:
+    assert "Explicitly state how social media sentiment influences your technical analysis and decision-making process." in prompt_ma
     logger.info("Assertions for Market Analysis prompt passed.")
 
     # Test riskManagement prompt to ensure context is still handled, including social sentiment
@@ -314,12 +314,11 @@ async def test_prompt_builder():
         'pattern_data': {
             'cnn_predictions': {'5m_headAndShoulders_score': 0.85}
         },
-        "social_sentiment_data": [ # Add sentiment to RM test as well
+        "social_sentiment_grok": [ # Add sentiment to RM test as well, using new key and structure
             {
-                "title": "Market Correction Imminent?",
                 "source": "BearishTimes",
-                "content": "Several indicators point towards a potential market correction in the short term. Investors are advised to exercise caution.",
-                "timestamp": "2023-10-28T09:00:00Z"
+                "text": "Several indicators point towards a potential market correction in the short term. Investors are advised to exercise caution.",
+                "sentiment": "negative"
             }
         ]
     }
@@ -329,41 +328,42 @@ async def test_prompt_builder():
         additional_context=mock_rm_context
     )
     logger.info(f"--- Risk Management Prompt ---\n{prompt_rm}\n")
-    assert "Prompt Type: Risk Management Assessment" in prompt_rm # Corrected variable from prompt_ma to prompt_rm
+    assert "Prompt Type: Risk Management Assessment" in prompt_rm
     assert "Entry price: 2000" in prompt_rm
     assert "Current profit pct: 2.1" in prompt_rm
     assert "Detected CNN Patterns:" in prompt_rm
     assert '"5m_headAndShoulders_score": 0.85' in prompt_rm
-    assert "Latest Social Sentiment/News:" in prompt_rm # Check sentiment in RM prompt
-    assert "Title: Market Correction Imminent?" in prompt_rm
-
+    assert "Social Sentiment/News (Grok):" in prompt_rm # Check sentiment in RM prompt with new key
+    assert "Source: BearishTimes" in prompt_rm
+    assert "Sentiment: negative" in prompt_rm
+    assert "Text: Several indicators point towards a potential market correction in the short term. Investors are advised to exercise caution." in prompt_rm
     logger.info("Assertions for Risk Management prompt passed.")
 
-    # Test with empty social_sentiment_data list
-    empty_sentiment_context = {**mock_additional_context, "social_sentiment_data": []}
+    # Test with empty social_sentiment_grok list
+    empty_sentiment_context = {**mock_additional_context, "social_sentiment_grok": []}
     prompt_empty_sentiment = await builder.generate_prompt_with_data(
         mock_candles, "BTC/USDT", "marketAnalysis", additional_context=empty_sentiment_context
     )
-    assert "Latest Social Sentiment/News:" in prompt_empty_sentiment
-    assert "No recent social sentiment/news items found." in prompt_empty_sentiment
+    assert "Social Sentiment/News (Grok):" in prompt_empty_sentiment
+    assert "No recent social sentiment/news items found from Grok." in prompt_empty_sentiment
     logger.info("Assertion for empty social sentiment data passed.")
 
-    # Test with social_sentiment_data being None (should not print the section or error)
-    none_sentiment_context = {key: val for key, val in mock_additional_context.items() if key != 'social_sentiment_data'}
+    # Test with social_sentiment_grok being None (should not print the section or error)
+    none_sentiment_context = {key: val for key, val in mock_additional_context.items() if key != 'social_sentiment_grok'}
     prompt_none_sentiment = await builder.generate_prompt_with_data(
         mock_candles, "BTC/USDT", "marketAnalysis", additional_context=none_sentiment_context
     )
-    assert "Latest Social Sentiment/News:" not in prompt_none_sentiment
+    assert "Social Sentiment/News (Grok):" not in prompt_none_sentiment
     logger.info("Assertion for None social sentiment data passed.")
 
 
-    prompt_rm_no_sentiment = await builder.generate_prompt_with_data( # Renamed this variable
-        mock_candles, "ETH/USDT", "riskManagement", # Use renamed variable
+    prompt_rm_no_sentiment = await builder.generate_prompt_with_data(
+        mock_candles, "ETH/USDT", "riskManagement",
         current_bias=0.6, current_confidence=0.75,
         additional_context={"entry_price": 2000, "current_profit_pct": 2.1} # No sentiment data here
     )
     logger.info(f"--- Risk Management Prompt (No Sentiment) ---\n{prompt_rm_no_sentiment}\n")
-    assert "Latest Social Sentiment/News:" not in prompt_rm_no_sentiment
+    assert "Social Sentiment/News (Grok):" not in prompt_rm_no_sentiment
     logger.info("Assertion for Risk Management prompt with no sentiment data passed.")
 
 if __name__ == '__main__':
