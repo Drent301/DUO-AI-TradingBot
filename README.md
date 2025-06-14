@@ -51,24 +51,30 @@ Een zelflerende, AI-gestuurde crypto trading bot, gebouwd bovenop Freqtrade, die
     ```
 
 2.  **Freqtrade Configuratie (`config/config.json`):**
-    De basisconfiguratie is aanwezig. De volgende `pair_whitelist` in `config/config.json` is de definitieve, bijgewerkte lijst die momenteel door de bot wordt overwogen:
+    De basisconfiguratie is aangepast voor gebruik met **Binance** als de primaire exchange. De volgende `pair_whitelist` in `config/config.json` is een voorbeeld van een geconfigureerde lijst:
     ```json
     [
-        "ETH/EUR",
-        "BTC/EUR",
-        "ZEN/EUR",
-        "WETH/USDT",
-        "USDC/USDT",
-        "WBTC/USDT",
-        "LINK/USDT",
-        "UNI/USDT",
-        "ZEN/BTC",
         "LSK/BTC",
-        "ETH/BTC"
+        "ETH/BTC",
+        "ZEN/BTC"
     ]
     ```
-    De API-sleutels in `config.json` zijn placeholders en zullen door Freqtrade via de omgevingsvariabelen (geladen via `.env`) worden overschreven in live-modus.
-    **Belangrijk:** Controleer de beschikbaarheid van paren zoals `LSK/BTC` op Bitvavo, aangezien niet alle exchanges alle cross-paren ondersteunen.
+    De API-sleutels in `config.json` (`exchange.key` en `exchange.secret`) zijn ingesteld op placeholders zoals `"ENV_BINANCE_API_KEY"` en `"ENV_BINANCE_SECRET_KEY"`. Deze worden door Freqtrade automatisch geladen uit de corresponderende omgevingsvariabelen (die je in je `.env` bestand of direct in je omgeving kunt instellen) wanneer de bot in live- of dry-run modus draait.
+    **Belangrijk:** Zorg ervoor dat de paren in de `pair_whitelist` daadwerkelijk beschikbaar zijn op Binance en dat je API-sleutels correct zijn ingesteld in je omgeving voor live trading.
+
+3.  **Historische Data Downloaden**:
+    Voor het backtesten en trainen van de AI modellen is het essentieel om voldoende historische marktdata te hebben.
+    Het script `utils/data_downloader.py` is geconfigureerd om 5 jaar aan historische data te downloaden voor de in `config/config.json` gespecificeerde `pair_whitelist` en de volgende timeframes: `1m, 5m, 15m, 1h, 4h, 1d`.
+    De data wordt opgeslagen in de `user_data/data/<exchange_naam>` map (bijv. `user_data/data/binance`).
+
+    **Vereisten:**
+    *   Zorg ervoor dat Freqtrade geïnstalleerd is en correct geconfigureerd in je `PATH`.
+    *   Het `config/config.json` bestand moet de juiste `exchange` (Binance) en `pair_whitelist` bevatten.
+
+    **Commando (uitvoeren vanuit de project root directory):**
+    ```bash
+    python utils/data_downloader.py
+    ```
 
 ## Gebruik
 
