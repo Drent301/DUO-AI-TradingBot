@@ -103,7 +103,7 @@ class ParamsManager:
                 # Pattern Performance Analyzer specific parameters
                 "pattern_log_trade_match_window_minutes": 2,
                 "freqtrade_db_path_analyzer": "user_data/freqtrade.sqlite",
-                "patternPerformanceLogPath": "user_data/logs/pattern_performance_log.json",
+                "optimizerPatternPerformanceLogPath": "user_data/logs/pattern_performance_log.json",
 
                 # Optimizer settings
                 "optimizerMinPatternWeight": 0.1,
