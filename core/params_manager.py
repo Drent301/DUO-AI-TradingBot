@@ -98,28 +98,32 @@ class ParamsManager:
                 "backtest_hold_duration_candles": 20,
                 "backtest_initial_capital": 1000.0,
                 "backtest_stake_pct_capital": 0.1,
-                "default_strategy_id": "DefaultPipelineRunStrategy", # Added default strategy ID
+                "default_strategy_id": "DefaultPipelineRunStrategy",
 
-                # Optimizer settings (formerly HPO and pattern weight adjustments)
-                "optimizerMinPatternWeight": 0.1,  # Minimum weight for a pattern
-                "optimizerMaxPatternWeight": 10.0,  # Maximum weight for a pattern
-                "optimizerPatternWeightLearningRate": 0.01, # Learning rate for adjusting pattern weights
-                "optimizerPatternPerfMetric": "win_rate", # Metric to optimize: 'win_rate', 'avg_profit', 'total_profit'
-                "optimizerLowPerformanceThresholdWinRate": 0.4, # Win rate below which pattern is considered low-performing
-                "optimizerLowPerformanceThresholdAvgProfit": 0.001, # Avg profit below which pattern is considered low-performing
-                "optimizerHighPerformanceThresholdWinRate": 0.7, # Win rate above which pattern is considered high-performing
-                "optimizerHighPerformanceThresholdAvgProfit": 0.01, # Avg profit above which pattern is considered high-performing
-                "optimizerMinTradesForWeightAdjustment": 20, # Minimum trades needed to adjust pattern weight
-                "patternPerformanceLogPath": "memory/pattern_performance_log.csv", # Path to log pattern performance
+                # Pattern Performance Analyzer specific parameters
+                "pattern_log_trade_match_window_minutes": 2,
+                "freqtrade_db_path_analyzer": "user_data/freqtrade.sqlite",
+                "patternPerformanceLogPath": "user_data/logs/pattern_performance_log.json",
 
-                # Hyperparameter Optimization (HPO) settings (now prefixed with hpo_)
-                "hpoPerformHyperparameterOptimization": False, # Whether to run HPO
-                "hpoNumTrials": 20, # Number of HPO trials to run (e.g., 10-50)
-                "hpoSampler": "TPE",   # Optuna sampler: 'TPE', 'Random'
-                "hpoPruner": "Median", # Optuna pruner: 'Median', 'None'
-                "hpoMetricToOptimize": "val_loss", # Metric to optimize: 'val_loss', 'val_accuracy', 'val_f1', 'val_auc'
-                "hpoDirectionToOptimize": "minimize", # Direction: 'minimize' for loss, 'maximize' for acc/f1/auc
-                "regimes_to_train": ["all"] # List of market regimes to train models for (e.g., ["bull", "bear", "all"])
+                # Optimizer settings
+                "optimizerMinPatternWeight": 0.1,
+                "optimizerMaxPatternWeight": 2.0,
+                "optimizerPatternWeightLearningRate": 0.05,
+                "optimizerPatternPerfMetric": "win_rate_pct",
+                "optimizerLowPerformanceThresholdWinRate": 40.0,
+                "optimizerLowPerformanceThresholdAvgProfit": 0.0,
+                "optimizerHighPerformanceThresholdWinRate": 60.0,
+                "optimizerHighPerformanceThresholdAvgProfit": 1.0,
+                "optimizerMinTradesForWeightAdjustment": 10,
+
+                # Hyperparameter Optimization (HPO) settings
+                "hpoPerformHyperparameterOptimization": False,
+                "hpoNumTrials": 20,
+                "hpoSampler": "TPE",
+                "hpoPruner": "Median",
+                "hpoMetricToOptimize": "val_loss",
+                "hpoDirectionToOptimize": "minimize",
+                "regimes_to_train": ["all"]
             },
             "strategies": {
                 "DUOAI_Strategy": {
