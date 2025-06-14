@@ -61,6 +61,37 @@ class PreTrainer:
         self.params_manager = ParamsManager() # Initialize ParamsManager, potentially pass config if needed
         logger.info("ParamsManager initialized in PreTrainer.")
 
+        # Initialize DataProvider
+        self.dataprovider: Optional[DataProvider] = None
+        try:
+            # Prepare a basic Freqtrade config for DataProvider
+            # Ensure essential keys are present; adapt as necessary from self.config
+            ft_config = {
+                "user_data_dir": self.config.get("user_data_dir", "user_data"),
+                "exchange": {
+                    "name": self.config.get("exchange", {}).get("name", "bitvavo"), # Default to bitvavo or make it mandatory in main config
+                    "pair_whitelist": self.params_manager.get_param("data_fetch_pairs", []), # Use pairs from params
+                    # Potentially add other exchange-specific configs if needed by DataProvider
+                },
+                "pairlists": [{"method": "StaticPairList", "config": {"pairs": self.params_manager.get_param("data_fetch_pairs", [])}}],
+                "runmode": "datacollection", # Or 'download', 'util', depending on Freqtrade version and intended use
+                "db_url": self.config.get("db_url", "sqlite:///user_data/freqtrade.sqlite"), # Common default
+                "verbosity": self.config.get("verbosity", 0),
+                "loggers": self.config.get("loggers", None), # Optional: pass logger config
+                # Add any other minimal required keys for Configuration and DataProvider
+            }
+            # Ensure 'max_open_trades' is set if strategy uses it for anything during indicator population (unlikely but safe)
+            # This key is often checked by Freqtrade, even if not strictly needed for data download.
+            if 'max_open_trades' not in ft_config:
+                ft_config['max_open_trades'] = 1 # A sensible default for non-trading operations
+
+            freqtrade_config = Configuration.from_dict(ft_config)
+            self.dataprovider = DataProvider(config=freqtrade_config)
+            logger.info("DataProvider initialized in PreTrainer.")
+        except Exception as e:
+            logger.warning(f"PreTrainer: DataProvider could not be initialized: {e}. OHLCV fetching will be unavailable via DataProvider.")
+            self.dataprovider = None # Ensure it's None if init fails
+
         # BitvavoExecutor and CNNPatternDetector might be needed by other methods.
         # For now, initialize them as None or based on config if specified.
         # This part depends on how much of the old functionality is retained vs. replaced by the new `pretrain` flow.
@@ -72,7 +103,7 @@ class PreTrainer:
                 self.bitvavo_executor = BitvavoExecutor(params_manager=self.params_manager) # Pass params_manager
                 logger.info("BitvavoExecutor initialized in PreTrainer.")
             except ValueError as e:
-                logger.warning(f"PreTrainer: BitvavoExecutor could not be initialized: {e}. Live data fetching might be unavailable.")
+                logger.warning(f"PreTrainer: BitvavoExecutor could not be initialized: {e}. Live data fetching might be unavailable (Bitvavo specific).")
 
         # CNNPatterns might be passed or instantiated if PreTrainer methods rely on it directly
         # For the new `pretrain` method, cnn_patterns_instance is passed as an argument.
@@ -311,64 +342,68 @@ class PreTrainer:
             logger.error(f"An unexpected error occurred while loading gold standard data from {full_path}: {e}")
             return None
 
-    def _fetch_ohlcv_for_period_sync(self, symbol: str, timeframe: str, start_dt: dt, end_dt: dt) -> pd.DataFrame | None:
-        # ... (as before, with caching) ...
-        # Caching calls (_get_cache_filepath, _read_from_cache) were removed in previous step.
-        # This method will be further refactored in 1.2.4 to use DataProvider.
-        # For now, the internal logic still contains `await` which will be a syntax error
-        # until step 1.2.4 is completed. This step (1.2.3) only renames and makes synchronous.
-        cache_filepath = None # Placeholder, original line removed
-        cached_df = None      # Placeholder, original line removed
-        if cached_df is not None:
-            cached_df['date'] = pd.to_datetime(cached_df['timestamp'], unit='ms')
-            cached_df.set_index('date', inplace=True)
-            for col in ['open', 'high', 'low', 'close', 'volume']:
-                if col in cached_df.columns:
-                     cached_df[col] = pd.to_numeric(cached_df[col], errors='coerce')
-            if 'timestamp' in cached_df.columns:
-                 cached_df.drop(columns=['timestamp'], inplace=True)
-            return cached_df
-        if not self.bitvavo_executor:
-            logger.error("BitvavoExecutor ikke initialisert, kan ikke hente live data.")
+    async def _fetch_ohlcv_for_period(self, symbol: str, timeframe: str, start_dt: dt, end_dt: dt) -> pd.DataFrame | None:
+        logger.info(f"Fetching OHLCV data for {symbol} ({timeframe}) from {start_dt} to {end_dt} using DataProvider.")
+
+        if not self.dataprovider:
+            logger.error("DataProvider is not initialized. Cannot fetch OHLCV data.")
             return None
-        since_timestamp = int(start_dt.timestamp() * 1000)
-        target_end_timestamp = int(end_dt.timestamp() * 1000)
-        limit_per_call = 500; all_ohlcv_list = []
-        logger.info(f"Cache miss. Henter live data for {symbol} ({timeframe}) fra {start_dt.strftime('%Y-%m-%d')} til {end_dt.strftime('%Y-%m-%d')}")
-        current_fetch_since_ts = since_timestamp
-        while current_fetch_since_ts <= target_end_timestamp:
-            try:
-                chunk = await self.bitvavo_executor.fetch_ohlcv(symbol=symbol, timeframe=timeframe, since=current_fetch_since_ts, limit=limit_per_call)
-                if not chunk: break
-                last_valid_ts_in_chunk = -1
-                for candle_data in chunk:
-                    candle_ts = candle_data[0]
-                    if candle_ts >= current_fetch_since_ts and candle_ts <= target_end_timestamp:
-                        all_ohlcv_list.append(candle_data); last_valid_ts_in_chunk = candle_ts
-                    elif candle_ts > target_end_timestamp: break
-                if not chunk or last_valid_ts_in_chunk == -1:
-                    last_candle_overall_ts = chunk[-1][0] if chunk else current_fetch_since_ts
-                    if last_candle_overall_ts > target_end_timestamp: break
-                    if chunk: current_fetch_since_ts = chunk[-1][0] + 1
-                    else: break
-                elif last_valid_ts_in_chunk >= target_end_timestamp: break
-                else: current_fetch_since_ts = last_valid_ts_in_chunk + 1
-                await asyncio.sleep(0.2)
-            except Exception as e: logger.error(f"Fout under henting av live data chunk for {symbol} ({timeframe}) periode {start_dt}-{end_dt}: {e}"); return None
-        if not all_ohlcv_list: logger.warning(f"Ingen OHLCV data hentet live for {symbol} ({timeframe}) for perioden {start_dt}-{end_dt}."); return None
-        raw_df_for_caching = pd.DataFrame(all_ohlcv_list, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
-        raw_df_for_caching['timestamp'] = raw_df_for_caching['timestamp'].astype('int64')
-        for col in ['open', 'high', 'low', 'close', 'volume']: raw_df_for_caching[col] = pd.to_numeric(raw_df_for_caching[col], errors='coerce')
-        self._write_to_cache(cache_filepath, raw_df_for_caching)
-        return_df = raw_df_for_caching.copy(); return_df['date'] = pd.to_datetime(return_df['timestamp'], unit='ms')
-        return_df.set_index('date', inplace=True)
-        if 'timestamp' in return_df.columns: return_df.drop(columns=['timestamp'], inplace=True)
-        return return_df
+
+        try:
+            start_ts = int(start_dt.timestamp() * 1000)
+            end_ts = int(end_dt.timestamp() * 1000)
+            timerange = TimeRange(None, None, since=start_ts, until=end_ts)
+
+            # historic_ohlcv is synchronous, run in a thread
+            df = await asyncio.to_thread(
+                self.dataprovider.historic_ohlcv,
+                pair=symbol,
+                timeframe=timeframe,
+                timerange=timerange
+            )
+
+            if df is None or df.empty:
+                logger.warning(f"No OHLCV data returned by DataProvider for {symbol} ({timeframe}) for period {start_dt}-{end_dt}.")
+                return pd.DataFrame() # Return empty DataFrame for consistency
+
+            # Ensure DataFrame has 'date' index and required columns
+            if not isinstance(df.index, pd.DatetimeIndex) or df.index.name != 'date':
+                if 'date' in df.columns:
+                    df['date'] = pd.to_datetime(df['date'])
+                    df.set_index('date', inplace=True)
+                # DataProvider usually returns with 'date' as DatetimeIndex. If not, this might indicate an issue.
+                else: # Attempt to convert index if it's timestamp-like
+                    try:
+                        df.index = pd.to_datetime(df.index, unit='ms', utc=True) # Common for Freqtrade
+                        df.index.name = 'date'
+                    except Exception as e_idx:
+                        logger.error(f"Failed to ensure DatetimeIndex for {symbol} ({timeframe}) from DataProvider: {e_idx}. DF index: {df.index}")
+                        return pd.DataFrame()
+
+
+            required_cols = ['open', 'high', 'low', 'close', 'volume']
+            for col in required_cols:
+                if col not in df.columns:
+                    logger.error(f"DataProvider result for {symbol} ({timeframe}) is missing column: {col}.")
+                    return pd.DataFrame() # Or handle more gracefully
+                df[col] = pd.to_numeric(df[col], errors='coerce')
+
+            # Drop rows with NaN in essential OHLCV columns that might result from coerce
+            df.dropna(subset=required_cols, inplace=True)
+
+            logger.info(f"Fetched {len(df)} candles for {symbol} ({timeframe}) from {start_dt} to {end_dt} via DataProvider.")
+            return df
+
+        except Exception as e:
+            logger.error(f"Error fetching OHLCV data for {symbol} ({timeframe}) using DataProvider: {e}", exc_info=True)
+            return None
 
     async def fetch_historical_data(self, symbol: str, timeframe: str) -> Dict[str, pd.DataFrame]:
-        if not self.bitvavo_executor:
-            logger.error("BitvavoExecutor niet geïnitialiseerd. Kan geen historische data ophalen.")
-            return {"all": pd.DataFrame()} # Return dict with empty DF for "all"
+        # Removed BitvavoExecutor check here, as _fetch_ohlcv_for_period now uses DataProvider
+        # which has its own initialization check.
+        # if not self.bitvavo_executor:
+        #     logger.error("BitvavoExecutor niet geïnitialiseerd. Kan geen historische data ophalen.")
+        #     return {"all": pd.DataFrame()}
 
         all_ohlcv_data_dfs_by_regime: Dict[str, List[pd.DataFrame]] = {}
         all_ohlcv_data_dfs_for_concatenation: List[pd.DataFrame] = []
