@@ -16,6 +16,7 @@ from core.cnn_patterns import CNNPatterns # Moved to top
 
 from freqtrade.configuration import Configuration
 from freqtrade.data.dataprovider import DataProvider
+from freqtrade.exchange import TimeRange
 from strategies.DUOAI_Strategy import DUOAI_Strategy
 # import json # Already imported at the top, ensure it is if this block is moved elsewhere
 
@@ -242,51 +243,8 @@ class PreTrainer:
 
         logger.info(f"Placeholder: Pre-training logic for {pair} - {timeframe} completed.")
 
-
-    def _get_cache_dir(self, symbol: str, timeframe: str) -> str:
-        # ... (as before) ...
-        symbol_sanitized = symbol.replace('/', '_')
-        cache_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'data', 'raw_historical_data', symbol_sanitized, timeframe)
-        os.makedirs(cache_dir, exist_ok=True)
-        return cache_dir
-
-    def _get_cache_filepath(self, symbol: str, timeframe: str, start_dt: dt, end_dt: dt) -> str:
-        # ... (as before) ...
-        cache_dir = self._get_cache_dir(symbol, timeframe)
-        symbol_sanitized = symbol.replace('/', '_')
-        start_timestamp = int(start_dt.timestamp())
-        end_timestamp = int(end_dt.timestamp())
-        return os.path.join(cache_dir, f"{symbol_sanitized}_{timeframe}_{start_timestamp}_{end_timestamp}.csv")
-
-    def _read_from_cache(self, filepath: str) -> pd.DataFrame | None:
-        # ... (as before) ...
-        if os.path.exists(filepath):
-            try:
-                df = pd.read_csv(filepath, dtype={'timestamp': 'int64', 'open': 'float64', 'high': 'float64', 'low': 'float64', 'close': 'float64', 'volume': 'float64'})
-                expected_cols = ['timestamp', 'open', 'high', 'low', 'close', 'volume']
-                if not all(col in df.columns for col in expected_cols):
-                    logger.warning(f"Cache file {filepath} mangler kolonner. Forventet: {expected_cols}, Fikk: {df.columns.tolist()}. Ignorerer cache.")
-                    return None
-                logger.info(f"Leste {len(df)} candles fra cache: {filepath}")
-                return df
-            except Exception as e:
-                logger.error(f"Feil ved lesing av cache-fil {filepath}: {e}. Ignorerer cache.")
-                return None
-        return None
-
-    def _write_to_cache(self, filepath: str, data_df: pd.DataFrame):
-        # ... (as before) ...
-        try:
-            expected_cols = ['timestamp', 'open', 'high', 'low', 'close', 'volume']
-            if not all(col in data_df.columns for col in expected_cols):
-                logger.error(f"DataFrame for caching mangler kolonner. Forventet: {expected_cols}, Fikk: {data_df.columns.tolist()}. Kan ikke cache.")
-                return
-            df_to_write = data_df[expected_cols].copy()
-            df_to_write['timestamp'] = df_to_write['timestamp'].astype('int64')
-            df_to_write.to_csv(filepath, index=False)
-            logger.info(f"Skrev {len(data_df)} candles til cache: {filepath}")
-        except Exception as e:
-            logger.error(f"Feil ved skriving til cache-fil {filepath}: {e}")
+    # Custom caching methods (_get_cache_dir, _get_cache_filepath, _read_from_cache, _write_to_cache)
+    # are removed as per subtask 1.2.2. Freqtrade's DataProvider will handle caching.
 
     def _load_gold_standard_data(self, symbol: str, timeframe: str, pattern_type: str, expected_columns: List[str]) -> pd.DataFrame | None:
         """
@@ -353,10 +311,14 @@ class PreTrainer:
             logger.error(f"An unexpected error occurred while loading gold standard data from {full_path}: {e}")
             return None
 
-    async def _fetch_ohlcv_for_period(self, symbol: str, timeframe: str, start_dt: dt, end_dt: dt) -> pd.DataFrame | None:
+    def _fetch_ohlcv_for_period_sync(self, symbol: str, timeframe: str, start_dt: dt, end_dt: dt) -> pd.DataFrame | None:
         # ... (as before, with caching) ...
-        cache_filepath = self._get_cache_filepath(symbol, timeframe, start_dt, end_dt)
-        cached_df = self._read_from_cache(cache_filepath)
+        # Caching calls (_get_cache_filepath, _read_from_cache) were removed in previous step.
+        # This method will be further refactored in 1.2.4 to use DataProvider.
+        # For now, the internal logic still contains `await` which will be a syntax error
+        # until step 1.2.4 is completed. This step (1.2.3) only renames and makes synchronous.
+        cache_filepath = None # Placeholder, original line removed
+        cached_df = None      # Placeholder, original line removed
         if cached_df is not None:
             cached_df['date'] = pd.to_datetime(cached_df['timestamp'], unit='ms')
             cached_df.set_index('date', inplace=True)
