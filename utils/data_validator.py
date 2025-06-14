@@ -1,12 +1,6 @@
 import pandas as pd
 import pathlib
 import json
-try:
-    import ta
-except ImportError:
-    print("Warning: 'ta' library not found. Indicator calculation will be skipped. Please install it if needed (pip install ta).")
-    ta = None
-
 def load_data_for_pair(base_data_dir: str, exchange: str, pair: str, timeframe: str) -> pd.DataFrame | None:
     """
     Loads Freqtrade data for a specific pair and timeframe into a Pandas DataFrame.
@@ -89,40 +83,6 @@ def validate_ohlcv_data(df: pd.DataFrame, pair: str, timeframe: str) -> bool:
 
     print("OHLCV data validation SUCCEEDED.")
     return True
-
-def calculate_indicators(df: pd.DataFrame, pair: str, timeframe: str):
-    """
-    Attempts to calculate RSI and MACD.
-    """
-    print(f"\n--- Calculating Technical Indicators for {pair} - {timeframe} ---")
-    if ta is None:
-        print("Skipping indicator calculation because 'ta' library is not available.")
-        return
-
-    if df.empty or 'close' not in df.columns or len(df) < 20: # Basic check for sufficient data
-        print("Skipping indicator calculation: DataFrame is empty, 'close' column missing, or insufficient data points (need ~20 for common indicators).")
-        return
-
-    try:
-        rsi = ta.momentum.RSIIndicator(close=df['close'], window=14).rsi()
-        if rsi is not None and not rsi.empty:
-            print(f"RSI calculation SUCCEEDED. Example RSI value: {rsi.iloc[-1] if len(rsi) > 0 else 'N/A'}")
-        else:
-            print("RSI calculation produced no output (possibly all NaNs due to short data series).")
-    except Exception as e:
-        print(f"RSI calculation FAILED: {e}")
-
-    try:
-        macd_indicator = ta.trend.MACD(close=df['close'])
-        macd = macd_indicator.macd()
-        # macd_signal = macd_indicator.macd_signal()
-        # macd_hist = macd_indicator.macd_diff()
-        if macd is not None and not macd.empty:
-            print(f"MACD calculation SUCCEEDED. Example MACD value: {macd.iloc[-1] if len(macd) > 0 else 'N/A'}")
-        else:
-            print("MACD calculation produced no output (possibly all NaNs due to short data series).")
-    except Exception as e:
-        print(f"MACD calculation FAILED: {e}")
 
 def check_cnn_data_suitability(df: pd.DataFrame, pair: str, timeframe: str):
     """
@@ -218,10 +178,7 @@ if __name__ == "__main__":
 
             if df_pair_data is not None and not df_pair_data.empty:
                 if validate_ohlcv_data(df_pair_data, pair, timeframe):
-                    if ta: # Only calculate if ta is available
-                        calculate_indicators(df_pair_data, pair, timeframe)
-                    else:
-                        print("\n--- Skipping Technical Indicators (ta library not found) ---")
+                    # calculate_indicators was here
                     check_cnn_data_suitability(df_pair_data, pair, timeframe)
             else:
                 print(f"Skipping validation and checks for {pair} - {timeframe} due to loading error or empty data.")

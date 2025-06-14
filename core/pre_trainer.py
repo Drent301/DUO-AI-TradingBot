@@ -6,13 +6,13 @@ from typing import Dict, Any, List, Optional # Added Optional
 from datetime import datetime, timedelta
 from datetime import datetime as dt
 import pandas as pd
+import pandas_ta as ta # Added for pandas_ta
 import numpy as np
 import asyncio
 from core.bitvavo_executor import BitvavoExecutor
 from core.backtester import Backtester
 from core.params_manager import ParamsManager # Moved to top
 from core.cnn_patterns import CNNPatterns # Moved to top
-# import talib.abstract as ta # Defer import to where it's used
 import dotenv
 import shutil
 
@@ -441,31 +441,82 @@ class PreTrainer:
             logger.warning(f"Lege dataframe ontvangen in prepare_training_data for {pattern_type}.")
             return dataframe
 
-        # Ensure technical indicators are calculated first (already seems to be the case)
-        # self.cnn_pattern_detector is now initialized in the constructor
-        try:
-            import talib.abstract as ta
-            if 'rsi' not in dataframe.columns: dataframe['rsi'] = ta.RSI(dataframe)
-            if 'macd' not in dataframe.columns:
-                macd_df = ta.MACD(dataframe)
-                dataframe['macd'] = macd_df['macd']
-                dataframe['macdsignal'] = macd_df['macdsignal']
-                dataframe['macdhist'] = macd_df['macdhist']
-            if 'bb_middleband' not in dataframe.columns:
-                # This Freqtrade import might also fail if FREQTRADE_AVAILABLE is False.
-                # However, prepare_training_data is part of the older PreTrainer logic,
-                # not directly called by the new --pretrain-cnn path yet.
-                # For now, focus on TA-Lib import.
-                from freqtrade.vendor.qtpylib.indicators import bollinger_bands
-                bollinger = bollinger_bands(ta.TYPPRICE(dataframe), window=20, stds=2)
-                dataframe['bb_lowerband'] = bollinger['lower']
-                dataframe['bb_middleband'] = bollinger['mid']
-                dataframe['bb_upperband'] = bollinger['upper']
-        except ImportError:
-            logger.warning("TA-Lib module not found in PreTrainer.prepare_training_data. Skipping TA-Lib based indicators (RSI, MACD, Bollinger Bands using TYPPRICE).")
-        except Exception as e_ta:
-            logger.error(f"Error calculating TA-Lib indicators in PreTrainer.prepare_training_data: {e_ta}. Skipping them.")
+        # Ensure technical indicators are calculated first
+        # Standardize OHLC column names (make a copy to avoid modifying original outside scope)
+        df_std = dataframe.copy()
+        rename_map = {}
+        for col_cap in ['Open', 'High', 'Low', 'Close', 'Volume']: # Check for capitalized versions
+            if col_cap in df_std.columns and col_cap.lower() not in df_std.columns: # Only rename if lowercase doesn't exist
+                rename_map[col_cap] = col_cap.lower()
+        if rename_map:
+            df_std.rename(columns=rename_map, inplace=True)
 
+        try:
+            # RSI
+            if 'rsi' not in dataframe.columns:
+                if 'close' in df_std.columns:
+                    # pandas_ta is imported as ta at the file level
+                    dataframe['rsi'] = df_std.ta.rsi(close=df_std['close'], length=14)
+                else:
+                    logger.warning(f"Column 'close' not found in standardized df for {pair} ({tf}). Cannot calculate RSI.")
+                    dataframe['rsi'] = np.nan
+
+            # MACD
+            if 'macd' not in dataframe.columns: # Check if 'macd' specifically is missing
+                if 'close' in df_std.columns:
+                    df_std.ta.macd(close=df_std['close'], fast=12, slow=26, signal=9, append=True)
+                    macd_col_map = {
+                        'MACD_12_26_9': 'macd',
+                        'MACDs_12_26_9': 'macdsignal',
+                        'MACDh_12_26_9': 'macdhist'
+                    }
+                    for pta_col, target_col in macd_col_map.items():
+                        if pta_col in df_std.columns:
+                            dataframe[target_col] = df_std[pta_col]
+                        else:
+                            logger.warning(f"Pandas-ta MACD column {pta_col} not found for {pair} ({tf}). Filling {target_col} with NaN.")
+                            dataframe[target_col] = np.nan
+                else:
+                    logger.warning(f"Column 'close' not found in standardized df for {pair} ({tf}). Cannot calculate MACD.")
+                    dataframe['macd'] = np.nan
+                    dataframe['macdsignal'] = np.nan
+                    dataframe['macdhist'] = np.nan
+
+            # Bollinger Bands
+            if 'bb_middleband' not in dataframe.columns:
+                if all(col in df_std.columns for col in ['high', 'low', 'close']):
+                    typical_price = (df_std['high'] + df_std['low'] + df_std['close']) / 3
+                    from freqtrade.vendor.qtpylib.indicators import bollinger_bands # Keep local
+                    bollinger = bollinger_bands(typical_price, window=20, stds=2)
+                    dataframe['bb_lowerband'] = bollinger['lower']
+                    dataframe['bb_middleband'] = bollinger['mid']
+                    dataframe['bb_upperband'] = bollinger['upper']
+                else:
+                    logger.warning(f"Missing HLC columns in standardized df for {pair} ({tf}). Cannot calculate Bollinger Bands.")
+                    dataframe['bb_lowerband'] = np.nan
+                    dataframe['bb_middleband'] = np.nan
+                    dataframe['bb_upperband'] = np.nan
+
+        except AttributeError as e_attr:
+            logger.error(f"AttributeError during pandas-ta indicator calculation for {pair} ({tf}): {e_attr}. This might indicate pandas_ta is not correctly attached or an indicator name is wrong.")
+            if 'rsi' not in dataframe.columns: dataframe['rsi'] = np.nan
+            if 'macd' not in dataframe.columns: dataframe['macd'] = np.nan
+            if 'macdsignal' not in dataframe.columns: dataframe['macdsignal'] = np.nan
+            if 'macdhist' not in dataframe.columns: dataframe['macdhist'] = np.nan
+            if 'bb_middleband' not in dataframe.columns:
+                dataframe['bb_lowerband'] = np.nan
+                dataframe['bb_middleband'] = np.nan
+                dataframe['bb_upperband'] = np.nan
+        except Exception as e_pta:
+            logger.error(f"Error calculating pandas-ta based indicators in PreTrainer.prepare_training_data for {pair} ({tf}): {e_pta}. Skipping them.")
+            if 'rsi' not in dataframe.columns: dataframe['rsi'] = np.nan
+            if 'macd' not in dataframe.columns: dataframe['macd'] = np.nan
+            if 'macdsignal' not in dataframe.columns: dataframe['macdsignal'] = np.nan
+            if 'macdhist' not in dataframe.columns: dataframe['macdhist'] = np.nan
+            if 'bb_middleband' not in dataframe.columns:
+                dataframe['bb_lowerband'] = np.nan
+                dataframe['bb_middleband'] = np.nan
+                dataframe['bb_upperband'] = np.nan
 
         label_column_name = f"{pattern_type}_label"
         dataframe[label_column_name] = 0 # Initialize label column

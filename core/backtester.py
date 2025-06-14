@@ -2,6 +2,7 @@ import os
 import json
 import logging
 import pandas as pd
+import pandas_ta as ta # Added for pandas_ta
 import numpy as np
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -10,7 +11,6 @@ import asyncio
 from core.params_manager import ParamsManager
 from core.cnn_patterns import CNNPatterns
 from core.bitvavo_executor import BitvavoExecutor
-# import talib.abstract as ta # Defer import to where it's used
 
 # Ensure the 'memory' directory exists
 log_dir = Path(os.path.dirname(os.path.abspath(__file__))) / '..' / 'memory'
@@ -136,30 +136,100 @@ class Backtester:
             logger.error(f"DataFrame for {pair} ({timeframe}) is missing required columns for indicator calculation. Got: {dataframe.columns}")
             return pd.DataFrame() # Return empty if critical columns are missing
 
+        # Standardize OHLC column names to lowercase for pandas-ta
+        df_std = dataframe.copy() # Work on a copy
+        rename_map = {}
+        # Check for both capitalized and already lowercase columns to ensure mapping is correct
+        for col_name in df_std.columns:
+            col_lower = col_name.lower()
+            if col_lower in ['open', 'high', 'low', 'close', 'volume'] and col_name != col_lower:
+                rename_map[col_name] = col_lower
+
+        # Apply renaming if any capitalized versions were found
+        if rename_map:
+            df_std.rename(columns=rename_map, inplace=True)
+
+        # Ensure required lowercase columns are present
+        required_ohlc = ['open', 'high', 'low', 'close']
+        if not all(col in df_std.columns for col in required_ohlc):
+            logger.error(f"Missing required OHLC columns (open, high, low, close) in standardized df for {pair} ({timeframe}). Cannot calculate indicators.")
+            for col_name_init in ['rsi', 'macd', 'macdsignal', 'macdhist', 'lowerband', 'middleband', 'upperband']:
+                 if col_name_init not in dataframe.columns: dataframe[col_name_init] = np.nan
+            return pd.DataFrame()
+
         try:
-            import talib.abstract as ta
             # RSI
-            dataframe['rsi'] = ta.RSI(dataframe['close'], timeperiod=14)
+            if 'close' in df_std.columns:
+                dataframe['rsi'] = df_std.ta.rsi(close=df_std['close'], length=14, append=False)
+            else:
+                logger.warning(f"Column 'close' not found in df_std for {pair} ({timeframe}). RSI calculation skipped.")
+                dataframe['rsi'] = np.nan
 
             # MACD
-            macd_result = ta.MACD(dataframe['close'], fastperiod=12, slowperiod=26, signalperiod=9)
-            dataframe['macd'] = macd_result['macd']
-            dataframe['macdsignal'] = macd_result['macdsignal']
-            dataframe['macdhist'] = macd_result['macdhist']
+            if 'close' in df_std.columns:
+                macd_pta_df = df_std.ta.macd(close=df_std['close'], fast=12, slow=26, signal=9, append=False)
+                if macd_pta_df is not None and not macd_pta_df.empty:
+                    macd_col_map = {
+                        f'MACD_12_26_9': 'macd',
+                        f'MACDs_12_26_9': 'macdsignal',
+                        f'MACDh_12_26_9': 'macdhist'
+                    }
+                    for pta_col, target_col in macd_col_map.items():
+                        if pta_col in macd_pta_df.columns:
+                            dataframe[target_col] = macd_pta_df[pta_col]
+                        else:
+                            logger.warning(f"Pandas-ta MACD column {pta_col} not found in MACD results for {pair} ({timeframe}). Filling {target_col} with NaN.")
+                            dataframe[target_col] = np.nan
+                else:
+                    logger.warning(f"MACD calculation via pandas-ta returned None or empty for {pair} ({timeframe}). Filling MACD columns with NaN.")
+                    dataframe['macd'] = np.nan
+                    dataframe['macdsignal'] = np.nan
+                    dataframe['macdhist'] = np.nan
+            else:
+                logger.warning(f"Column 'close' not found in df_std for {pair} ({timeframe}). MACD calculation skipped.")
+                dataframe['macd'] = np.nan
+                dataframe['macdsignal'] = np.nan
+                dataframe['macdhist'] = np.nan
 
             # Bollinger Bands
-            bb_result = ta.BBANDS(dataframe['close'], timeperiod=20, nbdevup=2, nbdevdn=2, matype=0)
-            dataframe['upperband'] = bb_result['upperband']
-            dataframe['middleband'] = bb_result['middleband']
-            dataframe['lowerband'] = bb_result['lowerband']
+            if 'close' in df_std.columns:
+                bbands_pta_df = df_std.ta.bbands(close=df_std['close'], length=20, std=2, append=False)
+                if bbands_pta_df is not None and not bbands_pta_df.empty:
+                    bbands_col_map = {
+                        f'BBL_20_2.0': 'lowerband',
+                        f'BBM_20_2.0': 'middleband',
+                        f'BBU_20_2.0': 'upperband'
+                    }
+                    for pta_col, target_col in bbands_col_map.items():
+                        if pta_col in bbands_pta_df.columns:
+                            dataframe[target_col] = bbands_pta_df[pta_col]
+                        else:
+                            logger.warning(f"Pandas-ta BBands column {pta_col} not found in BBands results for {pair} ({timeframe}). Filling {target_col} with NaN.")
+                            dataframe[target_col] = np.nan
+                else:
+                    logger.warning(f"Bollinger Bands calculation via pandas-ta returned None or empty for {pair} ({timeframe}). Filling BBands columns with NaN.")
+                    dataframe['lowerband'] = np.nan
+                    dataframe['middleband'] = np.nan
+                    dataframe['upperband'] = np.nan
+            else:
+                logger.warning(f"Column 'close' not found in df_std for {pair} ({timeframe}). Bollinger Bands calculation skipped.")
+                dataframe['lowerband'] = np.nan
+                dataframe['middleband'] = np.nan
+                dataframe['upperband'] = np.nan
 
-            dataframe.dropna(inplace=True) # Remove rows with NaN values generated by indicators
-            logger.debug(f"Indicators added for {pair} ({timeframe}). Shape after adding: {dataframe.shape}")
-        except ImportError:
-            logger.warning(f"TA-Lib module not found in Backtester._add_indicators. Skipping TA-Lib based indicators for {pair} ({timeframe}).")
+            dataframe.dropna(inplace=True)
+            logger.debug(f"Indicators added for {pair} ({timeframe}) using pandas-ta. Shape after adding: {dataframe.shape}")
+
+        except AttributeError as e_attr:
+            logger.error(f"AttributeError during pandas-ta indicator calculation for {pair} ({timeframe}): {e_attr}. Ensure pandas_ta is installed and correctly imported, and methods exist.", exc_info=True)
+            for col_name_init in ['rsi', 'macd', 'macdsignal', 'macdhist', 'lowerband', 'middleband', 'upperband']:
+                 if col_name_init not in dataframe.columns: dataframe[col_name_init] = np.nan
+            return pd.DataFrame()
         except Exception as e:
-            logger.error(f"Error adding TA-Lib indicators for {pair} ({timeframe}): {e}", exc_info=True)
-            return pd.DataFrame() # Return empty on error
+            logger.error(f"Error adding pandas-ta indicators for {pair} ({timeframe}): {e}", exc_info=True)
+            for col_name_init in ['rsi', 'macd', 'macdsignal', 'macdhist', 'lowerband', 'middleband', 'upperband']:
+                 if col_name_init not in dataframe.columns: dataframe[col_name_init] = np.nan
+            return pd.DataFrame()
 
         return dataframe
 
