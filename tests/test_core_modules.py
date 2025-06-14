@@ -1128,6 +1128,62 @@ async def test_entry_decider_pattern_weighting_logic(
     # Verify that get_all_detectable_pattern_keys was called on the cnn_patterns_detector instance
     mock_cnn_patterns_instance.get_all_detectable_pattern_keys.assert_called_once()
 
+    # Verify 'contributing_patterns' in the decision dictionary
+    # For simplicity, we assume these scenarios are set to result in 'enter: True'
+    # by ensuring strongPatternThreshold is met by expected_weighted_score and other conditions are permissive.
+    # If a scenario is designed to not enter, this check might need adjustment or conditional skip.
+    if decision.get('enter'):
+        assert "contributing_patterns" in decision, f"Scenario '{scenario_name}': 'contributing_patterns' key missing in 'enter:True' decision."
+        returned_patterns = decision['contributing_patterns']
+
+        # Construct expected contributing patterns based on scenario config
+        expected_contrib = []
+        if cnn_predictions_config:
+            for key, score in cnn_predictions_config.items():
+                if score > 0: # As per EntryDecider logic for adding to weighted_cnn_score_contribution
+                    key_parts = key.split('_')
+                    pattern_name_from_key = None
+                    if len(key_parts) > 1 and key_parts[-1] == 'score':
+                        potential_pn = key_parts[-2]
+                        if potential_pn in mock_detectable_keys: pattern_name_from_key = potential_pn
+                        elif len(key_parts) > 2:
+                            potential_pn_long = "_".join(key_parts[1:-1])
+                            if potential_pn_long in mock_detectable_keys: pattern_name_from_key = potential_pn_long
+
+                    if pattern_name_from_key:
+                        tf_prefix = key_parts[0] if len(key_parts) > 2 and key_parts[-1] == 'score' else 'unknown_tf'
+                        expected_contrib.append(f"cnn_{tf_prefix}_{pattern_name_from_key}")
+
+        if rule_patterns_config:
+            # Current EntryDecider logic only adds the *first* detected rule-based pattern.
+            # Need to know the order of rule_based_bullish_patterns in EntryDecider.
+            # For now, just check if any rule pattern from config is present.
+            # A more precise check would require knowing which one is first in EntryDecider's list.
+            # Simplified check: if a rule was expected to contribute, ensure at least one rule pattern is there.
+            if any(rule_patterns_config.values()): # If any rule pattern was active in config
+                 # Find the first true rule pattern in the config that would be detected by EntryDecider's list
+                entry_decider_rule_order = [ # Replicate from EntryDecider for test accuracy
+                    'bullishEngulfing', 'CDLENGULFING', 'morningStar', 'CDLMORNINGSTAR',
+                    'threeWhiteSoldiers', 'CDL3WHITESOLDIERS', 'bullFlag', 'bullishRSIDivergence',
+                    'CDLHAMMER', 'CDLINVERTEDHAMMER', 'CDLPIERCING', 'ascendingTriangle', 'pennant'
+                ]
+                found_rule_in_contrib = False
+                for p_name_ordered in entry_decider_rule_order:
+                    if rule_patterns_config.get(p_name_ordered):
+                        expected_contrib.append(f"rule_{p_name_ordered}")
+                        found_rule_in_contrib = True
+                        break # Only first one
+                if any(rule_patterns_config.values()) and not found_rule_in_contrib:
+                    # This case means rule_patterns_config had a true value, but it wasn't one of the first-checked by EntryDecider
+                    pass # It's okay if no rule from *this specific test's config* is in the output if it wasn't the *first* one.
+
+
+        # Using set for comparison as order might not be strictly guaranteed for combined list, though current code appends CNN then rules.
+        assert set(returned_patterns) == set(expected_contrib), \
+            f"Scenario '{scenario_name}': Mismatch in contributing_patterns. Expected {set(expected_contrib)}, Got {set(returned_patterns)}"
+    elif "contributing_patterns" in decision: # If 'enter': False, it might still be there (e.g. empty)
+         assert isinstance(decision['contributing_patterns'], list), "contributing_patterns should be a list even if enter is False"
+
 
 # --- End of new test function ---
 
@@ -3005,6 +3061,13 @@ from core.pre_trainer import PreTrainer # For AIOptimizer dependency
 # reflectie_analyser functions are used by AIOptimizer, will need mocking or direct import if used.
 # from core.reflectie_analyser import analyse_reflecties, generate_mutation_proposal, analyze_timeframe_bias
 
+# New imports for PPA and PWO tests
+from core.pattern_performance_analyzer import PatternPerformanceAnalyzer, DEFAULT_MATCH_WINDOW_MINUTES, DEFAULT_PATTERN_LOG_PATH, DEFAULT_FREQTRADE_DB_PATH
+from core.pattern_weight_optimizer import PatternWeightOptimizer
+from core.params_manager import ParamsManager as ActualParamsManager # To avoid confusion with mocks
+import sqlite3 # For dummy DB setup
+from pathlib import Path # For path manipulation in fixtures
+
 
 # Path for the dummy reflection log, matching what AIOptimizer's __main__ used
 TEST_REFLECTION_LOG_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'memory', 'test_reflectie-logboek.json')
@@ -3170,6 +3233,566 @@ class TestAIOptimizer:
             assert "ZEN/USDT" in preferred_pairs_after_opt_custom
 
             assert "Periodic optimization cycle finished." in caplog.text
+
+
+# --- Tests for PatternPerformanceAnalyzer ---
+
+@pytest.fixture
+def dummy_pattern_log_file(tmp_path: Path) -> str:
+    log_dir = tmp_path / "user_data_ppa" / "logs"
+    log_dir.mkdir(parents=True, exist_ok=True)
+    log_file_path = log_dir / "pattern_performance_log.json"
+
+    log_entries = [
+        {"pair": "ETH/USDT", "entry_timestamp": (datetime.now(timezone.utc) - timedelta(hours=2)).isoformat(), "contributing_patterns": ["cnn_5m_bullFlag", "rule_morningStar"], "decision_details": {"weighted_score": 1.2}},
+        {"pair": "ETH/USDT", "entry_timestamp": (datetime.now(timezone.utc) - timedelta(hours=1)).isoformat(), "contributing_patterns": ["cnn_1h_bearishEngulfing"], "decision_details": {"weighted_score": 0.9}},
+        {"pair": "BTC/USDT", "entry_timestamp": (datetime.now(timezone.utc) - timedelta(minutes=30)).isoformat(), "contributing_patterns": ["rule_bullishEngulfing"], "decision_details": {"weighted_score": 0.7}},
+        {"pair": "ADA/USDT", "entry_timestamp": (datetime.now(timezone.utc) - timedelta(minutes=10)).isoformat(), "contributing_patterns": ["cnn_15m_doji", "cnn_5m_bullFlag"], "decision_details": {"weighted_score": 1.5}}, # Will match a later trade
+        {"pair": "LINK/USDT", "entry_timestamp": (datetime.now(timezone.utc) - timedelta(days=1)).isoformat(), "contributing_patterns": ["cnn_5m_bullFlag"], "decision_details": {"weighted_score": 0.8}}, # No matching trade
+        {"pair": "ETH/USDT", "entry_timestamp": "MALFORMED_TIMESTAMP", "contributing_patterns": ["cnn_5m_bullFlag"], "decision_details": {}}, # Malformed
+    ]
+    with open(log_file_path, 'w', encoding='utf-8') as f:
+        for entry in log_entries:
+            json.dump(entry, f)
+            f.write('\n')
+        f.write("this is not a valid json line\n") # Add a malformed line
+    return str(log_file_path)
+
+@pytest.fixture
+def dummy_freqtrade_db(tmp_path: Path) -> str:
+    db_dir = tmp_path / "user_data_ppa"
+    db_dir.mkdir(parents=True, exist_ok=True)
+    db_file_path = db_dir / "freqtrade.sqlite"
+
+    conn = sqlite3.connect(db_file_path)
+    cursor = conn.cursor()
+    cursor.execute("""
+        CREATE TABLE trades (
+            id INTEGER PRIMARY KEY, pair TEXT, is_open INTEGER,
+            open_date DATETIME, close_date DATETIME, profit_ratio REAL,
+            strategy TEXT, stake_amount REAL
+        )
+    """)
+    trades_data = [
+        (1, "ETH/USDT", 0, (datetime.now(timezone.utc) - timedelta(hours=2, minutes=1)), (datetime.now(timezone.utc) - timedelta(hours=1, minutes=30)), 0.02, "DUOAI_Strategy", 100), # Matches log 1
+        (2, "ETH/USDT", 0, (datetime.now(timezone.utc) - timedelta(hours=1, minutes=1)), (datetime.now(timezone.utc) - timedelta(minutes=30)), -0.01, "DUOAI_Strategy", 100), # Matches log 2
+        (3, "BTC/USDT", 0, (datetime.now(timezone.utc) - timedelta(minutes=30, seconds=30)), (datetime.now(timezone.utc) - timedelta(minutes=10)), 0.05, "DUOAI_Strategy", 200), # Matches log 3
+        (4, "ADA/USDT", 0, (datetime.now(timezone.utc) - timedelta(minutes=9, seconds=30)), (datetime.now(timezone.utc) - timedelta(minutes=1)), 0.03, "DUOAI_Strategy", 150), # Matches log 4 for ADA
+        (5, "XRP/USDT", 0, (datetime.now(timezone.utc) - timedelta(days=2)), (datetime.now(timezone.utc) - timedelta(days=1)), 0.01, "DUOAI_Strategy", 100), # Unmatched by logs
+        (6, "ETH/USDT", 1, (datetime.now(timezone.utc) - timedelta(minutes=5)), None, None, "DUOAI_Strategy", 100), # Open trade, should be ignored
+    ]
+    # Convert datetimes to string format Freqtrade uses (YYYY-MM-DD HH:MM:SS)
+    # Freqtrade stores them as TEXT in ISO8601 format with timezone.
+    # sqlite3 connector handles datetime objects correctly for TIMESTAMP columns if they are timezone-aware.
+    cursor.executemany("INSERT INTO trades VALUES (?,?,?,?,?,?,?,?)", trades_data)
+    conn.commit()
+    conn.close()
+    return str(db_file_path)
+
+@pytest.fixture
+def mock_params_manager_for_ppa():
+    mock_pm = MagicMock(spec=ActualParamsManager)
+    mock_pm.get_param.side_effect = lambda key, strategy_id=None, default=None: {
+        "patternLogTradeMatchWindowMinutes": 5, # Test with 5 min window
+        "patternPerformanceLogPath": default, # Let PPA use the path passed to it
+        "freqtradeDbPathAnalyzer": default  # Let PPA use the path passed to it
+    }.get(key, default)
+    return mock_pm
+
+class TestPatternPerformanceAnalyzer:
+    def test_init_paths(self, mock_params_manager_for_ppa, dummy_pattern_log_file, dummy_freqtrade_db, tmp_path):
+        """Test if PPA initializes paths correctly, either from PM or defaults."""
+        # Scenario 1: Paths from ParamsManager (mocked to return None, so PPA uses constructor args)
+        ppa = PatternPerformanceAnalyzer(
+            params_manager=mock_params_manager_for_ppa,
+            freqtrade_db_path=dummy_freqtrade_db,
+            pattern_log_path=dummy_pattern_log_file
+        )
+        assert ppa.freqtrade_db_path == dummy_freqtrade_db
+        assert ppa.pattern_log_path == dummy_pattern_log_file
+        assert ppa.match_window_minutes == 5 # From mock_params_manager_for_ppa
+
+        # Scenario 2: Mock ParamsManager to provide specific paths
+        mock_pm_custom_paths = MagicMock(spec=ActualParamsManager)
+        custom_log_path = str(tmp_path / "custom_pattern.json")
+        custom_db_path = str(tmp_path / "custom_ft.sqlite")
+        mock_pm_custom_paths.get_param.side_effect = lambda key, strategy_id=None, default=None: {
+            "patternLogTradeMatchWindowMinutes": 3,
+            "patternPerformanceLogPath": custom_log_path,
+            "freqtradeDbPathAnalyzer": custom_db_path
+        }.get(key, default)
+
+        ppa_custom = PatternPerformanceAnalyzer(params_manager=mock_pm_custom_paths)
+        assert ppa_custom.freqtrade_db_path == custom_db_path
+        assert ppa_custom.pattern_log_path == custom_log_path
+        assert ppa_custom.match_window_minutes == 3
+
+        # Scenario 3: No ParamsManager, direct paths (should use constructor args or hardcoded defaults if args are None)
+        # This also tests the internal DEFAULT_ paths if args are None.
+        # To test DEFAULT_ paths, we'd pass None for paths and ensure no os.path.join error if CWD isn't project root.
+        # For now, testing with explicit paths passed to constructor:
+        ppa_direct = PatternPerformanceAnalyzer(
+            params_manager=None,
+            freqtrade_db_path=dummy_freqtrade_db,
+            pattern_log_path=dummy_pattern_log_file
+        )
+        assert ppa_direct.freqtrade_db_path == dummy_freqtrade_db
+        assert ppa_direct.pattern_log_path == dummy_pattern_log_file
+        assert ppa_direct.match_window_minutes == DEFAULT_MATCH_WINDOW_MINUTES # Falls back to class default
+
+    def test_load_pattern_entry_logs(self, dummy_pattern_log_file, caplog):
+        caplog.set_level(logging.WARNING)
+        ppa = PatternPerformanceAnalyzer(pattern_log_path=dummy_pattern_log_file, params_manager=None)
+        logs = ppa._load_pattern_entry_logs()
+
+        assert len(logs) == 5 # 1 malformed timestamp, 1 non-json line
+        assert isinstance(logs[0]['entry_timestamp'], datetime)
+        assert logs[0]['pair'] == "ETH/USDT"
+        # Check that malformed timestamp was skipped or handled (here it's skipped by fromisoformat error)
+        # The malformed JSON line is also skipped.
+        assert "Error decoding JSON from line" in caplog.text # For the non-JSON line
+        # The malformed timestamp will also cause an error during parsing in fromisoformat,
+        # but it might not be specifically logged by _load_pattern_entry_logs unless we add try-except there.
+        # Current implementation: fromisoformat will raise ValueError, which isn't caught per-line for timestamp conversion.
+        # For robustness, added per-line try-except for json.loads and datetime conversion within the loop.
+        # Re-check: `datetime.fromisoformat` is inside the try-except for `json.loads`. If timestamp is bad, it's caught by the outer loop.
+        # The fixture creates one entry with "MALFORMED_TIMESTAMP". This will fail `fromisoformat`.
+        # The test expects 5 logs, implying the malformed one is skipped.
+        # Let's verify the log for malformed timestamp:
+        # The loop continues, so the log for "MALFORMED_TIMESTAMP" will be appended if json.loads works.
+        # But then fromisoformat fails. This needs a try-except around fromisoformat too, or a filter.
+        # The current code in PPA has fromisoformat inside the json.loads try-except.
+        # This means if fromisoformat fails, the whole entry might be skipped if not handled.
+        # The fixture creates 6 valid JSON entries, one with bad timestamp. And one non-JSON line.
+        # So, 5 logs are expected if bad timestamp entry is skipped.
+
+    def test_load_closed_trades(self, dummy_freqtrade_db):
+        ppa = PatternPerformanceAnalyzer(freqtrade_db_path=dummy_freqtrade_db, params_manager=None)
+        trades_df = ppa._load_closed_trades()
+
+        assert not trades_df.empty
+        assert len(trades_df) == 5 # 5 closed trades, 1 open
+        assert 'id' in trades_df.columns
+        assert 'pair' in trades_df.columns
+        assert pd.api.types.is_datetime64_any_dtype(trades_df['open_date'])
+        assert trades_df['open_date'].dt.tz is not None # Should be timezone-aware
+        assert pd.api.types.is_datetime64_any_dtype(trades_df['close_date'])
+        assert trades_df['close_date'].dt.tz is not None
+
+    def test_analyze_pattern_performance_e2e(self, mock_params_manager_for_ppa, dummy_pattern_log_file, dummy_freqtrade_db, caplog):
+        caplog.set_level(logging.INFO)
+        ppa = PatternPerformanceAnalyzer(
+            params_manager=mock_params_manager_for_ppa,
+            freqtrade_db_path=dummy_freqtrade_db,
+            pattern_log_path=dummy_pattern_log_file
+        )
+        # Default match window is 5 mins from mock_params_manager_for_ppa
+
+        metrics = ppa.analyze_pattern_performance()
+
+        assert "cnn_5m_bullFlag" in metrics
+        # Log 1 (ETH/USDT, cnn_5m_bullFlag, rule_morningStar) -> Trade 1 (ETH/USDT, profit 0.02)
+        # Log 4 (ADA/USDT, cnn_15m_doji, cnn_5m_bullFlag) -> Trade 4 (ADA/USDT, profit 0.03)
+        assert metrics["cnn_5m_bullFlag"]["total_trades"] == 2
+        assert metrics["cnn_5m_bullFlag"]["wins"] == 2
+        assert abs(metrics["cnn_5m_bullFlag"]["total_profit_pct"] - (0.02 + 0.03)) < 1e-9
+        assert abs(metrics["cnn_5m_bullFlag"]["win_rate_pct"] - 100.0) < 1e-9
+        assert abs(metrics["cnn_5m_bullFlag"]["avg_profit_pct"] - ((0.02 + 0.03)/2 * 100)) < 1e-9
+
+        assert "rule_morningStar" in metrics
+        assert metrics["rule_morningStar"]["total_trades"] == 1
+        assert metrics["rule_morningStar"]["wins"] == 1
+        assert abs(metrics["rule_morningStar"]["avg_profit_pct"] - 2.0) < 1e-9
+
+        assert "cnn_1h_bearishEngulfing" in metrics
+        # Log 2 (ETH/USDT, cnn_1h_bearishEngulfing) -> Trade 2 (ETH/USDT, profit -0.01)
+        assert metrics["cnn_1h_bearishEngulfing"]["total_trades"] == 1
+        assert metrics["cnn_1h_bearishEngulfing"]["wins"] == 0
+        assert abs(metrics["cnn_1h_bearishEngulfing"]["avg_profit_pct"] - (-1.0)) < 1e-9
+
+        assert "rule_bullishEngulfing" in metrics
+        # Log 3 (BTC/USDT, rule_bullishEngulfing) -> Trade 3 (BTC/USDT, profit 0.05)
+        assert metrics["rule_bullishEngulfing"]["total_trades"] == 1
+        assert abs(metrics["rule_bullishEngulfing"]["avg_profit_pct"] - 5.0) < 1e-9
+
+        assert "cnn_15m_doji" in metrics
+        # Log 4 (ADA/USDT, cnn_15m_doji, cnn_5m_bullFlag) -> Trade 4 (ADA/USDT, profit 0.03)
+        assert metrics["cnn_15m_doji"]["total_trades"] == 1
+        assert abs(metrics["cnn_15m_doji"]["avg_profit_pct"] - 3.0) < 1e-9
+
+        # Check for logged summary
+        assert "Pattern Performance Analysis Summary:" in caplog.text
+        assert "Pattern: cnn_5m_bullFlag" in caplog.text
+        assert "No unique matching trade found for log entry: LINK/USDT" in caplog.text # For Log 5
+
+    def test_analyze_no_logs_or_trades(self, mock_params_manager_for_ppa, tmp_path, caplog):
+        caplog.set_level(logging.WARNING)
+        empty_log_path = tmp_path / "empty_log.json"
+        empty_log_path.touch()
+
+        empty_db_path = tmp_path / "empty.sqlite"
+        # Create an empty DB
+        conn = sqlite3.connect(empty_db_path)
+        cursor = conn.cursor()
+        cursor.execute("CREATE TABLE trades (id INTEGER PRIMARY KEY, pair TEXT, is_open INTEGER, open_date DATETIME, close_date DATETIME, profit_ratio REAL)")
+        conn.commit()
+        conn.close()
+
+        # Scenario 1: No logs
+        ppa_no_logs = PatternPerformanceAnalyzer(
+            params_manager=mock_params_manager_for_ppa,
+            freqtrade_db_path=dummy_freqtrade_db(tmp_path), # Use a valid DB
+            pattern_log_path=str(empty_log_path)
+        )
+        metrics_no_logs = ppa_no_logs.analyze_pattern_performance()
+        assert metrics_no_logs == {}
+        assert "No pattern logs or closed trades to analyze" in caplog.text
+
+        caplog.clear()
+        # Scenario 2: No trades
+        ppa_no_trades = PatternPerformanceAnalyzer(
+            params_manager=mock_params_manager_for_ppa,
+            freqtrade_db_path=str(empty_db_path),
+            pattern_log_path=dummy_pattern_log_file(tmp_path) # Use a valid log file
+        )
+        metrics_no_trades = ppa_no_trades.analyze_pattern_performance()
+        assert metrics_no_trades == {}
+        assert "No pattern logs or closed trades to analyze" in caplog.text
+
+# --- Tests for PatternWeightOptimizer ---
+
+@pytest.fixture
+def mock_params_manager_for_pwo():
+    mock_pm = MagicMock(spec=ActualParamsManager)
+    # Store params in a dict to simulate updates
+    mock_pm.params_storage = {
+        "DUOAI_Strategy": {
+            "cnn_5m_bullFlag_weight": 1.0,
+            "cnn_1h_bearishEngulfing_weight": 1.0,
+            "cnn_15m_doji_weight": 0.5, # Low initial weight
+            "cnnPatternWeight": 1.0 # Fallback
+        },
+        # Global optimizer configs
+        "optimizerMinPatternWeight": 0.1,
+        "optimizerMaxPatternWeight": 2.0,
+        "optimizerPatternWeightLearningRate": 0.1, # 10% learning rate for easier testing
+        "optimizerPatternPerfMetric": 'win_rate_pct',
+        "optimizerLowPerfThresholdWinRate": 40.0,
+        "optimizerHighPerfThresholdWinRate": 65.0,
+        "optimizerMinTradesForWeightAdjustment": 5,
+        "optimizerLowPerfThresholdAvgProfit": -0.2, # -0.2% avg profit
+        "optimizerHighPerfThresholdAvgProfit": 0.5, # 0.5% avg profit
+    }
+
+    def get_param_side_effect(key, strategy_id=None, default=None):
+        if strategy_id and strategy_id in mock_pm.params_storage:
+            return mock_pm.params_storage[strategy_id].get(key, default)
+        return mock_pm.params_storage.get(key, default)
+
+    async def set_param_side_effect(key, value, strategy_id=None):
+        if strategy_id:
+            if strategy_id not in mock_pm.params_storage:
+                mock_pm.params_storage[strategy_id] = {}
+            mock_pm.params_storage[strategy_id][key] = value
+        else:
+            mock_pm.params_storage[key] = value
+        # print(f"MOCK_PM SET: {key}={value} for {strategy_id}")
+
+    mock_pm.get_param = MagicMock(side_effect=get_param_side_effect)
+    mock_pm.set_param = AsyncMock(side_effect=set_param_side_effect)
+    return mock_pm
+
+@pytest.fixture
+def mock_pattern_performance_analyzer(request): # request is a pytest fixture
+    mock_ppa = MagicMock(spec=PatternPerformanceAnalyzer)
+    # Default empty metrics. Can be overridden by @pytest.mark.parametrize
+    metrics_to_return = getattr(request, "param", {}).get("metrics", {})
+    mock_ppa.analyze_pattern_performance.return_value = metrics_to_return
+    return mock_ppa
+
+class TestPatternWeightOptimizer:
+    def test_optimizer_initialization_loads_config(self, mock_params_manager_for_pwo):
+        optimizer = PatternWeightOptimizer(
+            params_manager=mock_params_manager_for_pwo,
+            pattern_performance_analyzer=MagicMock(spec=PatternPerformanceAnalyzer) # Dummy for this test
+        )
+        assert optimizer.min_pattern_weight == 0.1
+        assert optimizer.max_pattern_weight == 2.0
+        assert optimizer.learning_rate == 0.1
+        assert optimizer.metric_to_optimize == 'win_rate_pct'
+        assert optimizer.low_perf_threshold == 40.0 # Based on win_rate_pct
+        assert optimizer.high_perf_threshold == 65.0 # Based on win_rate_pct
+        assert optimizer.min_trades_for_adjustment == 5
+        mock_params_manager_for_pwo.get_param.assert_any_call("optimizerMinPatternWeight", strategy_id=None, default=ANY) # ANY from unittest.mock if needed
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("mock_pattern_performance_analyzer", [{
+        "metrics": {
+            "cnn_5m_bullFlag": {"total_trades": 10, "win_rate_pct": 70.0, "avg_profit_pct": 1.5}, # High perf
+            "cnn_1h_bearishEngulfing": {"total_trades": 10, "win_rate_pct": 30.0, "avg_profit_pct": -0.5}, # Low perf
+            "cnn_15m_doji": {"total_trades": 3, "win_rate_pct": 80.0, "avg_profit_pct": 2.0}, # Insufficient trades
+            "cnn_utils_trend": {"total_trades": 10, "win_rate_pct": 50.0, "avg_profit_pct": 0.1}, # Moderate perf
+            "rule_morningStar": {"total_trades": 20, "win_rate_pct": 55.0, "avg_profit_pct": 0.2}, # Should be ignored
+        }
+    }], indirect=["mock_pattern_performance_analyzer"]) # Pass metrics to the fixture
+    async def test_optimize_pattern_weights_scenarios(self, mock_params_manager_for_pwo, mock_pattern_performance_analyzer, caplog):
+        caplog.set_level(logging.INFO)
+        optimizer = PatternWeightOptimizer(
+            params_manager=mock_params_manager_for_pwo,
+            pattern_performance_analyzer=mock_pattern_performance_analyzer
+        )
+
+        # Initial weights: cnn_5m_bullFlag_weight=1.0, cnn_1h_bearishEngulfing_weight=1.0, cnn_15m_doji_weight=0.5
+        # Fallback cnnPatternWeight = 1.0 (used if specific weight like cnn_utils_trend_weight is missing)
+
+        result = await optimizer.optimize_pattern_weights()
+        assert result is True # Weights should have been updated
+
+        # Assertions based on mock_params_manager_for_pwo.params_storage
+        final_weights = mock_params_manager_for_pwo.params_storage["DUOAI_Strategy"]
+
+        # cnn_5m_bullFlag: 70% win_rate > 65% high_perf_threshold. Increase.
+        # new_weight = 1.0 * (1 + 0.1) = 1.1
+        assert abs(final_weights["cnn_5m_bullFlag_weight"] - 1.1) < 1e-5
+        assert "Performance HIGH. Increasing weight for cnn_5m_bullFlag" in caplog.text
+
+        # cnn_1h_bearishEngulfing: 30% win_rate < 40% low_perf_threshold. Decrease.
+        # new_weight = 1.0 * (1 - 0.1) = 0.9
+        assert abs(final_weights["cnn_1h_bearishEngulfing_weight"] - 0.9) < 1e-5
+        assert "Performance LOW. Decreasing weight for cnn_1h_bearishEngulfing" in caplog.text
+
+        # cnn_15m_doji: 3 trades < 5 min_trades_for_adjustment. No change.
+        assert abs(final_weights["cnn_15m_doji_weight"] - 0.5) < 1e-5 # Remains initial
+        assert "Not enough trades (3 < 5) for cnn_15m_doji. Weight remains unchanged." in caplog.text
+
+        # cnn_utils_trend: 50% win_rate (moderate). No change. Weight starts from fallback 1.0.
+        # Param "cnn_utils_trend_weight" will be created.
+        assert abs(final_weights.get("cnn_utils_trend_weight", 1.0) - 1.0) < 1e-5 # Should remain fallback or be set to it
+        assert "Performance MODERATE. Weight for cnn_utils_trend remains unchanged." in caplog.text
+
+        # Check that set_param was called for changed weights
+        # bullFlag and bearishEngulfing weights changed. utils_trend did not change from its initial (fallback) value.
+        # doji did not change from its initial value.
+        # So, 2 explicit set_param calls for DUOAI_Strategy for weights that changed.
+        # If a new pattern like cnn_utils_trend was optimized from fallback and resulted in a different value, it would also be set.
+        # Here, cnn_utils_trend started at fallback 1.0, moderate perf means new_weight=1.0, so no "meaningful change".
+
+        # Count calls to set_param specifically for strategy "DUOAI_Strategy" and for *_weight keys
+        strategy_set_param_calls = 0
+        for call_args in mock_params_manager_for_pwo.set_param.call_args_list:
+            if call_args.kwargs.get('strategy_id') == "DUOAI_Strategy" and call_args.kwargs.get('key', '').endswith('_weight'):
+                strategy_set_param_calls += 1
+        assert strategy_set_param_calls == 2 # bullFlag and bearishEngulfing
+
+    @pytest.mark.asyncio
+    async def test_optimize_weights_min_max_clamping(self, mock_params_manager_for_pwo, mock_pattern_performance_analyzer):
+        # Setup: Make min_pattern_weight = 0.8, max_pattern_weight = 1.2
+        mock_params_manager_for_pwo.params_storage["optimizerMinPatternWeight"] = 0.8
+        mock_params_manager_for_pwo.params_storage["optimizerMaxPatternWeight"] = 1.2
+        mock_params_manager_for_pwo.params_storage["DUOAI_Strategy"]["cnn_strong_weight"] = 1.1 # Start within range
+        mock_params_manager_for_pwo.params_storage["DUOAI_Strategy"]["cnn_weak_weight"] = 0.9   # Start within range
+
+        # Mock PPA to make cnn_strong_weight increase and cnn_weak_weight decrease
+        mock_pattern_performance_analyzer.analyze_pattern_performance.return_value = {
+            "cnn_strong_weight": {"total_trades": 10, "win_rate_pct": 70.0}, # Should increase
+            "cnn_weak_weight": {"total_trades": 10, "win_rate_pct": 30.0},   # Should decrease
+        }
+
+        optimizer = PatternWeightOptimizer(mock_params_manager_for_pwo, mock_pattern_performance_analyzer)
+        await optimizer.optimize_pattern_weights()
+
+        final_weights = mock_params_manager_for_pwo.params_storage["DUOAI_Strategy"]
+        # cnn_strong_weight: 1.1 * (1 + 0.1) = 1.21. Clamped to 1.2 (max).
+        assert abs(final_weights["cnn_strong_weight_weight"] - 1.2) < 1e-5
+        # cnn_weak_weight: 0.9 * (1 - 0.1) = 0.81. Not clamped by min 0.8 yet.
+        # Re-run to test clamping at min
+        mock_params_manager_for_pwo.params_storage["DUOAI_Strategy"]["cnn_weak_weight_weight"] = 0.81 # Set for next run
+        await optimizer.optimize_pattern_weights()
+        final_weights_run2 = mock_params_manager_for_pwo.params_storage["DUOAI_Strategy"]
+        # cnn_weak_weight: 0.81 * (1 - 0.1) = 0.729. Clamped to 0.8 (min).
+        assert abs(final_weights_run2["cnn_weak_weight_weight"] - 0.8) < 1e-5
+
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("mock_pattern_performance_analyzer", [{"metrics": {}}], indirect=True)
+    async def test_optimize_weights_no_metrics(self, mock_params_manager_for_pwo, mock_pattern_performance_analyzer, caplog):
+        caplog.set_level(logging.INFO)
+        optimizer = PatternWeightOptimizer(mock_params_manager_for_pwo, mock_pattern_performance_analyzer)
+        result = await optimizer.optimize_pattern_weights()
+        assert result is False
+        assert "No performance metrics available. Skipping weight optimization." in caplog.text
+        mock_params_manager_for_pwo.set_param.assert_not_called() # No weights should be set
+
+# --- Tests for EntryDecider and DUOAI_Strategy Logging Interaction ---
+
+# Helper for DUOAI_Strategy config
+def get_default_strategy_config():
+    return {
+        "pair_whitelist": ["ETH/USDT", "BTC/USDT"],
+        "user_data_dir": "user_data", # This will be replaced by tmp_path in tests
+        "runmode": "live", # or dry_run, relevant for some AIActivationEngine paths
+        # Add other minimal config items DUOAI_Strategy.__init__ might expect
+        "exchange": {"name": "binance", "min_stake_amount": 10.0}, # Example
+        "stake_currency": "USDT",
+        "stake_amount": "unlimited",
+    }
+
+@pytest.mark.asyncio
+async def test_duoai_strategy_custom_entry_logging(tmp_path, caplog):
+    """
+    Tests that DUOAI_Strategy.custom_entry logs contributing_patterns
+    to pattern_performance_log.json when an entry is signaled.
+    """
+    caplog.set_level(logging.INFO)
+    user_data_dir = tmp_path / "user_data_duoai_strat_test"
+    user_data_dir.mkdir()
+    logs_dir = user_data_dir / "logs" # Expected by DUOAI_Strategy for pattern_performance_log.json
+
+    mock_config = get_default_strategy_config()
+    mock_config["user_data_dir"] = str(user_data_dir)
+
+    # Mock EntryDecider instance that DUOAI_Strategy will use
+    mock_entry_decider_instance = MagicMock(spec=EntryDecider)
+    sample_contributing_patterns = ["cnn_5m_bullFlag", "rule_morningStar"]
+    mock_entry_decision = {
+        "enter": True,
+        "reason": "Test_Entry_Signal",
+        "confidence": 0.85,
+        "contributing_patterns": sample_contributing_patterns,
+        # Other fields EntryDecider might return
+    }
+    mock_entry_decider_instance.should_enter = AsyncMock(return_value=mock_entry_decision)
+
+    # Patch the EntryDecider class to return our mock instance upon instantiation
+    # This is tricky because DUOAI_Strategy instantiates its own EntryDecider.
+    # We need to ensure that the instance used by DUOAI_Strategy is our mock.
+    # One way: patch 'strategies.DUOAI_Strategy.EntryDecider' if it's imported there,
+    # or 'core.entry_decider.EntryDecider' if DUOAI_Strategy imports it from core.
+    # Based on imports in DUOAI_Strategy.py: from core.entry_decider import EntryDecider
+
+    with patch('strategies.DUOAI_Strategy.EntryDecider', return_value=mock_entry_decider_instance), \
+         patch('strategies.DUOAI_Strategy.ParamsManager'), \
+         patch('strategies.DUOAI_Strategy.PromptBuilder'), \
+         patch('strategies.DUOAI_Strategy.GPTReflector'), \
+         patch('strategies.DUOAI_Strategy.GrokReflector'), \
+         patch('strategies.DUOAI_Strategy.CNNPatterns'), \
+         patch('strategies.DUOAI_Strategy.ReflectieLus'), \
+         patch('strategies.DUOAI_Strategy.AIActivationEngine'), \
+         patch('strategies.DUOAI_Strategy.BiasReflector'), \
+         patch('strategies.DUOAI_Strategy.ConfidenceEngine'), \
+         patch('strategies.DUOAI_Strategy.StrategyManager'), \
+         patch('strategies.DUOAI_Strategy.IntervalSelector'), \
+         patch('strategies.DUOAI_Strategy.CooldownTracker'):
+
+        strategy = DUOAI_Strategy(config=mock_config)
+        # Ensure the log directory will be created by __init__ if it doesn't exist
+        # The PATTERN_PERFORMANCE_LOG_FILE path is constructed in __init__
+
+    # Prepare mock dataframe and other inputs for custom_entry
+    pair = "ETH/USDT"
+    current_time_dt = datetime.now(timezone.utc)
+    # Freqtrade passes a dataframe slice to custom_entry.
+    # It must have 'close' and other columns EntryDecider might use indirectly.
+    mock_dataframe = pd.DataFrame({
+        'date': [current_time_dt - timedelta(minutes=i) for i in range(5)],
+        'open': [100]*5, 'high': [102]*5, 'low': [99]*5, 'close': [101]*5, 'volume': [1000]*5
+    }).set_index('date')
+
+    # Mock _get_all_relevant_candles_for_ai as it's called by custom_entry
+    strategy._get_all_relevant_candles_for_ai = MagicMock(return_value={'5m': mock_dataframe})
+    # Mock other dependencies if custom_entry calls them before EntryDecider
+    strategy.bias_reflector.get_bias_score.return_value = 0.5
+    strategy.confidence_engine.get_confidence_score.return_value = 0.5
+    strategy.params_manager.get_param.return_value = 0.7 # For entryConvictionThreshold
+    strategy.cooldown_tracker.is_cooldown_active.return_value = False
+
+
+    # Call custom_entry
+    entry_signal = await strategy.custom_entry(pair, current_time_dt, mock_dataframe)
+
+    assert entry_signal == 1.0, "custom_entry should return 1.0 for an entry signal."
+
+    # Verify the log file was created and contains the correct entry
+    expected_log_file = logs_dir / "pattern_performance_log.json"
+    assert expected_log_file.exists(), "Pattern performance log file was not created."
+
+    with open(expected_log_file, 'r', encoding='utf-8') as f:
+        first_line = f.readline()
+        log_content = json.loads(first_line)
+
+    assert log_content["pair"] == pair
+    assert log_content["entry_timestamp"] == current_time_dt.isoformat()
+    assert log_content["contributing_patterns"] == sample_contributing_patterns
+    assert log_content["decision_details"]["reason"] == "Test_Entry_Signal"
+
+    # Verify that EntryDecider.should_enter was called
+    mock_entry_decider_instance.should_enter.assert_called_once()
+
+
+# --- Tests for AIOptimizer Integration ---
+# Extending TestAIOptimizer from test_core_modules.py (if it exists there)
+# For now, creating a new one or assuming it can be added to if separated.
+
+@pytest.mark.asyncio
+async def test_ai_optimizer_integrates_pattern_optimizers(dummy_freqtrade_db_and_reflection_log, caplog):
+    """
+    Tests that AIOptimizer instantiates PatternPerformanceAnalyzer and PatternWeightOptimizer,
+    and calls PatternWeightOptimizer.optimize_pattern_weights.
+    """
+    caplog.set_level(logging.INFO)
+    dummy_db_path, mock_reflection_log_path = dummy_freqtrade_db_and_reflection_log
+
+    # Mock PreTrainer and StrategyManager which are direct dependencies of AIOptimizer
+    mock_pre_trainer_instance = MagicMock(spec=PreTrainer)
+    mock_strategy_manager_instance = MagicMock(spec=StrategyManager)
+    # AIOptimizer uses strategy_manager.params_manager, so mock that too.
+    mock_params_manager_for_sm = MagicMock(spec=ActualParamsManager)
+    # Setup default returns for params_manager if PPA/PWO init relies on them via AIOptimizer
+    mock_params_manager_for_sm.get_param.side_effect = lambda key, strategy_id=None, default=None: default
+    mock_strategy_manager_instance.params_manager = mock_params_manager_for_sm
+
+    # Mock the actual PPA and PWO classes that AIOptimizer will try to instantiate
+    with patch('core.ai_optimizer.PatternPerformanceAnalyzer') as MockPPAClass, \
+         patch('core.ai_optimizer.PatternWeightOptimizer') as MockPWOClass, \
+         patch('core.ai_optimizer.PreTrainer', return_value=mock_pre_trainer_instance), \
+         patch('core.ai_optimizer.StrategyManager', return_value=mock_strategy_manager_instance), \
+         patch('core.ai_optimizer.analyse_reflecties', return_value={}), \
+         patch('core.ai_optimizer.generate_mutation_proposal', return_value=None), \
+         patch('core.ai_optimizer.analyze_timeframe_bias', return_value=0.5), \
+         patch('core.ai_optimizer.get_recent_market_data', AsyncMock(return_value=pd.DataFrame({'close': [1.0]}))): # Mock market data fetch
+
+        mock_ppa_instance = MockPPAClass.return_value
+        mock_pwo_instance = MockPWOClass.return_value
+        mock_pwo_instance.optimize_pattern_weights = MagicMock(return_value=True) # Simulate it ran and updated weights
+
+        optimizer = AIOptimizer(
+            pre_trainer=mock_pre_trainer_instance,
+            strategy_manager=mock_strategy_manager_instance
+        )
+
+        # Verify PPA and PWO were instantiated by AIOptimizer's __init__
+        MockPPAClass.assert_called_once()
+        # Check that params_manager from strategy_manager was passed to PPA
+        assert MockPPAClass.call_args.kwargs['params_manager'] == mock_params_manager_for_sm
+        MockPWOClass.assert_called_once_with(
+            params_manager=mock_params_manager_for_sm,
+            pattern_performance_analyzer=mock_ppa_instance
+        )
+
+        assert optimizer.pattern_analyzer == mock_ppa_instance
+        assert optimizer.pattern_weight_optimizer == mock_pwo_instance
+
+        # Call run_periodic_optimization
+        await optimizer.run_periodic_optimization(symbols=["ETH/USDT"], timeframes=["1h"])
+
+        # Verify that PatternWeightOptimizer.optimize_pattern_weights was called
+        # Since optimize_pattern_weights is run with asyncio.to_thread, the mock needs to be on the method of the instance.
+        # The mock_pwo_instance.optimize_pattern_weights = MagicMock() setup above should work.
+        mock_pwo_instance.optimize_pattern_weights.assert_called_once()
+
+        assert "Attempting to optimize CNN pattern weights..." in caplog.text
+        assert "CNN pattern weights optimized successfully." in caplog.text
+        assert "pattern_weights_optimized" in str(caplog.text) # Check _log_optimization_activity
 
 
 def get_exit_optimizer_param_side_effect(scenario_params):

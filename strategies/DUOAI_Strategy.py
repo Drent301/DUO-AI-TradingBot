@@ -15,6 +15,8 @@ from freqtrade.persistence import Trade
 from typing import Tuple # For type hinting _calculate_macd_pandas
 
 # Importeer je eigen AI-modules
+import os # Added for path operations
+import json # Added for json.dump
 from core.gpt_reflector import GPTReflector
 from core.grok_reflector import GrokReflector
 from core.prompt_builder import PromptBuilder
@@ -79,6 +81,13 @@ class DUOAI_Strategy(IStrategy):
 
 
     def __init__(self, config: Dict[str, Any]) -> None:
+        """
+        Initializes the DUOAI_Strategy.
+        Sets up AI components, loads initial parameters, and defines paths for logging.
+
+        Args:
+            config: The configuration dictionary provided by Freqtrade.
+        """
         super().__init__(config)
 
         # Retrieve pair_whitelist from config and store it
@@ -100,6 +109,15 @@ class DUOAI_Strategy(IStrategy):
 
         # Initialize AIActivationEngine
         self.ai_activation_engine = AIActivationEngine(reflectie_lus_instance=self.reflectie_lus)
+
+        # Define pattern performance log file path and ensure the 'logs' directory exists.
+        # This file is used to log contributing patterns for later performance analysis.
+        self.PATTERN_PERFORMANCE_LOG_FILE = os.path.join(
+            self.config['user_data_dir'], 'logs', 'pattern_performance_log.json'
+        )
+        os.makedirs(os.path.dirname(self.PATTERN_PERFORMANCE_LOG_FILE), exist_ok=True)
+        logger.info(f"Pattern performance log will be saved to: {self.PATTERN_PERFORMANCE_LOG_FILE}")
+
         logger.info(f"DUOAI_Strategy geïnitialiseerd.")
 
     # --- Custom Indicator Calculation Methods (Pandas based) ---
@@ -402,6 +420,18 @@ class DUOAI_Strategy(IStrategy):
                            dataframe: pd.DataFrame, **kwargs) -> Optional[float]:
         """
         AI-gestuurde entry-beslissing.
+        Retrieves an entry decision from the EntryDecider. If an entry is signaled,
+        the patterns contributing to this decision are logged to `pattern_performance_log.json`
+        for later analysis by the PatternPerformanceAnalyzer.
+
+        Args:
+            pair: The trading pair (e.g., "ETH/USDT").
+            current_time: The datetime of the current candle.
+            dataframe: The Freqtrade DataFrame for the current pair and base timeframe.
+            **kwargs: Additional keyword arguments passed by Freqtrade.
+
+        Returns:
+            Optional[float]: 1.0 to signal an entry, or None to decline entry.
         """
         candles_by_timeframe_for_ai = self._get_all_relevant_candles_for_ai(pair)
         if not candles_by_timeframe_for_ai: # Check if dictionary is empty (e.g., base_df was empty)
@@ -434,8 +464,25 @@ class DUOAI_Strategy(IStrategy):
             entry_conviction_threshold=entry_conviction_threshold
         )
 
-        if entry_decision['enter']:
+        if entry_decision.get('enter'):
             logger.info(f"Entry toegestaan voor {pair}. Reden: {entry_decision['reason']}. Confidence: {entry_decision['confidence']:.2f}")
+
+            # Log contributing patterns if entry is signaled
+            contributing_patterns = entry_decision.get('contributing_patterns', [])
+            log_data = {
+                "pair": pair,
+                "entry_timestamp": current_time.isoformat(), # Freqtrade provides current_time as datetime
+                "contributing_patterns": contributing_patterns,
+                "decision_details": entry_decision # Optionally log the full decision for more context
+            }
+            try:
+                # Append the log entry as a new JSON line to the performance log file
+                with open(self.PATTERN_PERFORMANCE_LOG_FILE, 'a', encoding='utf-8') as f:
+                    json.dump(log_data, f)
+                    f.write('\n')
+            except Exception as e:
+                logger.error(f"Fout bij schrijven naar pattern_performance_log.json: {e}")
+
             return 1.0 # Signal Freqtrade to enter
 
         logger.info(f"Entry geweigerd voor {pair}. Reden: {entry_decision['reason']}")
