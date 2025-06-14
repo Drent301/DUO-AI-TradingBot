@@ -1,4 +1,7 @@
 # core/grok_sentiment_fetcher.py
+# This module is dependent on GROK_API_URL for fetching live social data.
+# Grok's 'Live Feat' is expected to provide access to platforms like X (Twitter)
+# and potentially TradingView for sentiment analysis.
 import os
 import json
 import logging
@@ -56,18 +59,25 @@ class GrokSentimentFetcher:
         except IOError as e:
             logger.error(f"Fout bij opslaan cache bestand: {e}")
 
-    async def fetch_live_search_data(self, symbol: str) -> List[Dict[str, Any]]:
+    async def fetch_live_search_data(self, symbol: str, perform_fetch: bool = True) -> List[Dict[str, Any]]:
         """
         Haalt real-time data op via de hypothetische Live Search API.
         Optimaliseert voor de 5 meest recente berichten die direct over de coin gaan.
         Implementeert caching om API-limieten te respecteren.
         """
+        if not perform_fetch:
+            logger.info(f"[GrokSentimentFetcher] Fetch skipped for {symbol} due to perform_fetch=False.")
+            return []
+
         # Controleer cache
         cache = self._load_cache()
         cached_entry = cache.get(symbol)
         if cached_entry:
             if datetime.now() - datetime.fromisoformat(cached_entry['timestamp']) < timedelta(minutes=CACHE_VALID_MINUTES):
                 logger.debug(f"[GrokSentimentFetcher] Cache hit voor: {symbol}")
+                # Ensure what's returned from cache matches the new structure.
+                # If cache stores raw data, it would need reprocessing.
+                # The modification below stores processed_results, so this should be fine.
                 return cached_entry['data']
 
         query = f"{symbol} sentiment OR economic news"
@@ -89,27 +99,47 @@ class GrokSentimentFetcher:
             response.raise_for_status()
             data = response.json()
 
-            relevant_results_py = []
+            processed_results = []
+            # Filter for relevance (symbol in content) first
+            relevant_api_results = []
             for result in data.get('results', []):
-                content = result.get('content', '')
-                if content and symbol.lower() in content.lower(): # Check if symbol is in content
-                    relevant_results_py.append(result)
+                content_check_text = result.get('content', '') # Text to check for symbol presence
+                if symbol.lower() in content_check_text.lower(): # Sticking to original check for now
+                    relevant_api_results.append(result)
 
-            # Sort by timestamp (newest first) and take top 5
-            relevant_results_py.sort(key=lambda x: datetime.fromisoformat(x.get('timestamp', datetime.min.isoformat())), reverse=True)
-            relevant_results_py = relevant_results_py[:5]
+            # Sort by timestamp (newest first)
+            relevant_api_results.sort(key=lambda x: datetime.fromisoformat(x.get('timestamp', datetime.min.isoformat())), reverse=True)
 
+            # Take top 5
+            top_5_results = relevant_api_results[:5]
 
-            logger.debug(f"[GrokSentimentFetcher] Data opgehaald: {relevant_results_py}")
+            # Transform the top 5 results into the desired output structure
+            for item in top_5_results:
+                source = item.get('source', 'Unknown Source')
+                text_content = item.get('content', '')
+                if not text_content: # Fallback to description if content is empty
+                    text_content = item.get('description', 'N/A')
 
-            # Sla op in cache
+                sentiment_value = item.get('sentiment', 'neutral') # Assume API provides this
+
+                processed_results.append({
+                    'source': source,
+                    'text': text_content,
+                    'sentiment': sentiment_value
+                    # Optional: include timestamp if needed downstream, though not explicitly requested for this structure
+                    # 'timestamp': item.get('timestamp')
+                })
+
+            logger.debug(f"[GrokSentimentFetcher] Processed data: {processed_results}")
+
+            # Sla op in cache - cache should store the processed_results
             cache[symbol] = {
-                'data': relevant_results_py,
+                'data': processed_results, # Store the new structure
                 'timestamp': datetime.now().isoformat()
             }
             self._save_cache(cache)
 
-            return relevant_results_py
+            return processed_results
 
         except requests.exceptions.RequestException as e:
             logger.error(f"[GrokSentimentFetcher] ❌ Fout bij aanroep Grok Live Search API: {e}")
@@ -138,18 +168,24 @@ if __name__ == "__main__":
                 os.makedirs(CACHE_DIR)
                 print(f"Created cache directory at {CACHE_DIR} for testing.")
 
-            sentiment_data = await fetcher.fetch_live_search_data(test_symbol)
+            sentiment_data = await fetcher.fetch_live_search_data(test_symbol, perform_fetch=True)
 
             if sentiment_data:
-                print(f"Opgehaalde sentiment data voor {test_symbol} ({len(sentiment_data)} items):")
+                print(f"Opgehaalde sentiment data voor {test_symbol} ({len(sentiment_data)} items) with perform_fetch=True:")
                 for item in sentiment_data:
-                    print(f"- Titel: {item.get('title', 'N/A')}")
-                    print(f"  Bron: {item.get('source', 'N/A')}")
-                    print(f"  Inhoud (eerste 100 chars): {item.get('content', 'N/A')[:100]}...")
-                    print(f"  Tijd: {item.get('timestamp', 'N/A')}")
+                    print(f"- Source: {item.get('source', 'N/A')}")
+                    print(f"  Text (eerste 100 chars): {item.get('text', 'N/A')[:100]}...")
+                    print(f"  Sentiment: {item.get('sentiment', 'N/A')}")
                     print("-" * 20)
             else:
-                print(f"Geen sentiment data opgehaald voor {test_symbol}.")
+                print(f"Geen sentiment data opgehaald voor {test_symbol} with perform_fetch=True.")
+
+            print(f"\n--- Test GrokSentimentFetcher voor {test_symbol} with perform_fetch=False ---")
+            sentiment_data_conditional_skip = await fetcher.fetch_live_search_data(test_symbol, perform_fetch=False)
+            if not sentiment_data_conditional_skip:
+                print(f"Data fetching skipped as expected for {test_symbol} when perform_fetch=False. Result: {sentiment_data_conditional_skip}")
+            else:
+                print(f"ERROR: Data was fetched for {test_symbol} even when perform_fetch=False. Result: {sentiment_data_conditional_skip}")
 
             # Cleanup dummy cache file if created by test
             # if os.path.exists(CACHE_FILE):
