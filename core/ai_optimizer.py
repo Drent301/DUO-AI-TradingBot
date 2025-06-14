@@ -16,6 +16,7 @@ try:
     from core.strategy_manager import StrategyManager
     # These functions are assumed to be in reflectie_analyser.py
     from core.reflectie_analyser import analyse_reflecties, generate_mutation_proposal, analyze_timeframe_bias
+    from core.market_data_provider import get_recent_market_data # Added import
 except ImportError as e:
     logging.warning(f"AIOptimizer: Error importing dependency: {e}. Some features may not work.")
     # Define placeholders if imports fail, to allow basic structure testing
@@ -49,13 +50,14 @@ class AIOptimizer:
     Orchestrates AI-driven optimization cycles, including pre-training,
     strategy performance analysis, reflection, and mutation.
     """
-    def __init__(self):
-        if PreTrainer is None or StrategyManager is None:
-            logger.error("AIOptimizer could not be initialized due to missing PreTrainer or StrategyManager.")
-            raise ImportError("PreTrainer or StrategyManager not available.")
+    def __init__(self, pre_trainer: PreTrainer, strategy_manager: StrategyManager):
+        if pre_trainer is None or strategy_manager is None:
+            logger.error("AIOptimizer could not be initialized: PreTrainer or StrategyManager is None.")
+            # Or raise ValueError, as PreTrainer/StrategyManager types are expected from type hints
+            raise ValueError("PreTrainer and StrategyManager instances are required for AIOptimizer.")
 
-        self.pre_trainer = PreTrainer()
-        self.strategy_manager = StrategyManager() # Assumes StrategyManager initializes its own ParamsManager
+        self.pre_trainer = pre_trainer
+        self.strategy_manager = strategy_manager
         logger.info("AIOptimizer initialized.")
 
     def _log_optimization_activity(self, activity_type: str, details: Dict[str, Any]):
@@ -179,7 +181,30 @@ class AIOptimizer:
                     # "mutation_rationale": (fetch likewise)
                 }
 
+                # 4.5 Fetch recent market data for context (NEW STEP)
+                logger.info(f"Fetching recent market data for {symbol} - {timeframe} for optimization context...")
+                market_data_df = await get_recent_market_data(
+                    symbol=symbol,
+                    timeframe=timeframe,
+                    exchange="binance", # Assuming default exchange, make configurable if needed
+                    days_to_load=90,    # Assuming default days, make configurable if needed
+                    download_if_missing=True # Allow download
+                )
+
+                if market_data_df is None:
+                    logger.warning(f"Could not fetch market data for {symbol} - {timeframe}. Proceeding without it for mutation proposal.")
+                    # Decide if this is critical. For now, we'll allow generate_mutation_proposal to receive None.
+                else:
+                    logger.info(f"Successfully fetched market data for {symbol} - {timeframe}. Shape: {market_data_df.shape}")
+
+                self._log_optimization_activity("market_data_fetched", {
+                    "strategy_id": strategy_id, "symbol": symbol, "timeframe": timeframe,
+                    "data_fetched": market_data_df is not None,
+                    "shape": market_data_df.shape if market_data_df is not None else None
+                })
+
                 # 5. Generate mutation proposal
+                # Note: generate_mutation_proposal will need to be updated to accept market_data_df
                 mutation_proposal = generate_mutation_proposal(
                     insights=reflection_insights,
                     current_performance=current_strategy_performance,
@@ -187,7 +212,8 @@ class AIOptimizer:
                     symbol=symbol,
                     timeframe=timeframe,
                     timeframe_bias=timeframe_bias_score,
-                    strategy_id=strategy_id
+                    strategy_id=strategy_id,
+                    market_data_df=market_data_df # Pass market data
                 )
 
                 if mutation_proposal:

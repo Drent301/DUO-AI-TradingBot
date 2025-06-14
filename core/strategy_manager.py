@@ -4,6 +4,7 @@ import logging
 import os
 from typing import Dict, Any, List, Optional
 import asyncio
+import aiohttp # Added for Freqtrade API notification
 from datetime import datetime
 import dotenv # Added for __main__
 import sqlite3 # Added
@@ -158,6 +159,7 @@ class StrategyManager:
             # potentially in a separate log or DB table, or also managed by ParamsManager.
             # For now, just log success.
             logger.info(f"Strategy {strategy_id} successfully mutated based on proposal.")
+            await self._notify_freqtrade_of_parameter_changes(strategy_id) # Notify Freqtrade
             return True
         else:
             logger.info(f"No actionable changes in proposal for strategy {strategy_id}. Mutation not performed.")
@@ -202,6 +204,59 @@ class StrategyManager:
             "bias": bias,
             "parameters": strategy_params # From ParamsManager
         }
+
+    async def _notify_freqtrade_of_parameter_changes(self, strategy_id: str):
+        """
+        Notifies Freqtrade of parameter changes by calling its API.
+        Users should verify the specific Freqtrade API endpoint and payload requirements.
+        A common endpoint for reloading configuration is /api/v1/reloadconfig.
+        If a more granular update (e.g., for a specific strategy's parameters without a full reload)
+        is available in your Freqtrade version, that would be preferable.
+        """
+        logger.info(f"Attempting to notify Freqtrade of parameter changes for strategy: {strategy_id}")
+
+        freqtrade_url = os.getenv("FREQTRADE_API_URL", "http://localhost:8080") # Default if not set
+        freqtrade_token = os.getenv("FREQTRADE_API_TOKEN", None) # Optional token
+
+        # Example endpoint: /api/v1/reloadconfig reloads the entire configuration.
+        # Freqtrade might offer more specific endpoints to update parts of a strategy or live parameters.
+        # Consult your Freqtrade API documentation.
+        reload_endpoint = "/api/v1/reloadconfig"
+        # reload_endpoint = f"/api/v1/strategy/{strategy_id}/reload" # Hypothetical more specific endpoint
+
+        if not freqtrade_url:
+            logger.warning("FREQTRADE_API_URL is not set. Cannot notify Freqtrade of parameter changes.")
+            return
+
+        headers = {"Content-Type": "application/json"}
+        if freqtrade_token:
+            headers["Authorization"] = f"Bearer {freqtrade_token}"
+
+        # For /reloadconfig, the payload is often empty or a simple directive.
+        # For more specific strategy updates, the payload might need to contain the new parameters.
+        payload = {}
+        # Example for a hypothetical specific update:
+        # payload = {"strategy_id": strategy_id, "action": "refresh_parameters"}
+
+        api_full_url = f"{freqtrade_url.rstrip('/')}{reload_endpoint}"
+
+        logger.info(f"Calling Freqtrade API: POST {api_full_url} for strategy {strategy_id}")
+
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.post(api_full_url, json=payload, headers=headers) as response:
+                    response_text = await response.text()
+                    if response.status == 200:
+                        logger.info(f"Freqtrade API call successful for {strategy_id}. Status: {response.status}, Response: {response_text}")
+                    else:
+                        logger.error(f"Freqtrade API call failed for {strategy_id}. Status: {response.status}, Response: {response_text}")
+        except aiohttp.ClientConnectorError as e: # More specific connection error
+            logger.error(f"Error connecting to Freqtrade API at {freqtrade_url} for {strategy_id}: {e}")
+        except aiohttp.ClientError as e: # Catch other aiohttp client errors
+            logger.error(f"AIOHTTP client error during Freqtrade API call for {strategy_id}: {e}")
+        except Exception as e:
+            logger.error(f"Unexpected error during Freqtrade API call for {strategy_id}: {e}", exc_info=True)
+
 
 # Voorbeeld van hoe je het zou kunnen gebruiken (voor testen)
 if __name__ == "__main__":
