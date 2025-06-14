@@ -10,7 +10,7 @@ import pandas_ta as ta # Added for pandas_ta
 import numpy as np
 import asyncio
 from core.bitvavo_executor import BitvavoExecutor
-from core.backtester import Backtester
+# from core.backtester import Backtester # Removed as Backtester is deprecated
 from core.params_manager import ParamsManager # Moved to top
 from core.cnn_patterns import CNNPatterns # Moved to top
 
@@ -103,12 +103,7 @@ class PreTrainer:
         # Initialize Backtester - this might need adjustment based on what PreTrainer's role becomes.
         # If PreTrainer is purely for model training, backtesting might be separate.
         # For now, keeping it to see if it causes issues with the new __init__.
-        # self.backtester = Backtester(
-        #     params_manager=self.params_manager,
-        #     cnn_pattern_detector=self.cnn_pattern_detector, # This would require cnn_pattern_detector to be initialized
-        #     bitvavo_executor=self.bitvavo_executor
-        # )
-        # logger.info("Backtester (potentially) initialized in PreTrainer.")
+        # self.backtester related code removed as the class is deprecated.
 
     def _get_dataframe_with_strategy_indicators(self, ohlcv_df: pd.DataFrame, pair: str, timeframe: str) -> pd.DataFrame:
         """
@@ -312,58 +307,98 @@ class PreTrainer:
             return None
 
     def _fetch_ohlcv_for_period_sync(self, symbol: str, timeframe: str, start_dt: dt, end_dt: dt) -> pd.DataFrame | None:
-        # ... (as before, with caching) ...
-        # Caching calls (_get_cache_filepath, _read_from_cache) were removed in previous step.
-        # This method will be further refactored in 1.2.4 to use DataProvider.
-        # For now, the internal logic still contains `await` which will be a syntax error
-        # until step 1.2.4 is completed. This step (1.2.3) only renames and makes synchronous.
-        cache_filepath = None # Placeholder, original line removed
-        cached_df = None      # Placeholder, original line removed
-        if cached_df is not None:
-            cached_df['date'] = pd.to_datetime(cached_df['timestamp'], unit='ms')
-            cached_df.set_index('date', inplace=True)
-            for col in ['open', 'high', 'low', 'close', 'volume']:
-                if col in cached_df.columns:
-                     cached_df[col] = pd.to_numeric(cached_df[col], errors='coerce')
-            if 'timestamp' in cached_df.columns:
-                 cached_df.drop(columns=['timestamp'], inplace=True)
-            return cached_df
-        if not self.bitvavo_executor:
-            logger.error("BitvavoExecutor ikke initialisert, kan ikke hente live data.")
+        """
+        Fetches OHLCV data for a given period from Freqtrade's local data storage.
+        Relies on `freqtrade download-data` having been run previously.
+        """
+        logger.info(f"PreTrainer: Attempting to load local Freqtrade data for {symbol} ({timeframe}) from {start_dt} to {end_dt}")
+
+        try:
+            # These configurations should ideally come from self.config or be passed reliably
+            exchange_name = self.config.get("exchange", {}).get("name", "binance") # Default to 'binance' or a configured main exchange
+            user_data_dir = self.config.get("user_data_dir", "user_data")
+
+            # Construct the datadir path Freqtrade uses
+            datadir = os.path.join(user_data_dir, "data", exchange_name)
+
+            if not os.path.isdir(datadir):
+                 logger.warning(f"PreTrainer: Freqtrade data directory not found: {datadir}. "
+                               f"Please ensure data is downloaded via 'freqtrade download-data --exchange {exchange_name}'.")
+                 # Depending on strictness, could return None here or let DataProvider try.
+                 # DataProvider might also log warnings if dir is missing.
+
+            # Minimal config for DataProvider
+            # Note: DataProvider might not strictly need "timeframe" in its config for historic_ohlcv
+            # if it's passed to the method, but good to be consistent.
+            dp_config_dict = {
+                "user_data_dir": user_data_dir, # For resolving datadir if not absolute
+                "exchange": {
+                    "name": exchange_name,
+                    "pair_whitelist": [symbol] # Needs the pair to fetch
+                },
+                "datadir": datadir, # Explicitly pass datadir
+                # "timeframe": timeframe # Optional here, as passed to historic_ohlcv
+            }
+            ft_dp_config = Configuration.from_dict(dp_config_dict)
+
+            dataprovider = DataProvider(config=ft_dp_config, exchange=None) # exchange=None for offline data access
+
+            # Create TimeRange object
+            # TimeRange expects timestamps in seconds
+            timerange = TimeRange("date", "date", int(start_dt.timestamp()), int(end_dt.timestamp()))
+
+            dataframe = dataprovider.historic_ohlcv(
+                pair=symbol,
+                timeframe=timeframe,
+                timerange=timerange
+            )
+
+            if dataframe is None or dataframe.empty:
+                logger.warning(f"PreTrainer: No local Freqtrade data found for {symbol} ({timeframe}) in range {start_dt}-{end_dt} using datadir {datadir}. "
+                               f"Ensure data is downloaded: 'freqtrade download-data --exchange {exchange_name} --pairs {symbol} --timeframes {timeframe} --timerange {start_dt.strftime('%Y%m%d')}-{end_dt.strftime('%Y%m%d')}'")
+                return None
+
+            # Ensure DataFrame has DatetimeIndex and is UTC localized
+            # DataProvider.historic_ohlcv should already return a dataframe with a DatetimeIndex.
+            # It typically localizes to UTC if 'date' column was timezone-naive.
+            if not isinstance(dataframe.index, pd.DatetimeIndex):
+                 logger.warning(f"PreTrainer: DataProvider data for {symbol} {timeframe} does not have DatetimeIndex. Attempting conversion.")
+                 # This case should be rare if DataProvider works as expected.
+                 # If 'date' is a column:
+                 if 'date' in dataframe.columns:
+                     dataframe['date'] = pd.to_datetime(dataframe['date'], errors='coerce', utc=True)
+                     dataframe.set_index('date', inplace=True)
+                 # If index is numeric (e.g. timestamp ms from a CSV read elsewhere, though DP handles this)
+                 elif pd.api.types.is_numeric_dtype(dataframe.index):
+                     dataframe.index = pd.to_datetime(dataframe.index, unit='ms', utc=True)
+                     dataframe.index.name = 'date'
+                 else: # Try direct conversion of index
+                     try:
+                        dataframe.index = pd.to_datetime(dataframe.index, errors='coerce', utc=True)
+                        dataframe.index.name = 'date'
+                     except Exception:
+                        logger.error(f"PreTrainer: Could not convert index to DatetimeIndex for {symbol} {timeframe}. Index type: {type(dataframe.index)}")
+                        return None # Cannot proceed without a proper DatetimeIndex
+
+            # Ensure UTC localization (DataProvider usually handles this)
+            if dataframe.index.tzinfo is None:
+                logger.debug(f"PreTrainer: Localizing index to UTC for {symbol} {timeframe}.")
+                dataframe.index = dataframe.index.tz_localize('UTC')
+            elif dataframe.index.tzinfo != timezone.utc: # Check if it's already UTC
+                logger.debug(f"PreTrainer: Converting index to UTC for {symbol} {timeframe}.")
+                dataframe.index = dataframe.index.tz_convert('UTC')
+
+            # Standardize column names to lowercase (open, high, low, close, volume)
+            rename_map_fetch = {col: col.lower() for col in dataframe.columns if col.lower() in ['open', 'high', 'low', 'close', 'volume'] and col != col.lower()}
+            if rename_map_fetch:
+                dataframe.rename(columns=rename_map_fetch, inplace=True)
+
+            logger.info(f"PreTrainer: Successfully loaded {len(dataframe)} candles from local Freqtrade data for {symbol} ({timeframe}).")
+            return dataframe
+
+        except Exception as e:
+            logger.error(f"PreTrainer: Error loading local Freqtrade data for {symbol} ({timeframe}): {e}", exc_info=True)
             return None
-        since_timestamp = int(start_dt.timestamp() * 1000)
-        target_end_timestamp = int(end_dt.timestamp() * 1000)
-        limit_per_call = 500; all_ohlcv_list = []
-        logger.info(f"Cache miss. Henter live data for {symbol} ({timeframe}) fra {start_dt.strftime('%Y-%m-%d')} til {end_dt.strftime('%Y-%m-%d')}")
-        current_fetch_since_ts = since_timestamp
-        while current_fetch_since_ts <= target_end_timestamp:
-            try:
-                chunk = await self.bitvavo_executor.fetch_ohlcv(symbol=symbol, timeframe=timeframe, since=current_fetch_since_ts, limit=limit_per_call)
-                if not chunk: break
-                last_valid_ts_in_chunk = -1
-                for candle_data in chunk:
-                    candle_ts = candle_data[0]
-                    if candle_ts >= current_fetch_since_ts and candle_ts <= target_end_timestamp:
-                        all_ohlcv_list.append(candle_data); last_valid_ts_in_chunk = candle_ts
-                    elif candle_ts > target_end_timestamp: break
-                if not chunk or last_valid_ts_in_chunk == -1:
-                    last_candle_overall_ts = chunk[-1][0] if chunk else current_fetch_since_ts
-                    if last_candle_overall_ts > target_end_timestamp: break
-                    if chunk: current_fetch_since_ts = chunk[-1][0] + 1
-                    else: break
-                elif last_valid_ts_in_chunk >= target_end_timestamp: break
-                else: current_fetch_since_ts = last_valid_ts_in_chunk + 1
-                await asyncio.sleep(0.2)
-            except Exception as e: logger.error(f"Fout under henting av live data chunk for {symbol} ({timeframe}) periode {start_dt}-{end_dt}: {e}"); return None
-        if not all_ohlcv_list: logger.warning(f"Ingen OHLCV data hentet live for {symbol} ({timeframe}) for perioden {start_dt}-{end_dt}."); return None
-        raw_df_for_caching = pd.DataFrame(all_ohlcv_list, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
-        raw_df_for_caching['timestamp'] = raw_df_for_caching['timestamp'].astype('int64')
-        for col in ['open', 'high', 'low', 'close', 'volume']: raw_df_for_caching[col] = pd.to_numeric(raw_df_for_caching[col], errors='coerce')
-        self._write_to_cache(cache_filepath, raw_df_for_caching)
-        return_df = raw_df_for_caching.copy(); return_df['date'] = pd.to_datetime(return_df['timestamp'], unit='ms')
-        return_df.set_index('date', inplace=True)
-        if 'timestamp' in return_df.columns: return_df.drop(columns=['timestamp'], inplace=True)
-        return return_df
 
     async def fetch_historical_data(self, symbol: str, timeframe: str) -> Dict[str, pd.DataFrame]:
         if not self.bitvavo_executor:
@@ -393,7 +428,7 @@ class PreTrainer:
                             logger.warning(f"Ongeldige periode in regimes voor {symbol} {regime_category}: start {period['start_date']} is na end {period['end_date']}. Overslaan.")
                             continue
 
-                        period_df = await self._fetch_ohlcv_for_period(symbol, timeframe, regime_start_dt, regime_end_dt)
+                        period_df = await asyncio.to_thread(self._fetch_ohlcv_for_period_sync, symbol, timeframe, regime_start_dt, regime_end_dt)
                         if period_df is not None and not period_df.empty:
                             regime_specific_period_dfs.append(period_df)
                             all_ohlcv_data_dfs_for_concatenation.append(period_df) # Also add to general list for "all" data
@@ -431,7 +466,7 @@ class PreTrainer:
                     logger.error(f"Global startdatum {global_start_date_str} is na sluttdato {global_end_date_str}.")
                     return {"all": pd.DataFrame()}
 
-                global_df = await self._fetch_ohlcv_for_period(symbol, timeframe, start_dt_global, end_dt_global)
+                global_df = await asyncio.to_thread(self._fetch_ohlcv_for_period_sync, symbol, timeframe, start_dt_global, end_dt_global)
                 if global_df is not None and not global_df.empty:
                     all_ohlcv_data_dfs_for_concatenation.append(global_df)
                     fetched_any_data = True
@@ -1157,45 +1192,12 @@ class PreTrainer:
 
         logger.info(f"--- Pre-training en model training voltooid voor strategie {strategy_id} voor alle geconfigureerde patronen/paren/tijdsbestekken/regimes ---")
 
-        # --- Start Backtesting Phase ---
-        perform_backtesting = self.params_manager.get_param('perform_backtesting', False)
-        if perform_backtesting and self.backtester:
-            logger.info(f"--- Starten Backtesting Fase voor strategie: {strategy_id} ---")
-            if len(regimes_to_train_for) > 1 or "all" not in regimes_to_train_for:
-                 logger.warning("Meerdere regimes zijn getraind. Backtesting gebruikt momenteel modellen die getraind zijn op 'all' data (of de standaard modelnaam zonder regime suffix, of met _hpo_all).")
+        # --- Backtesting Phase Removed ---
+        # The custom backtester functionality has been deprecated and core/backtester.py removed.
+        # Project will rely on Freqtrade's built-in backtesting.
+        logger.info(f"Custom backtesting phase skipped as it has been deprecated.")
 
-            sequence_length_cnn = self.params_manager.get_param('sequence_length_cnn', 30)
-            # Determine architecture key for backtesting. If HPO was run for 'all' regime, it might have a specific name.
-            # This assumes HPO for "all" regime would result in parameters used by current_cnn_architecture_key or a suffixed version.
-            current_arch_key_for_bt = self.params_manager.get_param('current_cnn_architecture_key', "default_simple")
-            # If HPO was generally performed (e.g. for the 'all' regime), backtester should try to load the HPO version of the 'all' model.
-            # The backtester's model loading logic might need to be aware of the _hpo_all suffix.
-            # For now, we pass the base architecture key, and if an HPO'd 'all' model exists with a conventional name, backtester should find it.
-
-            for pattern_type_bt in patterns_to_train_list:
-                logger.info(f"--- Backtesting voor patroontype: {pattern_type_bt} ---")
-                for pair_bt in pairs_to_fetch:
-                    for timeframe_bt in timeframes_to_fetch:
-                        # The architecture_key passed to backtester should ideally point to the model trained on "all" data,
-                        # potentially an HPO version if HPO was run for the "all" regime.
-                        # The backtester would need logic to find e.g. {arch_key}_hpo_all.pth then {arch_key}_all.pth.
-                        # For this subtask, we'll pass the base arch key and assume "all" regime.
-                        logger.info(f"--- Backtesten {pair_bt} ({timeframe_bt}) voor patroon: {pattern_type_bt}, architectuur: {current_arch_key_for_bt} (veronderstelt 'all' regime model) ---")
-                        await self.backtester.run_backtest(
-                            symbol=pair_bt,
-                            timeframe=timeframe_bt,
-                            pattern_type=pattern_type_bt,
-                            architecture_key=current_arch_key_for_bt,
-                            sequence_length=sequence_length_cnn,
-                            regime_filter="all" # Explicitly pass "all" to ensure backtester loads the correct model if it's regime-aware
-                        )
-            logger.info(f"--- Backtesting Fase voltooid voor strategie {strategy_id} (gebruikmakend van 'all' data modellen) ---")
-        elif not self.backtester:
-            logger.warning("Backtester object is niet geïnitialiseerd. Backtesting overgeslagen.")
-        else:
-            logger.info("Perform_backtesting is False in parameters. Backtesting overgeslagen.")
-
-        logger.info(f"Pre-training en backtesting pipeline voltooid voor strategie {strategy_id} for alle konfigurerte patterns.")
+        logger.info(f"Pre-training pipeline voltooid voor strategie {strategy_id} for alle konfigurerte patterns.")
 
 if __name__ == "__main__":
     import sys # Ensure sys is imported for logging handler
