@@ -32,6 +32,9 @@ from core.interval_selector import IntervalSelector
 from core.params_manager import ParamsManager
 from core.cooldown_tracker import CooldownTracker # Ensure this is present
 
+# Import custom indicators
+from user_data.strategies.indicators.custom_indicators import calculate_rsi_pandas, calculate_macd_pandas
+
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
 
@@ -120,36 +123,6 @@ class DUOAI_Strategy(IStrategy):
 
         logger.info(f"DUOAI_Strategy geïnitialiseerd.")
 
-    # --- Custom Indicator Calculation Methods (Pandas based) ---
-    def _calculate_rsi_pandas(self, series: pd.Series, period: int = 14) -> pd.Series:
-        """Calculate RSI using Pandas."""
-        delta = series.diff()
-        gain = delta.where(delta > 0, 0).fillna(0)
-        loss = -delta.where(delta < 0, 0).fillna(0)
-
-        avg_gain = gain.ewm(alpha=1/period, adjust=False, min_periods=period).mean()
-        avg_loss = loss.ewm(alpha=1/period, adjust=False, min_periods=period).mean()
-
-        rs = avg_gain / avg_loss
-        rsi = 100.0 - (100.0 / (1.0 + rs))
-
-        # Replace inf values with 100 (where avg_loss is 0)
-        rsi = rsi.replace([float('inf'), -float('inf')], 100.0)
-        # Fill initial NaNs with 50 (neutral)
-        rsi = rsi.fillna(50.0)
-        return rsi
-
-    def _calculate_macd_pandas(self, series: pd.Series, fast_p: int = 12, slow_p: int = 26, signal_p: int = 9) -> Tuple[pd.Series, pd.Series, pd.Series]:
-        """Calculate MACD, Signal, and Histogram using Pandas."""
-        ema_fast = series.ewm(span=fast_p, adjust=False, min_periods=fast_p).mean()
-        ema_slow = series.ewm(span=slow_p, adjust=False, min_periods=slow_p).mean()
-
-        macd_line = ema_fast - ema_slow
-        signal_line = macd_line.ewm(span=signal_p, adjust=False, min_periods=signal_p).mean()
-        macd_hist = macd_line - signal_line
-
-        return macd_line, signal_line, macd_hist
-
     def _get_all_relevant_candles_for_ai(self, pair: str) -> Dict[str, pd.DataFrame]:
         """
         Haalt alle relevante candles (basistimeframe + informatives) op voor AI-modules.
@@ -215,9 +188,9 @@ class DUOAI_Strategy(IStrategy):
         self._load_and_apply_learned_parameters(metadata['pair']) # Load latest params
 
         # --- Calculate Base Timeframe Indicators (Pandas / qtpylib) ---
-        dataframe['rsi'] = self._calculate_rsi_pandas(dataframe['close'], period=14)
+        dataframe['rsi'] = calculate_rsi_pandas(dataframe['close'], period=14) # MODIFIED
 
-        macd_line, signal_line, macd_hist = self._calculate_macd_pandas(dataframe['close'])
+        macd_line, signal_line, macd_hist = calculate_macd_pandas(dataframe['close']) # MODIFIED
         dataframe['macd'] = macd_line
         dataframe['macdsignal'] = signal_line
         dataframe['macdhist'] = macd_hist
@@ -307,10 +280,10 @@ class DUOAI_Strategy(IStrategy):
             logger.debug(f"Calculating indicators for informative timeframe {info_tf} using Pandas/qtpylib.")
 
             # RSI for informative timeframe
-            dataframe[f'{prefix}_rsi'] = self._calculate_rsi_pandas(dataframe[f'{prefix}_close'], period=14)
+            dataframe[f'{prefix}_rsi'] = calculate_rsi_pandas(dataframe[f'{prefix}_close'], period=14) # MODIFIED
 
             # MACD for informative timeframe
-            inf_macd_line, inf_signal_line, inf_macd_hist = self._calculate_macd_pandas(dataframe[f'{prefix}_close'])
+            inf_macd_line, inf_signal_line, inf_macd_hist = calculate_macd_pandas(dataframe[f'{prefix}_close']) # MODIFIED
             dataframe[f'{prefix}_macd'] = inf_macd_line
             dataframe[f'{prefix}_macdsignal'] = inf_signal_line
             dataframe[f'{prefix}_macdhist'] = inf_macd_hist
