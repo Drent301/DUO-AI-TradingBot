@@ -9,7 +9,7 @@ Een zelflerende, AI-gestuurde crypto trading bot, gebouwd bovenop Freqtrade, die
 -   `/data/`: Voor trainingsdata en cachebestanden (bijv. Grok Live Search cache). Bevat nu ook `/data/models/` voor getrainde CNN-modellen.
 -   `/memory/`: Opslag voor de geleerde parameters van de AI-modules (bias, confidence, strategie-parameters, reflectielogs).
 -   `/notebooks/`: Bestemd voor AI-modelontwikkeling, training, prompt-experimenten en diepere data-analyse.
--   `/tests/`: Voor unit tests en integratietests (nog op te zetten).
+-   `/tests/`: Voor unit tests en integratietests (nu met uitgebreide Pytest tests).
 -   `/config/`: Bevat de Freqtrade configuratie (`config.json`).
 -   `main.py`: Het hoofdentriepunt voor de AI-coördinatie.
 -   `requirements.txt`: Specificeert alle benodigde Python-pakketten.
@@ -126,11 +126,21 @@ De bot is opgebouwd uit de volgende kern-AI-modules in de `/core/` map:
 -   `params_manager.py`: Centrale manager voor alle dynamisch lerende variabelen.
 -   `trade_logger.py`: De actieve functionaliteit van deze module is **verwijderd** ten gunste van Freqtrade's databank. Alle AI-analyses en modeltraining baseren zich nu **exclusief op Freqtrade's interne database** voor trade-historie en -data. Het bestand `trade_logger.py` zelf kan nog aanwezig zijn voor historische referentie of specifieke handmatige exporttaken, maar het speelt geen rol meer in de geautomatiseerde AI-workflow.
 
+## Learnable Dynamische Patroongewichten (Learnable Dynamic Pattern Weights)
+
+Een belangrijke recente ontwikkeling is de implementatie van een systeem voor het dynamisch leren en aanpassen van de gewichten van verschillende CNN-patronen (bv. `cnn_bullFlag_weight`, `cnn_bearishEngulfing_weight`). Dit stelt de bot in staat om adaptief meer belang te hechten aan patronen die historisch succesvoller zijn gebleken.
+
+-   **Patroonbijdrage Logging:** `EntryDecider` identificeert en `DUOAI_Strategy` logt nu welke specifieke patronen (zowel CNN als regelgebaseerd) hebben bijgedragen aan een entry-beslissing. Deze gegevens worden opgeslagen in `user_data/logs/pattern_performance_log.json`.
+-   **Prestatieanalyse:** De nieuwe `PatternPerformanceAnalyzer` module (`core/pattern_performance_analyzer.py`) analyseert deze logs in combinatie met gesloten trades uit de Freqtrade database. Het berekent succescriteria zoals winstpercentage en gemiddelde winst voor elk uniek patroon.
+-   **Gewichtsoptimalisatie:** De `PatternWeightOptimizer` module (`core/pattern_weight_optimizer.py`) gebruikt deze prestatiemetrieken om de individuele gewichten van CNN-patronen aan te passen. Gewichten van succesvolle patronen worden verhoogd, terwijl die van minder succesvolle patronen worden verlaagd (binnen configureerbare minimum- en maximumgrenzen).
+-   **Continue Integratie:** Dit leerproces is geïntegreerd in de periodieke cyclus van de `AIOptimizer`, wat zorgt voor continue adaptatie en optimalisatie van de patroongewichten.
+-   **Configuratie:** Alle relevante parameters voor dit systeem (zoals minimum/maximum gewicht, leersnelheid, prestatiedrempels) zijn configureerbaar via `params.json`.
+
 ## Belangrijke Operationele Aspecten en Huidige Status
 Deze sectie belicht enkele belangrijke punten met betrekking tot de huidige werking, de status van bepaalde functionaliteiten en eventuele beperkingen of aandachtspunten.
 
 ### CNN Modellen: Functionaliteit en Doorlopende Ontwikkeling
-De `cnn_patterns.py` module kan, zoals eerder genoemd, zowel regelgebaseerde als Deep Learning CNN-voorspellingen uitvoeren. Hoewel `pre_trainer.py` een basis CNN kan trainen en `cnn_patterns.py` modellen kan laden, is de **volledige pijplijn van modelontwikkeling, uitgebreide training, validatie en optimalisatie essentieel** en een voortdurende taak. De huidige CNN-integratie is een fundament; de daadwerkelijke voorspellende kracht hangt af van robuust getrainde modellen. De `cnn_patterns.py` retourneert numerieke scores, maar de actieve toepassing van `cnnPatternWeight` als een leerbare multiplier in `entry_decider.py` en `exit_optimizer.py` om de CNN-voorspellingen te wegen, is een toekomstige verbetering.
+De `cnn_patterns.py` module kan, zoals eerder genoemd, zowel regelgebaseerde als Deep Learning CNN-voorspellingen uitvoeren. Hoewel `pre_trainer.py` een basis CNN kan trainen en `cnn_patterns.py` modellen kan laden, is de **volledige pijplijn van modelontwikkeling, uitgebreide training, validatie en optimalisatie essentieel** en een voortdurende taak. De huidige CNN-integratie is een fundament; de daadwerkelijke voorspellende kracht hangt af van robuust getrainde modellen. De `cnn_patterns.py` retourneert numerieke scores. EntryDecider past nu **dynamisch geleerde, individuele gewichten** toe op de scores van verschillende CNN-patronen (bv. cnn_bullFlag_weight, cnn_bearishEngulfing_weight) om hun invloed op entry-beslissingen te bepalen. Deze gewichten worden continu bijgesteld door de PatternWeightOptimizer.
 
 ### Dynamische Configuratie, AI-Advies en Runtime Aanpassingen
 De AI-modules binnen dit project kunnen adviezen genereren voor diverse strategieparameters. Sommige hiervan worden intern door de AI gebruikt (bijvoorbeeld via aparte AI-specifieke filters of logica zoals `cooldown_tracker.py`). Echter, voor Freqtrade's kernconfiguratie (`config/config.json`) geldt:
@@ -146,12 +156,14 @@ De AI-modules binnen dit project kunnen adviezen genereren voor diverse strategi
 ### Data Logging en Analyse
 Voor alle AI-gestuurde analyses, prestatie-evaluaties en het trainen van modellen wordt nu **exclusief gebruik gemaakt van Freqtrade's interne database**. Dit waarborgt een consistente en betrouwbare databron.
 
-### Teststructuur en Kwaliteitsborging (Ontbrekende Formele Tests)
-Momenteel bevat het project basale testmogelijkheden via `if __name__ == "__main__":` blokken in de modules. Echter, een **formele, geautomatiseerde testsuite (bijvoorbeeld met `pytest`) ontbreekt nog en is cruciaal** voor de robuustheid en betrouwbaarheid van de bot. De ontwikkeling hiervan staat hoog op de prioriteitenlijst. De `/tests/` map is gereserveerd voor de implementatie van deze tests.
+### Teststructuur en Kwaliteitsborging
+Het project bevat nu een **uitgebreide, formele pytest testsuite** in de /tests/ map, die kernmodules zoals ParamsManager, EntryDecider, PatternPerformanceAnalyzer, PatternWeightOptimizer en hun interacties dekt. Hoewel de dekking significant is verbeterd, blijft continue uitbreiding en onderhoud van de testsuite een prioriteit om de robuustheid en betrouwbaarheid van de bot te waarborgen.
 
 ## Toekomstige Ontwikkeling
--   Verdere verfijning en training van CNN-modellen voor specifieke patronen.
--   Implementatie van `cnnPatternWeight` voor het wegen van CNN-voorspellingen in de besluitvormingslogica.
--   Ontwikkeling van de formele `pytest` testsuite voor uitgebreide kwaliteitsborging.
--   Onderzoek naar geavanceerdere methoden voor dynamisch pairlist management binnen Freqtrade.
--   Uitbreiding van monitoring en visualisatie (bijvoorbeeld via een AI-gestuurde GUI).
+
+-   **Continue Verfijning van CNN Modellen:** Voortdurende training, validatie en optimalisatie van CNN-modellen voor diverse marktpatronen, inclusief het verkennen van nieuwe architecturen en feature sets.
+-   **Uitbreiding van Leerbare Parameters:** Onderzoeken welke andere strategische parameters (naast CNN patroongewichten) dynamisch geleerd kunnen worden op basis van prestaties.
+-   **Geavanceerd Dynamisch Pairlist Management:** Verder onderzoek naar en implementatie van meer geavanceerde, AI-gestuurde methoden voor het dynamisch selecteren en beheren van de Freqtrade `pair_whitelist`.
+-   **Continue Verbetering Testsuite:** Voortdurende uitbreiding en onderhoud van de `pytest` testsuite om maximale codekwaliteit en betrouwbaarheid te garanderen.
+-   **Uitgebreide Monitoring en Visualisatie:** Ontwikkeling van geavanceerdere tools voor monitoring van botprestaties en datavisualisatie, mogelijk via een AI-ondersteunde GUI.
+-   **Integratie van Backtesting Resultaten in Leerprocessen:** Formeel integreren van Freqtrade's backtesting resultaten in de leerlus van de `AIOptimizer` en `PatternWeightOptimizer` voor snellere iteratie en parameteroptimalisatie.
