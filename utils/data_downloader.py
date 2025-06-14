@@ -1,3 +1,25 @@
+# utils/data_downloader.py
+"""
+This script is used to download historical market data using Freqtrade.
+
+When executed directly (e.g., `python utils/data_downloader.py` from the project root),
+it will:
+1. Load configuration from `config/config.json` (exchange name and pair whitelist).
+2. Download 5 years of historical data (configurable by DAYS_TO_DOWNLOAD in the script).
+3. Fetch data for the following timeframes: 1m, 5m, 15m, 1h, 4h, 1d (configurable by TARGET_TIMEFRAMES).
+4. Store the data in the `user_data/data/<exchange_name>` directory.
+
+Prerequisites:
+- Freqtrade must be installed and accessible in your system's PATH.
+  You can typically install it via pip: `pip install freqtrade`
+- `config/config.json` must be configured with the target exchange (e.g., 'binance')
+  and the desired 'pair_whitelist'. The script attempts to load this from the project root
+  or a relative path if run from the `utils` directory.
+
+To run:
+Ensure you are in the project's root directory, then execute:
+python utils/data_downloader.py
+"""
 import subprocess
 import os
 import pathlib
@@ -134,22 +156,48 @@ def download_data(pairs: list[str], timeframes: list[str], exchange: str, data_d
                 return # Stop further processing if freqtrade is not found
 
 if __name__ == "__main__":
-    # As per requirements for the main block
-    sample_pairs = ["ZEN/BTC", "LSK/BTC", "ETH/BTC", "ETH/EUR"]
-    sample_timeframes = ["1m", "5m", "15m", "1h", "4h", "1d"]
-    sample_exchange = "binance"
-    # Freqtrade stores data by default in user_data/data/<exchange_name>
-    # So, if we want data in user_data/data/binance,
-    # data_dir parameter should be "user_data/data/binance"
-    sample_data_dir = "user_data/data/binance"
-    five_years_in_days = 5 * 365
+    import json
 
-    print(f"Starting data download for {sample_exchange}...")
+    TARGET_TIMEFRAMES = ["1m", "5m", "15m", "1h", "4h", "1d"]
+    DAYS_TO_DOWNLOAD = 5 * 365
+    CONFIG_PATH_PROJECT_ROOT = "config/config.json"
+    CONFIG_PATH_RELATIVE_TO_UTILS = "../config/config.json" # If script is in utils/
+
+    config_data = None
+    try:
+        with open(CONFIG_PATH_PROJECT_ROOT, 'r') as f:
+            config_data = json.load(f)
+        print(f"Loaded configuration from {CONFIG_PATH_PROJECT_ROOT}")
+    except FileNotFoundError:
+        try:
+            with open(CONFIG_PATH_RELATIVE_TO_UTILS, 'r') as f:
+                config_data = json.load(f)
+            print(f"Loaded configuration from {CONFIG_PATH_RELATIVE_TO_UTILS}")
+        except FileNotFoundError:
+            print(f"Error: Configuration file not found at {CONFIG_PATH_PROJECT_ROOT} or {CONFIG_PATH_RELATIVE_TO_UTILS}")
+            exit(1) # Exit if config not found
+    except json.JSONDecodeError:
+        print("Error: Could not decode JSON from the configuration file.")
+        exit(1)
+
+
+    exchange_name = config_data['exchange']['name']
+    pairs_to_download = config_data['exchange']['pair_whitelist']
+    data_directory = f"user_data/data/{exchange_name.lower()}"
+
+    print(f"--- Data Download Configuration ---")
+    print(f"Exchange: {exchange_name}")
+    print(f"Pairs: {pairs_to_download}")
+    print(f"Timeframes: {TARGET_TIMEFRAMES}")
+    print(f"Data Directory: {data_directory}")
+    print(f"Days to Download: {DAYS_TO_DOWNLOAD}")
+    print(f"-----------------------------------")
+
     download_data(
-        pairs=sample_pairs,
-        timeframes=sample_timeframes,
-        exchange=sample_exchange,
-        data_dir=sample_data_dir,
-        days=five_years_in_days
+        pairs=pairs_to_download,
+        timeframes=TARGET_TIMEFRAMES,
+        exchange=exchange_name,
+        data_dir=data_directory,
+        days=DAYS_TO_DOWNLOAD
     )
     print("Data download process finished.")

@@ -2,9 +2,9 @@
   "dry_run": true,
   "dry_run_wallet": 1000,
   "exchange": {
-    "name": "bitvavo",
-    "key": "ENV_BITVAVO_API_KEY",
-    "secret": "ENV_BITVAVO_SECRET_KEY",
+    "name": "binance",
+    "key": "ENV_BINANCE_API_KEY",
+    "secret": "ENV_BINANCE_SECRET_KEY",
     "password": null,
     "ccxt_config": {
       "enableRateLimit": true
@@ -13,27 +13,12 @@
       "recvWindow": 10000
     },
     "pair_whitelist": [
-      "ETH/EUR",
-      "BTC/EUR",
-      "ZEN/EUR",
-      "WETH/USDT",
-      "USDC/USDT",
-      "WBTC/USDT",
-      "LINK/USDT",
-      "UNI/USDT",
-      "ZEN/BTC",
       "LSK/BTC",
-      "ETH/BTC"
+      "ETH/BTC",
+      "ZEN/BTC"
     ],
     "pair_blacklist": [],
-    "markets": {
-      "BTC/EUR": {
-        "precision": {
-          "price": 2,
-          "amount": 6
-        }
-      }
-    }
+    "markets": {}
   },
   "stake_currency": "EUR",
   "stake_amount": "unlimited",
