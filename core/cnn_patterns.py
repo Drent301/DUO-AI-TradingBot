@@ -8,7 +8,7 @@ from datetime import datetime
 from typing import List, Dict, Any, Tuple, Optional
 import pandas as pd
 import numpy as np
-# import talib # Defer import to where it's used, to allow module loading if TA-Lib is not installed
+import pandas_ta as ta
 from sklearn.preprocessing import MinMaxScaler
 
 # PyTorch Imports
@@ -157,19 +157,14 @@ class CNNPatterns:
             candlestick_features_df = pd.DataFrame(index=dataframe.index) # Default to empty
             try:
                 # talib is imported at the top of the file. If that failed, this won't run.
-                # If it succeeded, but _get_talib_candlestick_patterns has an issue, it should handle it.
-                # This try-except is more for the case where the talib import itself at the top level might have failed
-                # and the execution somehow reached here, or if we want to be extra cautious.
-                # The primary check should be the global import of talib.
-                if 'talib' not in sys.modules: # Check if talib was successfully imported globally
-                    raise ImportError("talib module was not successfully imported at the file level.")
-
+                # If pandas_ta is imported as ta, _get_talib_candlestick_patterns (soon to be _get_candlestick_patterns)
+                # will use it.
                 candlestick_features_df = _get_talib_candlestick_patterns(base_ohlcv_df)
                 logger.debug(f"Candlestick features generated. Shape: {candlestick_features_df.shape}")
-            except ImportError:
-                logger.warning("TA-Lib module not found or failed to import. Skipping TA-Lib candlestick pattern generation.")
-            except Exception as e_talib: # Catch other potential errors from _get_talib_candlestick_patterns
-                logger.error(f"Error generating TA-Lib candlestick patterns: {e_talib}. Proceeding without them.", exc_info=True)
+            # Removed ImportError for talib, as we are moving away from it.
+            # The function _get_talib_candlestick_patterns itself will handle issues with pandas_ta.
+            except Exception as e_pattern_gen: # Catch other potential errors
+                logger.error(f"Error generating candlestick patterns: {e_pattern_gen}. Proceeding without them.", exc_info=True)
 
 
             # 3. Generate price-action features
@@ -490,37 +485,58 @@ class CNNPatterns:
 
     def detect_candlestick_patterns(self, candles_df: pd.DataFrame) -> Dict[str, bool]:
         patterns = {}
-        if len(candles_df) < 1: return {}
+        if candles_df.empty or len(candles_df) < 1: # Added len check for safety, though empty covers it.
+            logger.warning("Input candles_df is empty in detect_candlestick_patterns.")
+            return patterns
 
-        try:
-            import talib # Local import for this method
-            open_, high_, low_, close_ = candles_df['open'].astype(float), candles_df['high'].astype(float), candles_df['low'].astype(float), candles_df['close'].astype(float)
+        # Ensure DataFrame has standard OHLC column names (lowercase)
+        df_std = candles_df.copy()
+        df_std.rename(columns={
+            "Open": "open", "High": "high", "Low": "low", "Close": "close",
+            "OPEN": "open", "HIGH": "high", "LOW": "low", "CLOSE": "close"
+        }, inplace=True, errors='ignore')
 
-            # Example for CDLDOJI
+        required_cols = ['open', 'high', 'low', 'close']
+        if not all(col in df_std.columns for col in required_cols):
+            logger.warning(f"Missing required OHLC columns in detect_candlestick_patterns. Got: {df_std.columns}.")
+            return patterns
+
+        if not hasattr(df_std, 'ta'):
+            logger.error("pandas_ta accessor '.ta' not found on DataFrame in detect_candlestick_patterns. Is pandas_ta installed and imported correctly as ta?")
+            return patterns
+
+        # Define patterns to check, mapping to pandas-ta function and output key
+        # Output keys match original (CDLDOJI, CDLENGULFING)
+        patterns_to_check = {
+            'CDLDOJI': 'cdl_doji',
+            'CDLENGULFING': 'cdl_engulfing',
+            # Add more here if this function was supposed to detect more than just these two.
+            # The original only explicitly calculated these two.
+        }
+
+        for pattern_key, pta_func_name in patterns_to_check.items():
             try:
-                if len(candles_df) >= talib.CDLDOJI.lookback:
-                    patterns['CDLDOJI'] = bool(talib.CDLDOJI(open_, high_, low_, close_).iloc[-1] != 0)
+                if not hasattr(df_std.ta, pta_func_name):
+                    logger.warning(f"Pandas-ta function {pta_func_name} not found for {pattern_key}.")
+                    patterns[pattern_key] = False
+                    continue
+
+                indicator_function = getattr(df_std.ta, pta_func_name)
+                result_series = indicator_function() # e.g., df_std.ta.cdl_doji()
+
+                if result_series is not None and not result_series.empty:
+                    # Candlestick patterns in pandas-ta usually return non-zero (e.g., 100 for bullish, -100 for bearish) when a pattern is detected at a given candle.
+                    # A value of 0 means no pattern.
+                    # We check the last candle in the series.
+                    patterns[pattern_key] = bool(result_series.iloc[-1] != 0)
                 else:
-                    patterns['CDLDOJI'] = False
-            except Exception as e_doji:
-                logger.debug(f"Could not calculate CDLDOJI: {e_doji}")
-                patterns['CDLDOJI'] = False
+                    logger.debug(f"Pandas-ta function {pta_func_name} for {pattern_key} returned None or empty series.")
+                    patterns[pattern_key] = False
+            except Exception as e:
+                logger.warning(f"Error calculating pandas-ta pattern {pta_func_name} for {pattern_key}: {e}")
+                patterns[pattern_key] = False
 
-            # Example for CDLENGULFING
-            try:
-                if len(candles_df) >= talib.CDLENGULFING.lookback:
-                    patterns['CDLENGULFING'] = bool(talib.CDLENGULFING(open_, high_, low_, close_).iloc[-1] != 0)
-                else:
-                    patterns['CDLENGULFING'] = False
-            except Exception as e_engulf:
-                logger.debug(f"Could not calculate CDLENGULFING: {e_engulf}")
-                patterns['CDLENGULFING'] = False
-
-        except ImportError:
-            logger.warning("TA-Lib module not found in detect_candlestick_patterns. Returning empty patterns.")
-            return {} # Return empty if talib itself cannot be imported
-
-        return {k: v for k, v in patterns.items() if v is True}
+        return {k: v for k, v in patterns.items() if v is True} # Return only True patterns
 
     def _detect_engulfing(self, candles: List[Dict[str, Any]], direction: str = "any") -> str or bool: # Added direction
         if len(candles) < 2: return False
@@ -683,46 +699,109 @@ class CNNPatterns:
 
 def _get_talib_candlestick_patterns(dataframe: pd.DataFrame) -> pd.DataFrame:
     """
-    Calculates a wide range of TA-Lib candlestick patterns.
-    Input: Freqtrade OHLCV DataFrame (base timeframe).
-    Output: DataFrame with candlestick pattern signals (0, 100, -100).
+    Calculates a wide range of candlestick patterns using pandas_ta.
+    Input: Freqtrade OHLCV DataFrame (base timeframe) with 'open', 'high', 'low', 'close' columns.
+    Output: DataFrame with candlestick pattern signals (0, 100, -100, or other values as per pandas_ta).
     """
     candlestick_features = pd.DataFrame(index=dataframe.index)
 
-    try:
-        import talib
-    except ImportError:
-        logger.warning("TA-Lib module not found within _get_talib_candlestick_patterns. No TA-Lib candlestick patterns will be generated.")
+    # Ensure DataFrame has standard OHLC column names (lowercase) expected by pandas_ta
+    df_std = dataframe.copy()
+    df_std.rename(columns={
+        "Open": "open", "High": "high", "Low": "low", "Close": "close", "Volume": "volume",
+        # Ensure all case variations map to lowercase
+        "OPEN": "open", "HIGH": "high", "LOW": "low", "CLOSE": "close", "VOLUME": "volume"
+    }, inplace=True, errors='ignore') # Use errors='ignore' if some columns might not exist
+
+    required_cols = ['open', 'high', 'low', 'close']
+    if not all(col in df_std.columns for col in required_cols):
+        logger.warning(f"Missing required OHLC columns (open, high, low, close) in _get_talib_candlestick_patterns. Got: {df_std.columns}. Cannot calculate patterns.")
         return candlestick_features # Return empty DataFrame
 
-    # List of all TA-Lib candlestick pattern functions
-    # Shortened to improve performance during feature generation, as calculating all patterns was too resource-intensive.
-    talib_pattern_functions = [
-        'CDLDOJI', 'CDLENGULFING', 'CDLHAMMER', 'CDLINVERTEDHAMMER',
-        'CDLMORNINGSTAR', 'CDLEVENINGSTAR', 'CDLSHOOTINGSTAR',
-        'CDL3WHITESOLDIERS', 'CDL3BLACKCROWS', 'CDLHARAMI'
-    ]
+    # List of pandas-ta candlestick pattern function names (without the cdl_ prefix typically)
+    # Mapping to original talib_pattern_functions for column naming consistency if desired.
+    # Original talib_pattern_functions: CDLDOJI, CDLENGULFING, CDLHAMMER, CDLINVERTEDHAMMER, CDLMORNINGSTAR, CDLEVENINGSTAR, CDLSHOOTINGSTAR, CDL3WHITESOLDIERS, CDL3BLACKCROWS, CDLHARAMI
+    # pandas-ta functions are typically lowercase: doji, engulfing, hammer, etc.
+    # The resulting column names from pandas-ta might also be lowercase or include parameters.
+    # We aim for output columns like 'cdl_DOJI', 'cdl_ENGULFING' to somewhat match the old 'cdl_CDLDOJI' style but cleaner.
 
-    df_open = dataframe['open']
-    df_high = dataframe['high']
-    df_low = dataframe['low']
-    df_close = dataframe['close']
+    pta_pattern_map = {
+        # pandas-ta function name (or part of it) : Desired output suffix (UPPERCASE)
+        'doji': 'DOJI',
+        'engulfing': 'ENGULFING',
+        'hammer': 'HAMMER',
+        'invertedhammer': 'INVERTEDHAMMER',
+        'morningstar': 'MORNINGSTAR', # pandas-ta might have morningstar and morningdojistar
+        'eveningstar': 'EVENINGSTAR', # pandas-ta might have eveningstar and eveningdojistar
+        'shootingstar': 'SHOOTINGSTAR',
+        'whitesoldiers': '3WHITESOLDIERS', # pandas-ta cdl_threeoutside or cdl_3whitesoldiers
+        'blackcrows': '3BLACKCROWS',     # pandas-ta cdl_threeoutside or cdl_3blackcrows
+        'harami': 'HARAMI'
+        # Note: pandas-ta uses cdl_x for many patterns. Example: df.ta.cdl_doji()
+        # Some patterns like '3whitesoldiers' in pandas-ta might be `cdl_3whitesoldiers`.
+        # The exact function name needs to be verified in pandas-ta documentation if issues arise.
+    }
 
-    for pattern_name in talib_pattern_functions:
+    # Use a temporary DataFrame for pandas-ta to operate on, ensuring it has the right column names
+    temp_df_for_pta = df_std[required_cols].copy()
+
+    if not hasattr(temp_df_for_pta, 'ta'):
+        logger.error("pandas_ta accessor '.ta' not found on DataFrame. Is pandas_ta installed and imported correctly as ta?")
+        return candlestick_features
+
+    for pta_func_short_name, out_suffix_upper in pta_pattern_map.items():
+        target_col_name = f'cdl_{out_suffix_upper}'
         try:
-            pattern_function = getattr(talib, pattern_name)
-            # Check lookback period to avoid errors on short dataframes
-            lookback = pattern_function.lookback
-            if len(dataframe) >= lookback:
-                result = pattern_function(df_open, df_high, df_low, df_close)
-                candlestick_features[f'cdl_{pattern_name}'] = result
-            else:
-                # Not enough data, fill with 0 (neutral)
-                candlestick_features[f'cdl_{pattern_name}'] = 0
-        except Exception as e:
-            logger.warning(f"Could not calculate TA-Lib pattern {pattern_name}: {e}. Filling with 0.")
-            candlestick_features[f'cdl_{pattern_name}'] = 0
+            # Construct the full pandas-ta function name (e.g., cdl_doji)
+            pattern_func_name = f"cdl_{pta_func_short_name.lower()}"
 
+            # Get the indicator function from temp_df_for_pta.ta
+            indicator_function = getattr(temp_df_for_pta.ta, pattern_func_name)
+
+            if callable(indicator_function):
+                result_series = indicator_function() # Call the function
+                if isinstance(result_series, pd.Series):
+                    candlestick_features[target_col_name] = result_series.fillna(0)
+                elif isinstance(result_series, pd.DataFrame):
+                    # Some pta functions return a DataFrame with multiple columns,
+                    # e.g., MACD returns MACD_12_26_9, MACDh_12_26_9, MACDs_12_26_9
+                    # For candlestick patterns, it's usually a single series.
+                    # If it returns a DF, we need to know which column to pick or how to handle it.
+                    # Assuming the first column is the primary signal if a DF is returned by a cdl func.
+                    if not result_series.empty:
+                         # Prefer a column with a name similar to the pattern, or just the first one.
+                        # Example: if pattern_func_name is 'cdl_doji', pandas_ta might name the column 'CDL_DOJI_10_0.1'.
+                        # We need to find the relevant column.
+                        # For simplicity, if `result_series` is a DataFrame, we'll try to find a column containing the short name or just take the first.
+                        relevant_col = None
+                        for col in result_series.columns:
+                            if pta_func_short_name.lower() in col.lower():
+                                relevant_col = col
+                                break
+                        if relevant_col:
+                            candlestick_features[target_col_name] = result_series[relevant_col].fillna(0)
+                        elif not result_series.columns.empty : # Fallback to first column
+                            candlestick_features[target_col_name] = result_series.iloc[:, 0].fillna(0)
+                        else:
+                            logger.warning(f"Pandas-ta function {pattern_func_name} returned an empty DataFrame.")
+                            candlestick_features[target_col_name] = 0
+                    else:
+                        logger.warning(f"Pandas-ta function {pattern_func_name} returned an empty DataFrame.")
+                        candlestick_features[target_col_name] = 0
+                else:
+                    logger.warning(f"Pandas-ta function {pattern_func_name} did not return a Series or DataFrame for {pta_func_short_name}. Type: {type(result_series)}")
+                    candlestick_features[target_col_name] = 0
+            else:
+                logger.warning(f"Could not find callable pandas-ta function for {pattern_func_name} (from {pta_func_short_name}).")
+                candlestick_features[target_col_name] = 0
+        except AttributeError:
+            logger.warning(f"AttributeError: pandas-ta pattern function {pattern_func_name} (from {pta_func_short_name}) not found. Filling with 0.")
+            candlestick_features[target_col_name] = 0
+        except Exception as e:
+            logger.warning(f"Could not calculate pandas-ta pattern {pta_func_short_name} ({pattern_func_name}): {e}. Filling with 0.")
+            candlestick_features[target_col_name] = 0
+
+    logger.info(f"Candlestick features calculated using pandas-ta. Shape: {candlestick_features.shape}. Columns: {candlestick_features.columns.tolist()}")
     return candlestick_features
 
 def _get_price_action_features(dataframe: pd.DataFrame) -> pd.DataFrame:
