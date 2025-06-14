@@ -13,6 +13,12 @@ from core.bitvavo_executor import BitvavoExecutor
 from core.backtester import Backtester
 from core.params_manager import ParamsManager # Moved to top
 from core.cnn_patterns import CNNPatterns # Moved to top
+
+from freqtrade.configuration import Configuration
+from freqtrade.data.dataprovider import DataProvider
+from strategies.DUOAI_Strategy import DUOAI_Strategy
+# import json # Already imported at the top, ensure it is if this block is moved elsewhere
+
 import dotenv
 import shutil
 
@@ -103,6 +109,97 @@ class PreTrainer:
         # )
         # logger.info("Backtester (potentially) initialized in PreTrainer.")
 
+    def _get_dataframe_with_strategy_indicators(self, ohlcv_df: pd.DataFrame, pair: str, timeframe: str) -> pd.DataFrame:
+        """
+        Processes a raw OHLCV DataFrame with DUOAI_Strategy to populate all its indicators.
+        """
+        logger.info(f"Applying DUOAI_Strategy indicators for {pair} ({timeframe}). Initial df shape: {ohlcv_df.shape}")
+        if ohlcv_df.empty:
+            logger.warning(f"Raw OHLCV DataFrame for {pair} ({timeframe}) is empty. Cannot apply strategy indicators.")
+            return ohlcv_df
+
+        try:
+            # Construct a minimal config for DUOAI_Strategy and DataProvider
+            # This uses the main PreTrainer config as a base.
+            strategy_processing_config = {
+                **self.config, # Spread main config to get user_data_dir, stake_currency etc.
+                "timeframe": timeframe,
+                "exchange": {
+                    "name": "offline_exchange", # Dummy exchange name for offline processing
+                    "pair_whitelist": [pair],
+                    "pair_blacklist": []
+                },
+                "pairlists": [{"method": "StaticPairList", "config": {"pairs": [pair]}}], # Ensure pair is in whitelist
+                "strategy": "DUOAI_Strategy", # Name of the strategy class
+                "bot_name": "pretrainer_indicator_helper",
+                "pair_whitelist": [pair],
+                "config_pair_whitelist": [pair], # Explicitly for DUOAI_Strategy if it uses this
+                "dry_run": True, # Essential for offline indicator population
+                "process_only_new_candles": False, # Ensure all candles are processed
+                # DUOAI_Strategy.informative_timeframes is a class variable, strategy will access it.
+            }
+            # Remove keys that might cause issues if not fully configured for a live bot run
+            strategy_processing_config.pop('telegram', None)
+            strategy_processing_config.pop('api_server', None)
+
+
+            ft_config_obj = Configuration.from_dict(strategy_processing_config)
+            # Ensure 'max_open_trades' is set if strategy uses it for anything during indicator population (unlikely but safe)
+            if 'max_open_trades' not in ft_config_obj:
+                ft_config_obj['max_open_trades'] = 10 # A sensible default
+
+            strategy = DUOAI_Strategy(config=ft_config_obj)
+            dataprovider = DataProvider(config=ft_config_obj, exchange=None) # No live exchange needed
+            strategy.dp = dataprovider
+
+            # Prepare DataFrame: ensure 'date' index and lowercase OHLCV columns
+            df_to_process = ohlcv_df.copy()
+            if not isinstance(df_to_process.index, pd.DatetimeIndex) or df_to_process.index.name != 'date':
+                if 'date' in df_to_process.columns:
+                    df_to_process['date'] = pd.to_datetime(df_to_process['date'])
+                    df_to_process.set_index('date', inplace=True)
+                elif pd.api.types.is_numeric_dtype(df_to_process.index): # If index is timestamp
+                    df_to_process.index = pd.to_datetime(df_to_process.index, unit='ms', utc=True)
+                    df_to_process.index.name = 'date'
+                else: # Try to convert index if it's string-like datetime
+                    try:
+                        df_to_process.index = pd.to_datetime(df_to_process.index)
+                        df_to_process.index.name = 'date'
+                    except Exception as e_idx:
+                        logger.error(f"Failed to set DatetimeIndex for {pair} ({timeframe}): {e_idx}. OHLCV df index: {ohlcv_df.index}")
+                        return ohlcv_df # Return original if cannot process index
+
+            # Ensure standard OHLCV column names are lowercase
+            rename_map_strat = {}
+            for col_name in df_to_process.columns:
+                col_lower = col_name.lower()
+                if col_lower in ['open', 'high', 'low', 'close', 'volume'] and col_name != col_lower:
+                    rename_map_strat[col_name] = col_lower
+            if rename_map_strat:
+                df_to_process.rename(columns=rename_map_strat, inplace=True)
+
+            # Verify required columns after standardization
+            required_ohlc_strat = ['open', 'high', 'low', 'close', 'volume']
+            if not all(col in df_to_process.columns for col in required_ohlc_strat):
+                missing_req = [c for c in required_ohlc_strat if c not in df_to_process.columns]
+                logger.error(f"DataFrame for strategy processing for {pair} ({timeframe}) is missing required columns: {missing_req} after standardization attempts.")
+                return ohlcv_df
+
+
+            # Call populate_indicators via advise_all_indicators
+            # DUOAI_Strategy.advise_all_indicators expects a dictionary of dataframes
+            data_for_strategy = {pair: df_to_process}
+            analyzed_pair_data = strategy.advise_all_indicators(data_for_strategy)
+
+            # The result is a dictionary, get the dataframe for the pair
+            processed_df = analyzed_pair_data[pair]
+
+            logger.info(f"Successfully applied DUOAI_Strategy indicators for {pair} ({timeframe}). Resulting df shape: {processed_df.shape}, Columns: {list(processed_df.columns)}")
+            return processed_df
+
+        except Exception as e:
+            logger.error(f"Error applying DUOAI_Strategy indicators for {pair} ({timeframe}): {e}", exc_info=True)
+            return ohlcv_df # Return original df on error
 
     def pretrain(self, features_df: pd.DataFrame, scaler: MinMaxScaler,
                  pair: str, timeframe: str, cnn_patterns_instance: 'CNNPatterns'):
@@ -399,9 +496,18 @@ class PreTrainer:
             concatenated_df.attrs['pair'] = symbol
             logger.info(f"Totaal {len(concatenated_df)} unieke candles voor 'all' data voor {symbol} ({timeframe}).")
 
+            # Apply strategy indicators to the 'all' data
+            if concatenated_df is not None and not concatenated_df.empty:
+                logger.info(f"Processing 'all' data for {symbol} ({timeframe}) with DUOAI_Strategy indicators...")
+                # The helper method is synchronous, run in a thread if called from async
+                concatenated_df = await asyncio.to_thread(
+                    self._get_dataframe_with_strategy_indicators,
+                    concatenated_df, symbol, timeframe
+                )
+
         processed_regime_dfs["all"] = concatenated_df if concatenated_df is not None and not concatenated_df.empty else pd.DataFrame()
         if processed_regime_dfs["all"].empty:
-            logger.warning(f"Uiteindelijk geen 'all' data beschikbaar voor {symbol} ({timeframe}).")
+            logger.warning(f"Uiteindelijk geen 'all' data beschikbaar voor {symbol} ({timeframe}) (evt. na strategy processing).")
 
 
         # Process regime-specific data
@@ -418,6 +524,15 @@ class PreTrainer:
                 regime_df.sort_index(inplace=True)
                 regime_df.attrs['timeframe'] = timeframe
                 regime_df.attrs['pair'] = symbol
+
+                # Apply strategy indicators to this regime's data
+                if regime_df is not None and not regime_df.empty:
+                    logger.info(f"Processing regime '{regime_cat}' data for {symbol} ({timeframe}) with DUOAI_Strategy indicators...")
+                    regime_df = await asyncio.to_thread(
+                        self._get_dataframe_with_strategy_indicators,
+                        regime_df, symbol, timeframe
+                    )
+
                 processed_regime_dfs[regime_cat] = regime_df
                 logger.info(f"Data voor regime '{regime_cat}' ({symbol}-{timeframe}) verwerkt. {len(regime_df)} candles.")
             else:
@@ -441,82 +556,26 @@ class PreTrainer:
             logger.warning(f"Lege dataframe ontvangen in prepare_training_data for {pattern_type}.")
             return dataframe
 
-        # Ensure technical indicators are calculated first
-        # Standardize OHLC column names (make a copy to avoid modifying original outside scope)
-        df_std = dataframe.copy()
-        rename_map = {}
-        for col_cap in ['Open', 'High', 'Low', 'Close', 'Volume']: # Check for capitalized versions
-            if col_cap in df_std.columns and col_cap.lower() not in df_std.columns: # Only rename if lowercase doesn't exist
-                rename_map[col_cap] = col_cap.lower()
-        if rename_map:
-            df_std.rename(columns=rename_map, inplace=True)
+        # Indicators are now expected to be in the dataframe from DUOAI_Strategy.populate_indicators,
+        # called via _get_dataframe_with_strategy_indicators within fetch_historical_data.
+        # Logging to confirm presence of expected indicators:
+        expected_indicators = ['rsi', 'macd', 'macdsignal', 'macdhist', 'bb_lowerband', 'bb_middleband', 'bb_upperband']
+        # Also check for other indicators DUOAI_Strategy might add, e.g., from informative pairs.
+        # For now, just checking the basic ones that were previously calculated here.
+        missing_indicators = [ind for ind in expected_indicators if ind not in dataframe.columns]
+        if missing_indicators:
+            logger.warning(f"DataFrame for {pair} ({tf}) is missing expected strategy indicators: {missing_indicators}. Training might be suboptimal or fail if features are crucial.")
+        else:
+            logger.info(f"All basic expected strategy indicators (RSI, MACD, BBands) found in DataFrame for {pair} ({tf}).")
 
-        try:
-            # RSI
-            if 'rsi' not in dataframe.columns:
-                if 'close' in df_std.columns:
-                    # pandas_ta is imported as ta at the file level
-                    dataframe['rsi'] = df_std.ta.rsi(close=df_std['close'], length=14)
-                else:
-                    logger.warning(f"Column 'close' not found in standardized df for {pair} ({tf}). Cannot calculate RSI.")
-                    dataframe['rsi'] = np.nan
-
-            # MACD
-            if 'macd' not in dataframe.columns: # Check if 'macd' specifically is missing
-                if 'close' in df_std.columns:
-                    df_std.ta.macd(close=df_std['close'], fast=12, slow=26, signal=9, append=True)
-                    macd_col_map = {
-                        'MACD_12_26_9': 'macd',
-                        'MACDs_12_26_9': 'macdsignal',
-                        'MACDh_12_26_9': 'macdhist'
-                    }
-                    for pta_col, target_col in macd_col_map.items():
-                        if pta_col in df_std.columns:
-                            dataframe[target_col] = df_std[pta_col]
-                        else:
-                            logger.warning(f"Pandas-ta MACD column {pta_col} not found for {pair} ({tf}). Filling {target_col} with NaN.")
-                            dataframe[target_col] = np.nan
-                else:
-                    logger.warning(f"Column 'close' not found in standardized df for {pair} ({tf}). Cannot calculate MACD.")
-                    dataframe['macd'] = np.nan
-                    dataframe['macdsignal'] = np.nan
-                    dataframe['macdhist'] = np.nan
-
-            # Bollinger Bands
-            if 'bb_middleband' not in dataframe.columns:
-                if all(col in df_std.columns for col in ['high', 'low', 'close']):
-                    typical_price = (df_std['high'] + df_std['low'] + df_std['close']) / 3
-                    from freqtrade.vendor.qtpylib.indicators import bollinger_bands # Keep local
-                    bollinger = bollinger_bands(typical_price, window=20, stds=2)
-                    dataframe['bb_lowerband'] = bollinger['lower']
-                    dataframe['bb_middleband'] = bollinger['mid']
-                    dataframe['bb_upperband'] = bollinger['upper']
-                else:
-                    logger.warning(f"Missing HLC columns in standardized df for {pair} ({tf}). Cannot calculate Bollinger Bands.")
-                    dataframe['bb_lowerband'] = np.nan
-                    dataframe['bb_middleband'] = np.nan
-                    dataframe['bb_upperband'] = np.nan
-
-        except AttributeError as e_attr:
-            logger.error(f"AttributeError during pandas-ta indicator calculation for {pair} ({tf}): {e_attr}. This might indicate pandas_ta is not correctly attached or an indicator name is wrong.")
-            if 'rsi' not in dataframe.columns: dataframe['rsi'] = np.nan
-            if 'macd' not in dataframe.columns: dataframe['macd'] = np.nan
-            if 'macdsignal' not in dataframe.columns: dataframe['macdsignal'] = np.nan
-            if 'macdhist' not in dataframe.columns: dataframe['macdhist'] = np.nan
-            if 'bb_middleband' not in dataframe.columns:
-                dataframe['bb_lowerband'] = np.nan
-                dataframe['bb_middleband'] = np.nan
-                dataframe['bb_upperband'] = np.nan
-        except Exception as e_pta:
-            logger.error(f"Error calculating pandas-ta based indicators in PreTrainer.prepare_training_data for {pair} ({tf}): {e_pta}. Skipping them.")
-            if 'rsi' not in dataframe.columns: dataframe['rsi'] = np.nan
-            if 'macd' not in dataframe.columns: dataframe['macd'] = np.nan
-            if 'macdsignal' not in dataframe.columns: dataframe['macdsignal'] = np.nan
-            if 'macdhist' not in dataframe.columns: dataframe['macdhist'] = np.nan
-            if 'bb_middleband' not in dataframe.columns:
-                dataframe['bb_lowerband'] = np.nan
-                dataframe['bb_middleband'] = np.nan
-                dataframe['bb_upperband'] = np.nan
+        # Ensure essential OHLCV columns are present as they are used in labeling logic below
+        # (e.g., dataframe['high'], dataframe['low'], dataframe['close'])
+        # These should have been preserved by DUOAI_Strategy.
+        required_ohlcv_for_labeling = ['open', 'high', 'low', 'close', 'volume']
+        missing_ohlcv = [col for col in required_ohlcv_for_labeling if col not in dataframe.columns]
+        if missing_ohlcv:
+            logger.error(f"DataFrame for {pair} ({tf}) is missing essential OHLCV columns: {missing_ohlcv} needed for labeling logic. Returning empty.")
+            return pd.DataFrame()
 
         label_column_name = f"{pattern_type}_label"
         dataframe[label_column_name] = 0 # Initialize label column
