@@ -2,7 +2,7 @@ import os
 import json
 import logging
 import pandas as pd
-import pandas_ta as ta # Added for pandas_ta
+# import pandas_ta as ta # REMOVED
 import numpy as np
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -11,6 +11,11 @@ import asyncio
 from core.params_manager import ParamsManager
 from core.cnn_patterns import CNNPatterns
 from core.bitvavo_executor import BitvavoExecutor
+
+# Freqtrade imports for strategy processing
+from freqtrade.configuration import Configuration
+from freqtrade.data.dataprovider import DataProvider
+from strategies.DUOAI_Strategy import DUOAI_Strategy # Assuming it is discoverable
 
 # Ensure the 'memory' directory exists
 log_dir = Path(os.path.dirname(os.path.abspath(__file__))) / '..' / 'memory'
@@ -117,122 +122,6 @@ class Backtester:
         logger.info(f"Successfully fetched {len(df)} candles for {symbol} ({timeframe}) from {start_date_str} up to {df.index[-1] if not df.empty else 'N/A'}.")
         return df
 
-    def _add_indicators(self, dataframe: pd.DataFrame) -> pd.DataFrame:
-        if dataframe.empty:
-            return dataframe
-
-        pair = dataframe.attrs.get('pair', 'N/A')
-        timeframe = dataframe.attrs.get('timeframe', 'N/A')
-        logger.debug(f"Adding indicators for {pair} ({timeframe}) backtest data.")
-
-        # Ensure attrs are set if not present
-        if 'pair' not in dataframe.attrs:
-            dataframe.attrs['pair'] = 'UnknownPair'
-        if 'timeframe' not in dataframe.attrs:
-            dataframe.attrs['timeframe'] = 'UnknownTimeframe'
-
-        required_cols = {'open', 'high', 'low', 'close', 'volume'}
-        if not required_cols.issubset(dataframe.columns):
-            logger.error(f"DataFrame for {pair} ({timeframe}) is missing required columns for indicator calculation. Got: {dataframe.columns}")
-            return pd.DataFrame() # Return empty if critical columns are missing
-
-        # Standardize OHLC column names to lowercase for pandas-ta
-        df_std = dataframe.copy() # Work on a copy
-        rename_map = {}
-        # Check for both capitalized and already lowercase columns to ensure mapping is correct
-        for col_name in df_std.columns:
-            col_lower = col_name.lower()
-            if col_lower in ['open', 'high', 'low', 'close', 'volume'] and col_name != col_lower:
-                rename_map[col_name] = col_lower
-
-        # Apply renaming if any capitalized versions were found
-        if rename_map:
-            df_std.rename(columns=rename_map, inplace=True)
-
-        # Ensure required lowercase columns are present
-        required_ohlc = ['open', 'high', 'low', 'close']
-        if not all(col in df_std.columns for col in required_ohlc):
-            logger.error(f"Missing required OHLC columns (open, high, low, close) in standardized df for {pair} ({timeframe}). Cannot calculate indicators.")
-            for col_name_init in ['rsi', 'macd', 'macdsignal', 'macdhist', 'lowerband', 'middleband', 'upperband']:
-                 if col_name_init not in dataframe.columns: dataframe[col_name_init] = np.nan
-            return pd.DataFrame()
-
-        try:
-            # RSI
-            if 'close' in df_std.columns:
-                dataframe['rsi'] = df_std.ta.rsi(close=df_std['close'], length=14, append=False)
-            else:
-                logger.warning(f"Column 'close' not found in df_std for {pair} ({timeframe}). RSI calculation skipped.")
-                dataframe['rsi'] = np.nan
-
-            # MACD
-            if 'close' in df_std.columns:
-                macd_pta_df = df_std.ta.macd(close=df_std['close'], fast=12, slow=26, signal=9, append=False)
-                if macd_pta_df is not None and not macd_pta_df.empty:
-                    macd_col_map = {
-                        f'MACD_12_26_9': 'macd',
-                        f'MACDs_12_26_9': 'macdsignal',
-                        f'MACDh_12_26_9': 'macdhist'
-                    }
-                    for pta_col, target_col in macd_col_map.items():
-                        if pta_col in macd_pta_df.columns:
-                            dataframe[target_col] = macd_pta_df[pta_col]
-                        else:
-                            logger.warning(f"Pandas-ta MACD column {pta_col} not found in MACD results for {pair} ({timeframe}). Filling {target_col} with NaN.")
-                            dataframe[target_col] = np.nan
-                else:
-                    logger.warning(f"MACD calculation via pandas-ta returned None or empty for {pair} ({timeframe}). Filling MACD columns with NaN.")
-                    dataframe['macd'] = np.nan
-                    dataframe['macdsignal'] = np.nan
-                    dataframe['macdhist'] = np.nan
-            else:
-                logger.warning(f"Column 'close' not found in df_std for {pair} ({timeframe}). MACD calculation skipped.")
-                dataframe['macd'] = np.nan
-                dataframe['macdsignal'] = np.nan
-                dataframe['macdhist'] = np.nan
-
-            # Bollinger Bands
-            if 'close' in df_std.columns:
-                bbands_pta_df = df_std.ta.bbands(close=df_std['close'], length=20, std=2, append=False)
-                if bbands_pta_df is not None and not bbands_pta_df.empty:
-                    bbands_col_map = {
-                        f'BBL_20_2.0': 'lowerband',
-                        f'BBM_20_2.0': 'middleband',
-                        f'BBU_20_2.0': 'upperband'
-                    }
-                    for pta_col, target_col in bbands_col_map.items():
-                        if pta_col in bbands_pta_df.columns:
-                            dataframe[target_col] = bbands_pta_df[pta_col]
-                        else:
-                            logger.warning(f"Pandas-ta BBands column {pta_col} not found in BBands results for {pair} ({timeframe}). Filling {target_col} with NaN.")
-                            dataframe[target_col] = np.nan
-                else:
-                    logger.warning(f"Bollinger Bands calculation via pandas-ta returned None or empty for {pair} ({timeframe}). Filling BBands columns with NaN.")
-                    dataframe['lowerband'] = np.nan
-                    dataframe['middleband'] = np.nan
-                    dataframe['upperband'] = np.nan
-            else:
-                logger.warning(f"Column 'close' not found in df_std for {pair} ({timeframe}). Bollinger Bands calculation skipped.")
-                dataframe['lowerband'] = np.nan
-                dataframe['middleband'] = np.nan
-                dataframe['upperband'] = np.nan
-
-            dataframe.dropna(inplace=True)
-            logger.debug(f"Indicators added for {pair} ({timeframe}) using pandas-ta. Shape after adding: {dataframe.shape}")
-
-        except AttributeError as e_attr:
-            logger.error(f"AttributeError during pandas-ta indicator calculation for {pair} ({timeframe}): {e_attr}. Ensure pandas_ta is installed and correctly imported, and methods exist.", exc_info=True)
-            for col_name_init in ['rsi', 'macd', 'macdsignal', 'macdhist', 'lowerband', 'middleband', 'upperband']:
-                 if col_name_init not in dataframe.columns: dataframe[col_name_init] = np.nan
-            return pd.DataFrame()
-        except Exception as e:
-            logger.error(f"Error adding pandas-ta indicators for {pair} ({timeframe}): {e}", exc_info=True)
-            for col_name_init in ['rsi', 'macd', 'macdsignal', 'macdhist', 'lowerband', 'middleband', 'upperband']:
-                 if col_name_init not in dataframe.columns: dataframe[col_name_init] = np.nan
-            return pd.DataFrame()
-
-        return dataframe
-
     async def run_backtest(self, symbol: str, timeframe: str, pattern_type: str, architecture_key: str, sequence_length: int):
         logger.info(f"Starting backtest for {symbol} ({timeframe}), pattern: {pattern_type}, arch: {architecture_key}")
 
@@ -262,10 +151,78 @@ class Backtester:
         backtest_df.attrs['pair'] = symbol
         backtest_df.attrs['timeframe'] = timeframe
 
-        backtest_df_with_indicators = self._add_indicators(backtest_df.copy())
-        if backtest_df_with_indicators.empty:
-            logger.error(f"Failed to add indicators to backtest data for {symbol} ({timeframe}).")
+        logger.info(f"Processing DataFrame for {symbol} ({timeframe}) with DUOAI_Strategy indicators...")
+
+        # Construct minimal configuration for DUOAI_Strategy
+        main_config = self.params_manager.get_global_params() if self.params_manager else {}
+        user_data_dir = main_config.get("user_data_dir", "./user_data")
+        stake_currency = main_config.get("stake_currency", "USDT")
+        stake_amount = main_config.get("stake_amount", 1000.0)
+
+        strategy_config_dict = {
+            "exchange": {
+                "name": "offline_exchange",
+                "pair_whitelist": [symbol],
+                "pair_blacklist": []
+            },
+            "pairlists": [{"method": "StaticPairList", "config": {"pairs": [symbol]}}],
+            "timeframe": timeframe,
+            "strategy": "DUOAI_Strategy",
+            "bot_name": "backtester_indicator_helper",
+            "user_data_dir": user_data_dir,
+            "stake_currency": stake_currency,
+            "stake_amount": stake_amount,
+            "pair_whitelist": [symbol],
+            "config_pair_whitelist": [symbol],
+            "dry_run": True,
+            "process_only_new_candles": False,
+            "informative_timeframes": DUOAI_Strategy.informative_timeframes,
+            "telegram": None,
+            "api_server": None,
+        }
+
+        ft_config_obj = Configuration.from_dict(strategy_config_dict)
+        if 'max_open_trades' not in ft_config_obj:
+             ft_config_obj['max_open_trades'] = 10
+
+        strategy_instance = DUOAI_Strategy(config=ft_config_obj)
+        dataprovider_instance = DataProvider(config=ft_config_obj, exchange=None)
+        strategy_instance.dp = dataprovider_instance
+
+        df_to_process = backtest_df.copy()
+
+        if not isinstance(df_to_process.index, pd.DatetimeIndex) or df_to_process.index.name != 'date':
+            logger.error(f"Backtester: DataFrame for {symbol} {timeframe} does not have a 'date' DatetimeIndex. Index: {df_to_process.index}")
             return None
+
+        rename_map_bt = {col: col.lower() for col in df_to_process.columns if col.lower() in ['open', 'high', 'low', 'close', 'volume'] and col != col.lower()}
+        if rename_map_bt:
+            df_to_process.rename(columns=rename_map_bt, inplace=True)
+
+        required_ohlc_bt = ['open', 'high', 'low', 'close']
+        if not all(col in df_to_process.columns for col in required_ohlc_bt):
+            logger.error(f"Backtester: Missing required OHLC columns in df_to_process for {symbol} ({timeframe}). Columns: {df_to_process.columns.tolist()}")
+            return None
+
+        data_for_strategy_dict = {symbol: df_to_process}
+
+        try:
+            analyzed_data_dict = await asyncio.to_thread(strategy_instance.advise_all_indicators, data_for_strategy_dict)
+            backtest_df_with_indicators = analyzed_data_dict[symbol]
+        except Exception as e_advise:
+            logger.error(f"Error during strategy.advise_all_indicators for {symbol} ({timeframe}): {e_advise}", exc_info=True)
+            return None
+
+        if backtest_df_with_indicators.empty:
+            logger.error(f"DataFrame became empty after strategy.advise_all_indicators for {symbol} ({timeframe}).")
+            return None
+
+        backtest_df_with_indicators.dropna(inplace=True)
+        if backtest_df_with_indicators.empty:
+            logger.warning(f"DataFrame for {symbol} ({timeframe}) became empty after dropna (post strategy indicators).")
+            return None
+
+        logger.info(f"Successfully populated indicators for {symbol} ({timeframe}) using DUOAI_Strategy. Shape: {backtest_df_with_indicators.shape}")
 
         # Ensure CNN model is loaded for the pattern and architecture
         model_key = f"{pattern_type}_{architecture_key}_{symbol.replace('/', '_')}_{timeframe}" # Using the full key from CNNPatterns

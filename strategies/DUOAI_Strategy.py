@@ -221,6 +221,46 @@ class DUOAI_Strategy(IStrategy):
 
         dataframe['volume_mean_20'] = dataframe['volume'].rolling(window=20).mean() # Numpy based, should be fine
 
+        # --- Candlestick Patterns for Base Timeframe (using pandas_ta) ---
+        # Freqtrade dataframes usually have lowercase columns already.
+        if not hasattr(dataframe, 'ta') or dataframe.ta is None:
+            logger.error("Pandas_ta accessor not found on base dataframe. Skipping candlestick patterns.")
+        else:
+            candlestick_patterns_map = {
+                "cdl_DOJI": "doji",
+                "cdl_ENGULFING": "engulfing",
+                "cdl_HAMMER": "hammer",
+                "cdl_INVERTEDHAMMER": "invertedhammer",
+                "cdl_MORNINGSTAR": "morningstar",
+                "cdl_EVENINGSTAR": "eveningstar",
+                "cdl_SHOOTINGSTAR": "shootingstar",
+                "cdl_3WHITESOLDIERS": "3whitesoldiers", # pandas-ta uses cdl_3whitesoldiers
+                "cdl_3BLACKCROWS": "3blackcrows",     # pandas-ta uses cdl_3blackcrows
+                "cdl_HARAMI": "harami"
+            }
+            for col_name, pta_func_suffix in candlestick_patterns_map.items():
+                try:
+                    # Ensure OHLC columns exist for base dataframe
+                    if not all(c in dataframe.columns for c in ['open', 'high', 'low', 'close']):
+                        logger.warning(f"Base dataframe missing one or more OHLC columns. Cannot calculate {col_name}.")
+                        dataframe[col_name] = 0
+                        continue
+
+                    indicator_func = getattr(dataframe.ta, f"cdl_{pta_func_suffix}")
+                    result = indicator_func()
+                    if result is not None:
+                        dataframe[col_name] = result.fillna(0)
+                    else:
+                        logger.warning(f"Candlestick pattern {pta_func_suffix} for base timeframe returned None. Filling {col_name} with 0.")
+                        dataframe[col_name] = 0
+                except AttributeError:
+                    logger.warning(f"Pandas_ta candlestick pattern cdl_{pta_func_suffix} not found for base timeframe. Filling {col_name} with 0.")
+                    dataframe[col_name] = 0
+                except Exception as e_cdl_base:
+                    logger.warning(f"Error calculating {col_name} for base timeframe: {e_cdl_base}. Filling {col_name} with 0.")
+                    dataframe[col_name] = 0
+        # --- End Candlestick Patterns for Base Timeframe ---
+
         # --- Merge informative timeframes into the main dataframe ---
         # This uses `self.informative_pairs` to tell Freqtrade which (pair, timeframe)
         # combinations it needs to have data for. Freqtrade's DataProvider handles fetching these.
@@ -281,10 +321,50 @@ class DUOAI_Strategy(IStrategy):
                 dataframe[f'{prefix}_volume_mean_20'] = dataframe[f'{prefix}_volume'].rolling(window=20).mean()
             else:
                 logger.debug(f"Skipping volume mean calculation for {info_tf} as '{prefix}_volume' is not in dataframe.")
-            if f'{prefix}_volume' in dataframe.columns:
-                dataframe[f'{prefix}_volume_mean_20'] = dataframe[f'{prefix}_volume'].rolling(window=20).mean()
+
+            # --- Candlestick Patterns for Informative Timeframe: {prefix} ---
+            # candlestick_patterns_map is defined in the base timeframe section above and can be reused
+            if 'candlestick_patterns_map' not in locals() and 'candlestick_patterns_map' not in globals():
+                 # Redefine if somehow not in scope (e.g. if base patterns part was skipped)
+                 candlestick_patterns_map = {
+                    "cdl_DOJI": "doji", "cdl_ENGULFING": "engulfing", "cdl_HAMMER": "hammer",
+                    "cdl_INVERTEDHAMMER": "invertedhammer", "cdl_MORNINGSTAR": "morningstar",
+                    "cdl_EVENINGSTAR": "eveningstar", "cdl_SHOOTINGSTAR": "shootingstar",
+                    "cdl_3WHITESOLDIERS": "3whitesoldiers", "cdl_3BLACKCROWS": "3blackcrows",
+                    "cdl_HARAMI": "harami"
+                 }
+
+            if not hasattr(dataframe, 'ta') or dataframe.ta is None:
+                logger.error(f"Pandas_ta accessor not found on dataframe (for informative {prefix}). Skipping candlestick patterns.")
             else:
-                logger.debug(f"Skipping volume mean calculation for {info_tf} as '{prefix}_volume' is not in dataframe.")
+                required_info_ohlc = [f'{prefix}_open', f'{prefix}_high', f'{prefix}_low', f'{prefix}_close']
+                if all(c in dataframe.columns for c in required_info_ohlc):
+                    for col_name_suffix, pta_func_suffix in candlestick_patterns_map.items():
+                        target_col_name = f"{prefix}_{col_name_suffix}"
+                        try:
+                            indicator_func = getattr(dataframe.ta, f"cdl_{pta_func_suffix}")
+                            result = indicator_func(
+                                open=dataframe[f'{prefix}_open'],
+                                high=dataframe[f'{prefix}_high'],
+                                low=dataframe[f'{prefix}_low'],
+                                close=dataframe[f'{prefix}_close']
+                            )
+                            if result is not None:
+                                dataframe[target_col_name] = result.fillna(0)
+                            else:
+                                logger.warning(f"Candlestick pattern {pta_func_suffix} for informative {prefix} returned None. Filling {target_col_name} with 0.")
+                                dataframe[target_col_name] = 0
+                        except AttributeError:
+                            logger.warning(f"Pandas_ta candlestick pattern cdl_{pta_func_suffix} not found for informative {prefix}. Filling {target_col_name} with 0.")
+                            dataframe[target_col_name] = 0
+                        except Exception as e_cdl_info:
+                            logger.warning(f"Error calculating {target_col_name} for informative {prefix}: {e_cdl_info}. Filling {target_col_name} with 0.")
+                            dataframe[target_col_name] = 0
+                else:
+                    logger.warning(f"Missing one or more OHLC columns for prefix {prefix}. Skipping candlestick patterns for this informative timeframe.")
+                    for col_name_suffix, _ in candlestick_patterns_map.items():
+                        dataframe[f"{prefix}_{col_name_suffix}"] = 0
+            # --- End Candlestick Patterns for Informative Timeframe ---
 
         # Haal bias en confidence op (van AI-modules) en voeg toe aan dataframe
         current_bias = self.bias_reflector.get_bias_score(metadata['pair'], self.name)
