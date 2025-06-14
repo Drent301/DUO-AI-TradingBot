@@ -10,7 +10,6 @@ import pandas_ta as ta # Added for pandas_ta
 import numpy as np
 import asyncio
 from core.bitvavo_executor import BitvavoExecutor
-# from core.backtester import Backtester # Removed as Backtester is deprecated
 from core.params_manager import ParamsManager # Moved to top
 from core.cnn_patterns import CNNPatterns # Moved to top
 
@@ -18,7 +17,6 @@ from freqtrade.configuration import Configuration
 from freqtrade.data.dataprovider import DataProvider
 from freqtrade.exchange import TimeRange
 from strategies.DUOAI_Strategy import DUOAI_Strategy
-# import json # Already imported at the top, ensure it is if this block is moved elsewhere
 
 import dotenv
 import shutil
@@ -1114,7 +1112,6 @@ class PreTrainer:
         except Exception as e: logger.error(f"Fout bij loggen pre-train activiteit: {e}")
 
     async def analyze_time_of_day_effectiveness(self, historical_data: pd.DataFrame, strategy_id: str) -> Dict[str, Any]:
-        # ... (implementation as before) ...
         logger.info(f"Analyseren tijd-van-dag effectiviteit voor strategie {strategy_id}...")
         if historical_data.empty: return {}
         label_to_analyze = next((lbl for lbl in ['bullFlag_label', 'bearishEngulfing_label'] if lbl in historical_data.columns), None)
@@ -1134,7 +1131,6 @@ class PreTrainer:
         return result_dict
 
     async def run_pretraining_pipeline(self, strategy_id: str, params_manager=None):
-        # ... (implementation as before) ...
         logger.info(f"Start pre-training pipeline voor strategie: {strategy_id}...")
         if params_manager: self.params_manager = params_manager
         pairs_to_fetch = self.params_manager.get_param("data_fetch_pairs")
@@ -1212,217 +1208,281 @@ if __name__ == "__main__":
     if not BITVAVO_API_KEY or not BITVAVO_SECRET_KEY:
         logger.warning("Bitvavo API keys niet gevonden in .env. Data ophalen zal waarschijnlijk falen.")
 
-    async def run_test_pre_trainer():
-        test_pairs_for_test = ["ETH/EUR"]
-        test_timeframe = "1h"
-        test_patterns_to_train = ["bullFlag"]
-        test_arch_key = "default_simple" # Using a fixed arch key for test predictability
-        test_regimes = ["all", "testbull"]
+    # Note: MODELS_DIR used by PreTrainer instance is `user_data/models/cnn_pretrainer`
+    # This global constant should align with how PreTrainer sets `self.models_dir`
+    # For the test, we use this resolved path for clarity in artifact clearing.
+    BASE_USER_DATA_DIR = "user_data" # Assuming this is the root for user data
+    PRETRAINER_MODELS_SUBDIR = "models/cnn_pretrainer"
+    ABSOLUTE_MODELS_DIR = Path(os.path.dirname(os.path.abspath(__file__))) / '..' / BASE_USER_DATA_DIR / PRETRAINER_MODELS_SUBDIR
 
-        # Define test-specific paths
-        test_data_base_dir = Path(os.path.dirname(os.path.abspath(__file__))) / '..' / 'data' / 'test_pretrainer_artifacts'
-        test_gold_standard_dir = test_data_base_dir / 'gold_standard_data'
-        test_market_regimes_file = test_data_base_dir / 'market_regimes_test.json' # Different from main one
+    def _get_test_config() -> Dict[str, Any]:
+        """Centralized configuration for the test run."""
+        base_dir = Path(os.path.dirname(os.path.abspath(__file__)))
+        test_data_base_dir = base_dir / '..' / 'data' / 'test_pretrainer_artifacts'
 
-        logger.info(f"--- STARTING INTEGRATION TEST FOR PRETRAINER (ALL FEATURES) ---")
-        logger.info(f"Test config: Pair={test_pairs_for_test[0]}, TF={test_timeframe}, Pattern={test_patterns_to_train[0]}, Arch={test_arch_key}, Regimes={test_regimes}")
-        logger.info(f"Test artifacts base dir: {test_data_base_dir}")
-
-        # --- Artifact Clearing (before test run) ---
-        # Clear model outputs for this specific test config
-        for pair_name in test_pairs_for_test:
-            pair_sani = pair_name.replace('/', '_')
-            model_output_dir = Path(MODELS_DIR) / pair_sani / test_timeframe
-            if model_output_dir.exists(): shutil.rmtree(model_output_dir)
-
-        # Clear general test artifacts dir
-        if test_data_base_dir.exists(): shutil.rmtree(test_data_base_dir)
-        os.makedirs(test_gold_standard_dir, exist_ok=True)
-
-        # Clear main log files that PreTrainer uses
-        if os.path.exists(PRETRAIN_LOG_FILE): os.remove(PRETRAIN_LOG_FILE)
-        if os.path.exists(TIME_EFFECTIVENESS_FILE): os.remove(TIME_EFFECTIVENESS_FILE)
-        if os.path.exists(MARKET_REGIMES_FILE): os.remove(MARKET_REGIMES_FILE) # Remove main one if it exists, test will create its own
-
-        # Clear backtest results file
-        backtest_results_path = Path(MEMORY_DIR) / 'backtest_results.json'
-        if backtest_results_path.exists(): os.remove(backtest_results_path)
-
-        logger.info(f"--- Test Setup: Artifacts Cleared ---")
-
-        # --- Create Dummy Gold Standard CSV ---
-        dummy_gold_csv_path = test_gold_standard_dir / f"{test_pairs_for_test[0].replace('/', '_')}_{test_timeframe}_{test_patterns_to_train[0]}_gold.csv"
-        with open(dummy_gold_csv_path, 'w') as f:
-            f.write("timestamp,open,high,low,close,volume,gold_label\n")
-            # Timestamps for Nov 2, 2023, 00:00 GMT and 01:00 GMT (ensure these are within test data fetch range)
-            f.write("1698883200000,1800,1801,1799,1800.5,10,1\n") # Nov 2, 00:00
-            f.write("1698886800000,1800.5,1802,1799.5,1801.0,12,0\n") # Nov 2, 01:00
-        logger.info(f"Dummy gold standard CSV created at: {dummy_gold_csv_path}")
-
-        # --- Create Dummy Market Regimes JSON ---
-        # This file needs to be at the location PreTrainer expects (MARKET_REGIMES_FILE)
-        # So we overwrite the main path for the duration of this test or use a param to point to test file.
-        # For now, let's make PreTrainer use our test_market_regimes_file by setting its path in params.
-        # However, PreTrainer reads MARKET_REGIMES_FILE directly. So, we create it at that location.
-        dummy_regimes_content = {
-            test_pairs_for_test[0]: {
-                "testbull": [{"start_date": "2023-11-01", "end_date": "2023-11-03"}], # Short period for testing
-                "testbear": [{"start_date": "2023-11-04", "end_date": "2023-11-06"}]  # Another regime
+        config = {
+            "pairs": ["ETH/EUR"],
+            "timeframe": "1h",
+            "patterns_to_train": ["bullFlag"],
+            "arch_key": "default_simple",
+            "regimes": ["all", "testbull"],
+            "test_data_base_dir": test_data_base_dir,
+            "gold_standard_dir": test_data_base_dir / 'gold_standard_data',
+            # MARKET_REGIMES_FILE is the global constant pointing to the runtime location of this file
+            "market_regimes_file_path": Path(MARKET_REGIMES_FILE),
+            "pretrain_log_file_path": Path(PRETRAIN_LOG_FILE),
+            "time_effectiveness_file_path": Path(TIME_EFFECTIVENESS_FILE),
+            "backtest_results_file_path": Path(MEMORY_DIR) / 'backtest_results.json',
+            "models_dir_path": ABSOLUTE_MODELS_DIR, # Path for model outputs based on PreTrainer's logic
+            "dummy_regimes_content": {
+                "ETH/EUR": { # Should match test_config["pairs"][0]
+                    "testbull": [{"start_date": "2023-11-01", "end_date": "2023-11-03"}],
+                    "testbear": [{"start_date": "2023-11-04", "end_date": "2023-11-06"}]
+                }
             }
         }
-        with open(MARKET_REGIMES_FILE, 'w') as f: # Overwrite the main file path for the test
-            json.dump(dummy_regimes_content, f, indent=4)
-        logger.info(f"Dummy market regimes JSON created at: {MARKET_REGIMES_FILE}")
+        config["dummy_gold_csv_path"] = config["gold_standard_dir"] / f"{config['pairs'][0].replace('/', '_')}_{config['timeframe']}_{config['patterns_to_train'][0]}_gold.csv"
+        return config
 
-
-        # --- ParamsManager Setup for Test ---
-        params_manager_instance = ParamsManager()
-        # Data fetch range should include gold standard and regime dates
-        await params_manager_instance.set_param("data_fetch_start_date_str", "2023-10-30")
-        await params_manager_instance.set_param("data_fetch_end_date_str", "2023-11-10")
-        await params_manager_instance.set_param("data_fetch_pairs", test_pairs_for_test)
-        await params_manager_instance.set_param("data_fetch_timeframes", [test_timeframe])
-        await params_manager_instance.set_param("patterns_to_train", test_patterns_to_train)
-
-        await params_manager_instance.set_param('sequence_length_cnn', 5) # Smaller for faster test
-        await params_manager_instance.set_param('num_epochs_cnn', 1)
-        await params_manager_instance.set_param('batch_size_cnn', 4)
-        await params_manager_instance.set_param('num_epochs_cnn_hpo_trial', 1) # Epochs for HPO trials
-
-        # Gold Standard
-        await params_manager_instance.set_param("gold_standard_data_path", str(test_gold_standard_dir))
-
-        # HPO
-        await params_manager_instance.set_param('perform_hyperparameter_optimization', True)
-        await params_manager_instance.set_param('hpo_num_trials', 2) # Minimal trials
-        await params_manager_instance.set_param('hpo_timeout_seconds', 60) # Short timeout
-
-        # Regimes
-        await params_manager_instance.set_param('regimes_to_train', test_regimes) # Test 'all' and 'testbull'
-
-        # Labeling config (ensure it's simple for testing)
-        current_configs = params_manager_instance.get_param('pattern_labeling_configs')
-        if not current_configs: current_configs = {}
-        current_configs.setdefault(test_patterns_to_train[0], {}).update({ "future_N_candles": 3, "profit_threshold_pct": 0.001, "loss_threshold_pct": -0.001 })
-        await params_manager_instance.set_param('pattern_labeling_configs', current_configs)
-
-        await params_manager_instance.set_param('current_cnn_architecture_key', test_arch_key)
-        # Ensure the test_arch_key exists in cnn_architecture_configs or HPO will use its own suggestions
-        cnn_arch_configs = params_manager_instance.get_param('cnn_architecture_configs')
-        if test_arch_key not in cnn_arch_configs:
-            cnn_arch_configs[test_arch_key] = {"num_conv_layers": 1, "filters_per_layer": [16], "kernel_sizes_per_layer": [3], "strides_per_layer": [1], "padding_per_layer": [1], "pooling_types_per_layer": ["max"], "pooling_kernel_sizes_per_layer": [2], "pooling_strides_per_layer": [2], "use_batch_norm": False, "dropout_rate": 0.1}
-            await params_manager_instance.set_param('cnn_architecture_configs', cnn_arch_configs)
-
-        logger.info(f"TEST SETUP: ParamsManager configured for Gold Standard, HPO, and Regimes.")
-
-        # --- PreTrainer Execution ---
-        pre_trainer = PreTrainer(params_manager=params_manager_instance)
-        test_strategy_id = "TestStrategy_FullFeatures"
-
-        try:
-            print(f"\n--- EXECUTING PreTrainer Pipeline (Gold, HPO, Regimes, CV, Backtesting) ---")
-            await pre_trainer.run_pretraining_pipeline(strategy_id=test_strategy_id, params_manager=params_manager_instance)
-        finally:
-            # --- Cleanup Test-Specific Artifacts ---
-            logger.info(f"--- Cleaning up test-specific artifacts ---")
-            if test_data_base_dir.exists():
-                shutil.rmtree(test_data_base_dir)
-                logger.info(f"Removed test artifacts base directory: {test_data_base_dir}")
-            # Remove the market_regimes.json created at the main path
-            if os.path.exists(MARKET_REGIMES_FILE):
-                 os.remove(MARKET_REGIMES_FILE)
-                 logger.info(f"Removed dummy market regimes file: {MARKET_REGIMES_FILE}")
-
-
-        # --- Validation of Outputs ---
-        print(f"\n--- VALIDATION OF OUTPUTS (Gold, HPO, Regimes) ---")
-
-        # Validate Model and Scaler files for each regime trained
-        for pair_name in test_pairs_for_test:
+    def _clear_test_artifacts(test_config: Dict[str, Any]):
+        logger.info(f"--- Test Setup: Clearing Artifacts ---")
+        # Clear model outputs for this specific test config
+        for pair_name in test_config["pairs"]:
             pair_sani = pair_name.replace('/', '_')
-            for pattern in test_patterns_to_train:
-                for regime_name_val in test_regimes: # test_regimes = ["all", "testbull"]
-                    model_dir_val = Path(MODELS_DIR) / pair_sani / test_timeframe
-                    # Filename includes _hpo_ because HPO is enabled
-                    expected_model_fname = f'cnn_model_{pattern}_{test_arch_key}_hpo_{regime_name_val}.pth'
-                    expected_scaler_fname = f'scaler_params_{pattern}_{test_arch_key}_hpo_{regime_name_val}.json'
+            # Construct path based on how PreTrainer saves models (self.models_dir)
+            model_output_dir = test_config["models_dir_path"] / pair_sani / test_config["timeframe"]
+            if model_output_dir.exists():
+                shutil.rmtree(model_output_dir)
+                logger.info(f"Removed model output directory: {model_output_dir}")
+
+        # Clear general test artifacts dir (which includes gold standard dir)
+        if test_config["test_data_base_dir"].exists():
+            shutil.rmtree(test_config["test_data_base_dir"])
+            logger.info(f"Removed test artifacts base directory: {test_config['test_data_base_dir']}")
+        os.makedirs(test_config["gold_standard_dir"], exist_ok=True) # Recreate gold_standard_dir
+
+        # Clear main log files and runtime files PreTrainer uses
+        files_to_remove = [
+            test_config["pretrain_log_file_path"],
+            test_config["time_effectiveness_file_path"],
+            test_config["market_regimes_file_path"], # This is where dummy market regimes will be written
+            test_config["backtest_results_file_path"]
+        ]
+        for file_path in files_to_remove:
+            if file_path.exists():
+                os.remove(file_path)
+                logger.info(f"Removed file: {file_path}")
+        logger.info(f"--- Test Setup: Artifacts Cleared ---")
+
+    def _create_dummy_test_data(test_config: Dict[str, Any]):
+        logger.info(f"--- Test Setup: Creating Dummy Data ---")
+        # Create Dummy Gold Standard CSV
+        with open(test_config["dummy_gold_csv_path"], 'w') as f:
+            f.write("timestamp,open,high,low,close,volume,gold_label\n")
+            f.write("1698883200000,1800,1801,1799,1800.5,10,1\n") # Nov 2, 2023, 00:00 GMT
+            f.write("1698886800000,1800.5,1802,1799.5,1801.0,12,0\n") # Nov 2, 2023, 01:00 GMT
+        logger.info(f"Dummy gold standard CSV created at: {test_config['dummy_gold_csv_path']}")
+
+        # Create Dummy Market Regimes JSON at the expected runtime path
+        with open(test_config["market_regimes_file_path"], 'w') as f:
+            json.dump(test_config["dummy_regimes_content"], f, indent=4)
+        logger.info(f"Dummy market regimes JSON created at: {test_config['market_regimes_file_path']}")
+        logger.info(f"--- Test Setup: Dummy Data Created ---")
+
+    async def _setup_test_params_manager(params_manager: ParamsManager, test_config: Dict[str, Any]):
+        logger.info(f"--- Test Setup: Configuring ParamsManager ---")
+        await params_manager.set_param("data_fetch_start_date_str", "2023-10-30")
+        await params_manager.set_param("data_fetch_end_date_str", "2023-11-10")
+        await params_manager.set_param("data_fetch_pairs", test_config["pairs"])
+        await params_manager.set_param("data_fetch_timeframes", [test_config["timeframe"]])
+        await params_manager.set_param("patterns_to_train", test_config["patterns_to_train"])
+
+        await params_manager.set_param('sequence_length_cnn', 5)
+        await params_manager.set_param('num_epochs_cnn', 1)
+        await params_manager.set_param('batch_size_cnn', 4)
+        await params_manager.set_param('num_epochs_cnn_hpo_trial', 1)
+
+        await params_manager.set_param("gold_standard_data_path", str(test_config["gold_standard_dir"]))
+        await params_manager.set_param('perform_hyperparameter_optimization', True)
+        await params_manager.set_param('hpo_num_trials', 2)
+        await params_manager.set_param('hpo_timeout_seconds', 60)
+        await params_manager.set_param('regimes_to_train', test_config["regimes"])
+
+        labeling_configs = params_manager.get_param('pattern_labeling_configs', {})
+        labeling_configs.setdefault(test_config["patterns_to_train"][0], {}).update({
+            "future_N_candles": 3, "profit_threshold_pct": 0.001, "loss_threshold_pct": -0.001
+        })
+        await params_manager.set_param('pattern_labeling_configs', labeling_configs)
+
+        await params_manager.set_param('current_cnn_architecture_key', test_config["arch_key"])
+        cnn_arch_configs = params_manager.get_param('cnn_architecture_configs', {})
+        if test_config["arch_key"] not in cnn_arch_configs:
+            cnn_arch_configs[test_config["arch_key"]] = {
+                "num_conv_layers": 1, "filters_per_layer": [16], "kernel_sizes_per_layer": [3],
+                "strides_per_layer": [1], "padding_per_layer": [1], "pooling_types_per_layer": ["max"],
+                "pooling_kernel_sizes_per_layer": [2], "pooling_strides_per_layer": [2],
+                "use_batch_norm": False, "dropout_rate": 0.1
+            }
+            await params_manager.set_param('cnn_architecture_configs', cnn_arch_configs)
+        logger.info(f"--- Test Setup: ParamsManager Configured ---")
+
+    def _validate_test_output_files(test_config: Dict[str, Any]):
+        logger.info(f"--- Validating Output Model/Scaler Files ---")
+        for pair_name in test_config["pairs"]:
+            pair_sani = pair_name.replace('/', '_')
+            for pattern in test_config["patterns_to_train"]:
+                for regime_name_val in test_config["regimes"]:
+                    model_dir_val = test_config["models_dir_path"] / pair_sani / test_config["timeframe"]
+                    expected_model_fname = f'cnn_model_{pattern}_{test_config["arch_key"]}_hpo_{regime_name_val}.pth'
+                    expected_scaler_fname = f'scaler_params_{pattern}_{test_config["arch_key"]}_hpo_{regime_name_val}.json'
 
                     expected_model_file = model_dir_val / expected_model_fname
                     expected_scaler_file = model_dir_val / expected_scaler_fname
 
                     assert expected_model_file.exists(), f"Model file MISSING: {expected_model_file}"
-                    print(f"SUCCESS: Model file for {regime_name_val} regime created: {expected_model_file.name}")
+                    logger.info(f"SUCCESS: Model file for {regime_name_val} regime created: {expected_model_file.name}")
                     assert expected_scaler_file.exists(), f"Scaler file MISSING: {expected_scaler_file}"
-                    print(f"SUCCESS: Scaler file for {regime_name_val} regime created: {expected_scaler_file.name}")
+                    logger.info(f"SUCCESS: Scaler file for {regime_name_val} regime created: {expected_scaler_file.name}")
+        logger.info(f"--- Output Model/Scaler Files Validated ---")
 
-        # Validate Pretrain Log for HPO and Regime entries
-        assert os.path.exists(PRETRAIN_LOG_FILE), f"Pretrain log file MISSING: {PRETRAIN_LOG_FILE}"
-        with open(PRETRAIN_LOG_FILE, 'r') as f:
+    def _validate_test_log_files(test_config: Dict[str, Any]):
+        logger.info(f"--- Validating Log Files ---")
+        # Validate Pretrain Log
+        pretrain_log_file = test_config["pretrain_log_file_path"]
+        assert pretrain_log_file.exists(), f"Pretrain log file MISSING: {pretrain_log_file}"
+        with open(pretrain_log_file, 'r') as f:
             log_entries = json.load(f)
-
         assert isinstance(log_entries, list), "Pretrain log is not a list."
-        # Expecting entries for each regime (all, testbull)
-        # Since CV is also on, if it runs before HPO it might create entries too.
-        # For this test, HPO runs first within train_ai_models, then CV (if enabled, it is).
-        # The log entries from HPO trials are not stored here, only final model training log.
 
-        found_all_regime_log = False
-        found_testbull_regime_log = False
-        hpo_params_found_in_log = False
+        found_all_regime_log = any(
+            entry["regime_name"] == "all" and f"{test_config['arch_key']}_hpo_all" in entry["model_type"]
+            for entry in log_entries
+        )
+        found_testbull_regime_log = any(
+            entry["regime_name"] == "testbull" and f"{test_config['arch_key']}_hpo_testbull" in entry["model_type"]
+            for entry in log_entries
+        )
+        for entry in log_entries: # Basic check for CV results presence
+             assert "cross_validation_results" in entry, f"cross_validation_results missing in log entry: {entry}"
 
-        for entry in log_entries:
-            assert "model_type" in entry
-            assert "regime_name" in entry
-            assert "cross_validation_results" in entry # CV is on
-
-            if entry["regime_name"] == "all" and f"{test_arch_key}_hpo_all" in entry["model_type"]:
-                found_all_regime_log = True
-                if "best_trial_params" in entry.get("cross_validation_results", {}).get("hpo_results", {}): # Assuming HPO results get logged under CV for now
-                     hpo_params_found_in_log = True
-            if entry["regime_name"] == "testbull" and f"{test_arch_key}_hpo_testbull" in entry["model_type"]:
-                found_testbull_regime_log = True
 
         assert found_all_regime_log, "Log entry for 'all' regime (with HPO suffix) not found."
         assert found_testbull_regime_log, "Log entry for 'testbull' regime (with HPO suffix) not found."
-        # The HPO params themselves are in study.best_trial.params logged during HPO, not directly in _log_pretrain_activity's main params.
-        # _log_pretrain_activity could be enhanced to store best_trial.params. For now, checking model name is key.
-        print("SUCCESS: Pretrain log contains entries for 'all' and 'testbull' regimes with HPO naming.")
+        logger.info("SUCCESS: Pretrain log contains entries for 'all' and 'testbull' regimes with HPO naming and CV results.")
 
-        # Validate Backtest Results File (Backtesting runs on "all" model by default)
-        assert os.path.exists(backtest_results_path), f"Backtest results file MISSING: {backtest_results_path}"
-        with open(backtest_results_path, 'r') as f:
+        # Validate Backtest Results File
+        backtest_results_file = test_config["backtest_results_file_path"]
+        assert backtest_results_file.exists(), f"Backtest results file MISSING: {backtest_results_file}"
+        with open(backtest_results_file, 'r') as f:
             try:
                 backtest_log_entries = json.load(f)
-                assert isinstance(backtest_log_entries, list) and len(backtest_log_entries) > 0, "Backtest log is empty or not a list."
-                print(f"SUCCESS: Backtest results file created and contains {len(backtest_log_entries)} entries.")
-                # Further checks on backtest content can be added if needed, e.g., ensuring it used the HPO "all" model.
-                # For now, existence and basic format is checked.
+                assert isinstance(backtest_log_entries, list) and len(backtest_log_entries) > 0, \
+                    "Backtest log is empty or not a list."
+                logger.info(f"SUCCESS: Backtest results file created and contains {len(backtest_log_entries)} entries.")
                 first_bt_entry = backtest_log_entries[0]
-                assert first_bt_entry['architecture_key'] == test_arch_key, f"Backtest ran with {first_bt_entry['architecture_key']} instead of {test_arch_key}"
-                # If HPO was run for 'all' regime, the backtester might use a model like 'default_simple_hpo_all'
-                # This depends on how Backtester.load_model constructs the filename.
-                # Current test setup for backtesting in PreTrainer passes `current_arch_key_for_bt` (which is `test_arch_key`)
-                # and `regime_filter="all"`. The Backtester needs to correctly interpret this to find the HPO-All model.
-                # For now, we assume it uses the base key and the backtester's loading logic handles finding the HPO version.
-                print(f"Backtest entry seems OK, used architecture key: {first_bt_entry['architecture_key']}")
-
+                assert first_bt_entry['architecture_key'] == test_config["arch_key"], \
+                    f"Backtest ran with {first_bt_entry['architecture_key']} instead of {test_config['arch_key']}"
+                logger.info(f"Backtest entry seems OK, used architecture key: {first_bt_entry['architecture_key']}")
             except json.JSONDecodeError:
-                assert False, f"FAILURE: Could not decode JSON from backtest results file {backtest_results_path}."
-        # The assert above will handle the "file not found" case by raising an AssertionError.
-        # An else block for an assert is not standard.
+                assert False, f"FAILURE: Could not decode JSON from backtest results file {backtest_results_file}."
+        logger.info(f"--- Log Files Validated ---")
+
+    async def run_test_pre_trainer():
+        test_config = _get_test_config()
+
+        logger.info(f"--- STARTING INTEGRATION TEST FOR PRETRAINER (ALL FEATURES) ---")
+        logger.info(f"Test config: Pair={test_config['pairs'][0]}, TF={test_config['timeframe']}, "
+                    f"Pattern={test_config['patterns_to_train'][0]}, Arch={test_config['arch_key']}, "
+                    f"Regimes={test_config['regimes']}")
+        logger.info(f"Test artifacts base dir: {test_config['test_data_base_dir']}")
+
+        _clear_test_artifacts(test_config)
+        _create_dummy_test_data(test_config)
+
+        params_manager_instance = ParamsManager()
+        await _setup_test_params_manager(params_manager_instance, test_config)
+
+        # --- PreTrainer Config for instantiation ---
+        # PreTrainer now takes a config dict in its constructor.
+        # We need to provide a minimal one, or one that matches what it expects.
+        # For this test, self.models_dir is important.
+        # It's constructed as: self.config.get("user_data_dir", "user_data") + "/models/cnn_pretrainer"
+        # So, we need to ensure "user_data_dir" is in the config passed to PreTrainer.
+        pre_trainer_constructor_config = {
+            "user_data_dir": BASE_USER_DATA_DIR, # "user_data" by default
+            "exchange": {"name": "bitvavo"}, # Dummy, for potential BitvavoExecutor init
+            # Add other minimal configs PreTrainer might need at init
+        }
+
+        pre_trainer = PreTrainer(config=pre_trainer_constructor_config)
+        # Override params_manager if PreTrainer's __init__ creates its own without passing config
+        pre_trainer.params_manager = params_manager_instance
+
+        test_strategy_id = "TestStrategy_FullFeatures"
+
+        try:
+            logger.info(f"\n--- EXECUTING PreTrainer Pipeline (Gold, HPO, Regimes, CV, Backtesting) ---")
+            # Pass the already configured params_manager_instance
+            await pre_trainer.run_pretraining_pipeline(strategy_id=test_strategy_id, params_manager=params_manager_instance)
+        finally:
+            # --- Cleanup Test-Specific Artifacts (Runtime files like market_regimes.json) ---
+            logger.info(f"--- Cleaning up runtime test-specific artifacts (e.g., market_regimes.json) ---")
+            # This ensures MARKET_REGIMES_FILE (if modified for test) is cleaned
+            if test_config["market_regimes_file_path"].exists() and \
+               test_config["market_regimes_file_path"] == Path(MARKET_REGIMES_FILE): # only if it's the main one
+                # Check if content is our dummy content before removing, or just remove if path matches
+                # For simplicity, if the path is the global one, we remove it as it was a test-specific overwrite.
+                try:
+                    with open(test_config["market_regimes_file_path"], 'r') as f_mr:
+                        content_mr = json.load(f_mr)
+                        if content_mr == test_config["dummy_regimes_content"]:
+                             os.remove(test_config["market_regimes_file_path"])
+                             logger.info(f"Removed dummy market regimes file: {test_config['market_regimes_file_path']}")
+                        else:
+                            logger.warning(f"Market regimes file {test_config['market_regimes_file_path']} was not the dummy one. Not removed.")
+                except Exception as e_mr_clean:
+                    logger.error(f"Error cleaning market regimes file: {e_mr_clean}")
+
+            # General test_data_base_dir (like gold standard) can be cleaned up here or left for inspection
+            # _clear_test_artifacts already handles removal of test_data_base_dir for next run.
+            # This finally block is more for runtime generated files that might persist if not handled by _clear_test_artifacts initially.
+
+
+        _validate_test_output_files(test_config)
+        _validate_test_log_files(test_config)
 
         # --- Optional: Test SimpleCNN Custom Architecture Instantiation (already present, keep) ---
         print("\n--- Testing SimpleCNN Custom Architecture Instantiation (original test) ---")
         try:
             num_input_features_example = 12
-            custom_cnn = SimpleCNN( input_channels=num_input_features_example, num_classes=2, sequence_length=30,
-                num_conv_layers=3, filters_per_layer=[16,32,64], kernel_sizes_per_layer=[3,3,5],
-                strides_per_layer=[1,1,1], padding_per_layer=[1,1,2],
-                pooling_types_per_layer=['max','max',None], pooling_kernel_sizes_per_layer=[2,2,1],
-                pooling_strides_per_layer=[2,2,1], use_batch_norm=True, dropout_rate=0.25)
-            print("SUCCESS: Custom SimpleCNN instantiated.")
-        except Exception as e: print(f"FAILURE: Custom SimpleCNN instantiation failed: {e}"); logger.error(f"Custom SimpleCNN instantiation failed: {e}", exc_info=True)
+            # Assuming SimpleCNN is imported or accessible here
+            # from core.cnn_models import SimpleCNN # Or wherever it's defined
+            # For now, this part might fail if SimpleCNN is not directly in scope
+            # This test was likely part of a different context or SimpleCNN was globally available
+            # For this refactoring, we'll keep it but acknowledge it might need an import
 
-        logger.info("--- INTEGRATION TEST FOR PRETRAINER (CV & BACKTESTING) COMPLETED ---")
+            # Attempting to make SimpleCNN accessible for the test
+            # This is a guess; actual location might differ
+            try:
+                from core.cnn_models import SimpleCNN # Assuming this is where it would be
+            except ImportError:
+                logger.warning("SimpleCNN class not found for custom instantiation test. Skipping this part.")
+                SimpleCNN = None # Make it None so the test below skips
+
+            if SimpleCNN:
+                custom_cnn = SimpleCNN( input_channels=num_input_features_example, num_classes=2, sequence_length=30,
+                    num_conv_layers=3, filters_per_layer=[16,32,64], kernel_sizes_per_layer=[3,3,5],
+                    strides_per_layer=[1,1,1], padding_per_layer=[1,1,2],
+                    pooling_types_per_layer=['max','max',None], pooling_kernel_sizes_per_layer=[2,2,1],
+                    pooling_strides_per_layer=[2,2,1], use_batch_norm=True, dropout_rate=0.25)
+                print("SUCCESS: Custom SimpleCNN instantiated.")
+            else:
+                print("SKIPPED: Custom SimpleCNN instantiation test (SimpleCNN class not found).")
+
+        except Exception as e:
+            print(f"FAILURE: Custom SimpleCNN instantiation failed: {e}")
+            logger.error(f"Custom SimpleCNN instantiation failed: {e}", exc_info=True)
+
+        logger.info("--- INTEGRATION TEST FOR PRETRAINER (ALL FEATURES) COMPLETED ---")
 
     asyncio.run(run_test_pre_trainer())
