@@ -10,7 +10,7 @@ load_dotenv() # Load default .env file
 
 # Util imports
 from utils.data_downloader import download_data
-from utils.data_validator import load_data_for_pair, validate_ohlcv_data, calculate_indicators, check_cnn_data_suitability
+from utils.data_validator import load_data_for_pair, validate_ohlcv_data, check_cnn_data_suitability
 # from strategies.DUOAI_Strategy import DUOAI_Strategy # For type hinting and strategy loading - Defer if Freqtrade is missing
 # from freqtrade.data.dataprovider import DataProvider # Defer if Freqtrade is missing
 # from freqtrade.configuration import Configuration # Defer if Freqtrade is missing
@@ -113,7 +113,6 @@ async def main():
                 if df_pair_data is not None and not df_pair_data.empty:
                     # Pass pair and timeframe to validation functions as they expect them
                     if validate_ohlcv_data(df_pair_data, pair, timeframe):
-                        calculate_indicators(df_pair_data, pair, timeframe)
                         check_cnn_data_suitability(df_pair_data, pair, timeframe)
                 else:
                     logger.warning(f"No data loaded for {pair} - {timeframe}. Skipping further validation for this item.")
