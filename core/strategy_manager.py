@@ -166,103 +166,67 @@ class StrategyManager:
             return False
 
 
-    async def get_best_strategy(self, token: str, interval: str) -> Optional[Dict[str, Any]]:
-        """
-        Selects the best performing strategy for a given token and interval,
-        considering performance from DB and parameters from ParamsManager.
-        Dynamically selects based on performance metrics.
-        """
-        logger.info(f"Attempting to select the best strategy dynamically for token {token}, interval {interval}.")
+async def get_best_strategy(self, token: str, interval: str) -> Optional[Dict[str, Any]]:
+    logger.info(f"Attempting to determine best strategy for token: {token}, interval: {interval}")
 
-        strategy_ids = self.params_manager.get_all_strategy_ids()
-        if not strategy_ids:
-            logger.warning("No strategy IDs found in ParamsManager. Cannot select best strategy.")
-            return None
+    available_strategies = await self.params_manager.get_param("strategies")
+    if not available_strategies or not isinstance(available_strategies, dict):
+        logger.warning("No strategies found or 'strategies' is not a dictionary in ParamsManager configuration. Cannot determine best strategy.")
+        return None
 
-        best_strategy_id: Optional[str] = None
-        best_strategy_performance_metrics: Optional[Dict[str, Any]] = None
+    best_strategy_id = None
+    best_performance_score = -float('inf')
+    best_strategy_details = None
 
-        logger.info(f"Found available strategy IDs: {strategy_ids}")
+    for strategy_id, strategy_config_params in available_strategies.items():
+        logger.info(f"Evaluating strategy: {strategy_id} for token {token}")
 
-        for strategy_id_iter in strategy_ids: # Renamed to avoid conflict
-            logger.debug(f"Evaluating strategy: {strategy_id_iter} for token {token}, interval {interval}")
-            current_performance = self.get_strategy_performance(strategy_id_iter) # Sync call
+        performance_data = self.get_strategy_performance(strategy_id) # This is a synchronous method call
 
-            # tradeCount is a primary indicator of relevance/experience.
-            if current_performance.get("tradeCount", 0) == 0:
-                logger.info(f"Strategy {strategy_id_iter} has no trades. Performance: {current_performance}. It will be considered with lowest priority.")
-                # This strategy will only be chosen if no other strategy has trades or better metrics.
+        win_rate = performance_data.get("winRate", 0.0)
+        avg_profit = performance_data.get("avgProfit", 0.0)
+        trade_count = performance_data.get("tradeCount", 0)
 
-            if best_strategy_id is None:
-                best_strategy_id = strategy_id_iter
-                best_strategy_performance_metrics = current_performance
-                logger.info(f"Initial best strategy set to: {strategy_id_iter} with performance {current_performance}")
-            else:
-                # Ensure best_strategy_performance_metrics is not None before accessing keys, though logic implies it won't be.
-                if best_strategy_performance_metrics is None:
-                    logger.error("Internal logic error: best_strategy_id is set but best_strategy_performance_metrics is None. Resetting to current.")
-                    best_strategy_id = strategy_id_iter
-                    best_strategy_performance_metrics = current_performance
-                    continue # Skip to next iteration after reset
-
-                # Comparison logic:
-                # 1. Higher tradeCount is generally preferred for reliability, but primary objective is profit/winrate.
-                #    Let's stick to WinRate -> AvgProfit -> TradeCount as primary sorting.
-                #    A strategy with 0 trades will have 0 WinRate and 0 AvgProfit, naturally ranking it lower.
-
-                if current_performance["winRate"] > best_strategy_performance_metrics["winRate"]:
-                    logger.info(f"New best strategy: {strategy_id_iter} (WinRate {current_performance['winRate']} > {best_strategy_performance_metrics['winRate']})")
-                    best_strategy_id = strategy_id_iter
-                    best_strategy_performance_metrics = current_performance
-                elif current_performance["winRate"] == best_strategy_performance_metrics["winRate"]:
-                    if current_performance["avgProfit"] > best_strategy_performance_metrics["avgProfit"]:
-                        logger.info(f"New best strategy: {strategy_id_iter} (WinRate tie, AvgProfit {current_performance['avgProfit']} > {best_strategy_performance_metrics['avgProfit']})")
-                        best_strategy_id = strategy_id_iter
-                        best_strategy_performance_metrics = current_performance
-                    elif current_performance["avgProfit"] == best_strategy_performance_metrics["avgProfit"]:
-                        if current_performance["tradeCount"] > best_strategy_performance_metrics["tradeCount"]:
-                            logger.info(f"New best strategy: {strategy_id_iter} (WinRate & AvgProfit tie, TradeCount {current_performance['tradeCount']} > {best_strategy_performance_metrics['tradeCount']})")
-                            best_strategy_id = strategy_id_iter
-                            best_strategy_performance_metrics = current_performance
-                        else:
-                            logger.debug(f"Strategy {strategy_id_iter} not better than {best_strategy_id} on tie-breaking trade count.")
-                    else:
-                        logger.debug(f"Strategy {strategy_id_iter} not better than {best_strategy_id} on tie-breaking profit.")
-                else:
-                    logger.debug(f"Strategy {strategy_id_iter} not better than {best_strategy_id} on win rate.")
-
-        if best_strategy_id is None or best_strategy_performance_metrics is None:
-            logger.warning("Could not determine a best strategy after evaluating all options (e.g., strategy_ids was empty or all strategies had zero trades and were not preferred).")
-            return None
-
-        logger.info(f"Selected best strategy: {best_strategy_id} with performance: {best_strategy_performance_metrics}")
-
-        strategy_params = self.params_manager.get_strategy_params(best_strategy_id) # Sync call
-        if strategy_params is None:
-            logger.warning(f"Parameters for selected best strategy '{best_strategy_id}' not found by ParamsManager. This is unexpected.")
-            # Attempt to fetch default parameters as a fallback to ensure some params are returned
-            default_params_for_best = self.params_manager._get_default_params().get("strategies", {}).get(best_strategy_id)
-            if default_params_for_best:
-                logger.info(f"Using default parameters for {best_strategy_id} as a fallback since live params were not found.")
-                strategy_params = default_params_for_best
-            else:
-                # This case is critical: the strategy ID was known, but no params (live or default) found.
-                logger.error(f"Critical: Default parameters for strategy {best_strategy_id} also not found. Cannot proceed with this strategy.")
-                return None # Or handle by selecting another strategy if possible
-
-        bias = 0.5 # Default bias
+        bias_score = 0.5  # Default bias
         if self.bias_reflector:
-            bias = self.bias_reflector.get_bias_score(token, best_strategy_id) # Assumed sync
-            logger.info(f"Bias score for {best_strategy_id} on token {token}: {bias}")
+            bias_score = self.bias_reflector.get_bias_score(token, strategy_id)
         else:
-            logger.warning("BiasReflector not available in StrategyManager. Using default bias 0.5.")
+            logger.warning(f"BiasReflector not available. Using default bias 0.5 for strategy {strategy_id}, token {token}.")
 
-        return {
-            "id": best_strategy_id,
-            "performance": best_strategy_performance_metrics,
-            "bias": bias,
-            "parameters": strategy_params
-        }
+        # Calculate current_performance_score
+        current_performance_score = (win_rate * 0.7) + (avg_profit * 10.0)
+        current_performance_score += (bias_score * 0.1)
+
+        # Apply penalty for low trade count
+        trade_count_threshold = 50 # Standard threshold
+        # Attempt to get strategy-specific threshold if defined, else use standard
+        # This assumes a parameter like "minTradeCountForScoring" might exist in strategy_config_params
+        specific_trade_count_threshold = strategy_config_params.get("minTradeCountForScoring", trade_count_threshold)
+
+        if trade_count < specific_trade_count_threshold:
+            penalty_factor = 0.5
+            current_performance_score *= penalty_factor
+            logger.warning(f"Applied penalty ({penalty_factor:.2f}) to strategy {strategy_id} due to low trade count ({trade_count} < {specific_trade_count_threshold}). Original score: {current_performance_score / penalty_factor:.4f}, Penalized score: {current_performance_score:.4f}")
+
+        logger.info(f"Strategy: {strategy_id}, WinRate: {win_rate:.2%}, AvgProfit: {avg_profit:.4f}, TradeCount: {trade_count}, Bias: {bias_score:.2f}, Calculated Score: {current_performance_score:.4f}")
+
+        if current_performance_score > best_performance_score:
+            best_performance_score = current_performance_score
+            best_strategy_id = strategy_id
+            best_strategy_details = {
+                "id": strategy_id,
+                "performance": performance_data,
+                "bias": bias_score,
+                "parameters": strategy_config_params, # Parameters from ParamsManager for this strategy
+                "calculated_score": current_performance_score # Store the score for logging/debugging
+            }
+
+    if best_strategy_details:
+        logger.info(f"Best strategy selected for token {token}, interval {interval}: {best_strategy_details['id']} with score: {best_strategy_details['calculated_score']:.4f}")
+    else:
+        logger.warning(f"Could not determine a best strategy for token {token}, interval {interval} from available options.")
+
+    return best_strategy_details
 
     async def _notify_freqtrade_of_parameter_changes(self, strategy_id: str):
         """
@@ -338,117 +302,131 @@ if __name__ == "__main__":
     class MockParamsManager:
         def __init__(self, initial_params: Optional[Dict[str, Any]] = None, initial_strategy_ids: Optional[List[str]] = None):
             self.default_params_set = {
-                "DUOAI_Strategy": {
-                    "id": "DUOAI_Strategy", # Ensure ID is part of params for consistency if needed
-                    "buy": {"emaPeriod": 20, "rsiThresholdBuy": 65}, "sell": {"rsiThresholdSell": 75},
-                    "roi": {0: 0.1, 30: 0.05, 60: 0.01}, "stoploss": -0.10,
-                    "trailing": {"enabled": True, "value": 0.02, "offset": 0.005} # Added offset for completeness
+                "DUOAI_Strategy_V1": { # Renamed from DUOAI_Strategy to match other branch and test data
+                    "id": "DUOAI_Strategy_V1",
+                    "buy_params": {"emaPeriod": 20, "rsiThresholdBuy": 70}, # Changed from buy to buy_params
+                    "sell_params": {"rsiThresholdSell": 70}, # Changed from sell to sell_params
+                    "roi_table": {"0": 0.1, "30": 0.05, "60": 0.01}, # Changed from roi to roi_table and added 60m
+                    "stoploss_value": -0.10, # Changed from stoploss to stoploss_value
+                    "minTradeCountForScoring": 40,
+                    "trailing_stop_positive": 0.01, # Added to match other branch
+                    "trailing_stop_positive_offset": 0.02, # Added to match other branch
+                    # Removed "trailing" dict as other branch uses flat trailing params in this mock
                 },
+                "DUOAI_Strategy_V2": { # Added to match other branch
+                    "id": "DUOAI_Strategy_V2",
+                    "buy_params": {"emaPeriod": 10, "rsiThresholdBuy": 65},
+                    "sell_params": {"rsiThresholdSell": 75},
+                    "roi_table": {"0": 0.15, "20": 0.08},
+                    "stoploss_value": -0.05,
+                    # minTradeCountForScoring will use default from get_best_strategy
+                },
+                "LowTrade_Strategy": { # Added to match other branch
+                    "id": "LowTrade_Strategy",
+                    "buy_params": {"emaPeriod": 5, "rsiThresholdBuy": 60},
+                    "sell_params": {"rsiThresholdSell": 80},
+                    "roi_table": {"0": 0.20},
+                    "stoploss_value": -0.03,
+                },
+                # Keeping other strategy definitions from the 'main' branch for broader test coverage if needed later.
                 "OtherStrategy": {
                     "id": "OtherStrategy",
-                    "buy": {"emaPeriod": 50, "rsiThresholdBuy": 60}, "sell": {"rsiThresholdSell": 80},
-                    "roi": {0: 0.2, 30: 0.15, 60: 0.05}, "stoploss": -0.15,
-                    "trailing": {"enabled": False}
+                    "buy_params": {"emaPeriod": 50, "rsiThresholdBuy": 60},
+                    "sell_params": {"rsiThresholdSell": 80},
+                    "roi_table": {"0": 0.2, "30": 0.15, "60": 0.05}, "stoploss_value": -0.15,
+                    # "trailing": {"enabled": False} # Removed as other branch mock uses flat structure for these
                 },
-                "DUOAI_Strategy_Zero": { # For zero trade test
-                    "id": "DUOAI_Strategy_Zero", "param": "zero_trade_param", "stoploss": -0.10, "roi": {0:0.1}
+                "DUOAI_Strategy_Zero": {
+                    "id": "DUOAI_Strategy_Zero", "buy_params": {"param": "zero_trade_param"}, "stoploss_value": -0.10, "roi_table": {"0":0.1}
                 },
-                "Strategy_A_Tie": {"id": "Strategy_A_Tie", "param": "A", "stoploss": -0.10, "roi": {0:0.1}},
-                "Strategy_B_Tie": {"id": "Strategy_B_Tie", "param": "B", "stoploss": -0.10, "roi": {0:0.1}},
-                "Strategy_C_Tie": {"id": "Strategy_C_Tie", "param": "C", "stoploss": -0.10, "roi": {0:0.1}},
-                "Strategy_D_Tie": {"id": "Strategy_D_Tie", "param": "D", "stoploss": -0.10, "roi": {0:0.1}},
-                "Strategy_E_Winner": {"id": "Strategy_E_Winner", "param": "E", "stoploss": -0.10, "roi": {0:0.1}},
-                "Strategy_F_Loser": {"id": "Strategy_F_Loser", "param": "F", "stoploss": -0.10, "roi": {0:0.1}}
+                "Strategy_A_Tie": {"id": "Strategy_A_Tie", "buy_params": {"param": "A"}, "stoploss_value": -0.10, "roi_table": {"0":0.1}},
+                "Strategy_B_Tie": {"id": "Strategy_B_Tie", "buy_params": {"param": "B"}, "stoploss_value": -0.10, "roi_table": {"0":0.1}},
+                "Strategy_C_Tie": {"id": "Strategy_C_Tie", "buy_params": {"param": "C"}, "stoploss_value": -0.10, "roi_table": {"0":0.1}},
+                "Strategy_D_Tie": {"id": "Strategy_D_Tie", "buy_params": {"param": "D"}, "stoploss_value": -0.10, "roi_table": {"0":0.1}},
+                "Strategy_E_Winner": {"id": "Strategy_E_Winner", "buy_params": {"param": "E"}, "stoploss_value": -0.10, "roi_table": {"0":0.1}},
+                "Strategy_F_Loser": {"id": "Strategy_F_Loser", "buy_params": {"param": "F"}, "stoploss_value": -0.10, "roi_table": {"0":0.1}}
             }
-            self.params = initial_params if initial_params is not None else self.default_params_set.copy()
+            # This will now be called strategies_config to match the get_param("strategies") call
+            self.strategies_config = initial_params if initial_params is not None else self.default_params_set.copy()
             self.strategy_ids_override = initial_strategy_ids
             self.files_written = {}
 
         def update_params_data(self, new_params_data):
-            """Helper to change the entire params set for a test."""
-            self.params = new_params_data
+            self.strategies_config = new_params_data # Updated to strategies_config
 
         def override_strategy_ids(self, new_ids_list: Optional[List[str]]):
-            """Helper to set which strategy IDs get_all_strategy_ids() should return."""
             self.strategy_ids_override = new_ids_list
 
-        # This method is kept for other potential test usages
-        async def get_param(self, category: str, strategy_id: str = None, param_name: str = None):
-            if category == "strategies" and strategy_id:
-                return self.params.get(strategy_id, {}).copy() # Return a copy
-            elif strategy_id and param_name: # Individual param lookup
-                # This part needs to be aware of the structure in self.params
-                # For example, if params are nested under 'buy', 'sell', etc.
-                strategy_specific_params = self.params.get(strategy_id, {})
-                if param_name in strategy_specific_params: # Top-level param like 'stoploss' or 'roi'
-                    return strategy_specific_params.get(param_name)
-                # Check nested if not found at top
-                return strategy_specific_params.get("buy", {}).get(param_name) or \
-                       strategy_specific_params.get("sell", {}).get(param_name)
+        async def get_param(self, key: str, strategy_id: str = None): # Simplified signature
+            if key == "strategies" and strategy_id is None:
+                # This is called by get_best_strategy
+                return self.strategies_config.copy()
+            if key == "strategies" and strategy_id:
+                # This might be called by mutate_strategy if it needs to get full original params first
+                return self.strategies_config.get(strategy_id, {}).copy()
+            # Fallback for direct parameter access if needed by other parts of tests
+            if strategy_id:
+                 strategy_conf = self.strategies_config.get(strategy_id, {})
+                 # Attempt to get from buy_params, sell_params, or root
+                 if key in strategy_conf.get("buy_params", {}):
+                     return strategy_conf["buy_params"][key]
+                 if key in strategy_conf.get("sell_params", {}):
+                     return strategy_conf["sell_params"][key]
+                 return strategy_conf.get(key)
             return None
 
         def get_all_strategy_ids(self) -> List[str]:
-            """Mock: Returns all strategy IDs. Honors override if set."""
             if self.strategy_ids_override is not None:
                 return self.strategy_ids_override
-            return list(self.params.keys())
+            return list(self.strategies_config.keys()) # Updated to strategies_config
 
         def get_strategy_params(self, strategy_id: str) -> Optional[Dict[str, Any]]:
-            """Mock: Returns parameters for a specific strategy from current self.params."""
-            # Ensure it returns a copy, similar to actual ParamsManager behavior to prevent unintended modifications.
-            if strategy_id in self.params:
-                return self.params[strategy_id].copy()
+            # This method is used by the 'main' branch version of get_best_strategy.
+            # The merged get_best_strategy gets all strategies then iterates.
+            # However, keeping it for compatibility or future test use.
+            if strategy_id in self.strategies_config: # Updated to strategies_config
+                return self.strategies_config[strategy_id].copy() # Updated to strategies_config
             return None
 
-        async def set_param(self, key: str, value: Any, strategy_id: Optional[str] = None): # Corrected signature
-            if strategy_id not in self.params:
-                self.params[strategy_id] = {"buy": {}, "sell": {}} # Ensure strategy dict exists
+        async def set_param(self, key: str, value: Any, strategy_id: Optional[str] = None):
+            if strategy_id:
+                if strategy_id not in self.strategies_config: # Updated to strategies_config
+                    self.strategies_config[strategy_id] = {"buy_params": {}, "sell_params": {}} # Updated to strategies_config
 
-            # Mock logic: try to place known parameter keys in their typical locations
-            # This is a simplified mock; a real ParamsManager has more complex logic.
-            if key in ["minimal_roi", "stoploss"] or "trailing" in key: # Example root-level params for a strategy
-                 self.params[strategy_id][key] = value
-            elif "Threshold" in key or "Period" in key or "Weight" in key: # Likely a buy/sell param
-                # Simplistic: assume it's a buy param if not obviously something else
-                if "buy" not in self.params[strategy_id]: self.params[strategy_id]["buy"] = {}
-                self.params[strategy_id]["buy"][key] = value
-            else: # Default to placing under 'buy' or at root for unknown keys
-                if "buy" not in self.params[strategy_id]: self.params[strategy_id]["buy"] = {}
-                self.params[strategy_id]["buy"][key] = value # Fallback for this mock
-
-            logger.info(f"MockParamsManager: Set {key} to {value} for strategy {strategy_id}")
-
+                # Adjusted logic to align with merged structure (buy_params, sell_params, etc.)
+                # This mock will assume common keys go to 'buy_params' if not obviously 'roi_table' or 'stoploss_value' etc.
+                if key == "emaPeriod" or "ThresholdBuy" in key : # Example, adapt as needed
+                    if "buy_params" not in self.strategies_config[strategy_id]: self.strategies_config[strategy_id]["buy_params"] = {}
+                    self.strategies_config[strategy_id]["buy_params"][key] = value
+                elif "ThresholdSell" in key:
+                    if "sell_params" not in self.strategies_config[strategy_id]: self.strategies_config[strategy_id]["sell_params"] = {}
+                    self.strategies_config[strategy_id]["sell_params"][key] = value
+                else: # roi_table, stoploss_value, or other direct params
+                    self.strategies_config[strategy_id][key] = value
+                logger.info(f"MockParamsManager: Set {key} to {value} for {strategy_id}")
 
         async def update_strategy_roi_sl_params(self, strategy_id: str,
                                                 new_roi: Optional[Dict] = None,
-                                                new_stoploss: Optional[float] = None, # Corrected param name
+                                                new_stoploss: Optional[float] = None,
                                                 new_trailing_stop: Optional[float] = None,
                                                 new_trailing_only_offset_is_reached: Optional[float] = None):
-            if strategy_id not in self.params:
-                self.params[strategy_id] = {}
+            if strategy_id not in self.strategies_config: # Updated to strategies_config
+                self.strategies_config[strategy_id] = {} # Updated to strategies_config
 
-            if new_roi is not None: # Renamed from roi_table
-                self.params[strategy_id]['roi'] = new_roi
-                logger.info(f"MockParamsManager: Updated ROI for {strategy_id} to {new_roi}")
-            if new_stoploss is not None: # Renamed from stoploss_value
-                self.params[strategy_id]['stoploss'] = new_stoploss
-                logger.info(f"MockParamsManager: Updated stoploss for {strategy_id} to {new_stoploss}")
+            if new_roi is not None:
+                self.strategies_config[strategy_id]['roi_table'] = new_roi
+            if new_stoploss is not None:
+                self.strategies_config[strategy_id]['stoploss_value'] = new_stoploss
 
-            # Ensure 'trailing' dict exists before trying to set sub-keys
-            if 'trailing' not in self.params[strategy_id]:
-                self.params[strategy_id]['trailing'] = {} # Initialize if not present
-
+            # Merged version uses flat trailing params
             if new_trailing_stop is not None:
-                self.params[strategy_id]['trailing']['value'] = new_trailing_stop # Store under 'value'
-                logger.info(f"MockParamsManager: Updated trailing_stop_positive for {strategy_id} to {new_trailing_stop}")
-
+                self.strategies_config[strategy_id]['trailing_stop_positive'] = new_trailing_stop
             if new_trailing_only_offset_is_reached is not None:
-                self.params[strategy_id]['trailing']['offset'] = new_trailing_only_offset_is_reached # Store under 'offset'
-                logger.info(f"MockParamsManager: Updated trailing_stop_positive_offset for {strategy_id} to {new_trailing_only_offset_is_reached}")
+                self.strategies_config[strategy_id]['trailing_stop_positive_offset'] = new_trailing_only_offset_is_reached
 
-            # Simulate that ParamsManager would write these to a strategy file if any change was made
             if new_roi or new_stoploss or new_trailing_stop or new_trailing_only_offset_is_reached:
                 self.files_written[strategy_id] = True
+                logger.info(f"MockParamsManager: Updated ROI/SL/Trailing for {strategy_id}")
 
 
     class MockBiasReflector:
@@ -501,302 +479,219 @@ if __name__ == "__main__":
         print(f"Test database {db_path} created/recreated and populated with {len(trades_to_insert)} trades.")
 
 
-    async def run_test_strategy_manager():
-        # Setup: Create dummy DB and mock objects
-        setup_test_db(TEST_DB_PATH)
+async def run_test_strategy_manager():
+    # Setup: Create dummy DB and mock objects
+    # Corrected path for .env when running this script directly
+    # No need to load .env here if StrategyManager and ParamsManager don't directly use it in test setup
+    # dotenv_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '.env')
+    # dotenv.load_dotenv(dotenv_path)
 
-        # Instantiate StrategyManager with the test DB path
-        # It will pick up FREQTRADE_DB_PATH from os.environ
-        strategy_manager = StrategyManager()
+    # Setup basic logging for the test
+    import sys
+    logging.basicConfig(level=logging.INFO,
+                        format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+                        handlers=[logging.StreamHandler(sys.stdout)])
 
-        # Replace actual ParamsManager and BiasReflector with mocks for testing
-        strategy_manager.params_manager = MockParamsManager()
-        strategy_manager.bias_reflector = MockBiasReflector()
+    # Define a test DB path and ensure it's used by StrategyManager
+    TEST_DB_PATH = "test_freqtrade.sqlite"
+    os.environ['FREQTRADE_DB_PATH'] = TEST_DB_PATH # StrategyManager will pick this up
 
-        test_strategy_id = "DUOAI_Strategy"
-        other_strategy_id = "OtherStrategy"
-        test_token = "ETH/USDT"
+    # Setup test DB with data for V1, V2, LowTrade strategies
+    # Data for DUOAI_Strategy_V1 (50 trades, 60% WR, 0.01 avg profit)
+    trades_v1 = [('DUOAI_Strategy_V1', 'ETH/USDT', 0, '2023-01-01', '2023-01-01', 0.02, 2, 100)] * 30
+    trades_v1 += [('DUOAI_Strategy_V1', 'ETH/USDT', 0, '2023-01-02', '2023-01-02', -0.005, -0.5, 100)] * 20
+    # Data for DUOAI_Strategy_V2 (60 trades, 70% WR, 0.015 avg profit)
+    trades_v2 = [('DUOAI_Strategy_V2', 'ETH/USDT', 0, '2023-01-03', '2023-01-03', 0.025, 2.5, 100)] * 42
+    trades_v2 += [('DUOAI_Strategy_V2', 'ETH/USDT', 0, '2023-01-04', '2023-01-04', -1.5/180, -1.5/1.8, 100)] * 18
+    # Data for LowTrade_Strategy (10 trades, 80% WR, 0.02 avg profit)
+    trades_low = [('LowTrade_Strategy', 'ETH/USDT', 0, '2023-01-05', '2023-01-05', 0.03, 3, 100)] * 8
+    trades_low += [('LowTrade_Strategy', 'ETH/USDT', 0, '2023-01-06', '2023-01-06', -0.02, -2, 100)] * 2
 
-        print("\n--- Test StrategyManager with DB and Mocks ---")
+    # Adding data for 'OtherStrategy' for broader compatibility with old tests if they were to be partially reused.
+    # These trades won't affect the primary tests for V1, V2, LowTrade unless explicitly queried.
+    trades_other = [
+        ('OtherStrategy', 'LTC/USDT', 0, '2023-01-05 10:00:00', '2023-01-05 12:00:00', 0.05, 0.05*200, 200),
+        ('OtherStrategy', 'LTC/USDT', 0, '2023-01-06 10:00:00', '2023-01-06 12:00:00', 0.01, 0.01*200, 200),
+    ]
+    all_trades_for_setup = trades_v1 + trades_v2 + trades_low + trades_other
+    setup_test_db(TEST_DB_PATH, custom_trades_data=all_trades_for_setup) # Use the combined list
 
-        # 1. Test get_strategy_performance
-        print(f"\nFetching performance for {test_strategy_id} from DB...")
-        perf_duoai = strategy_manager.get_strategy_performance(test_strategy_id)
-        print(f"Performance for {test_strategy_id}: {perf_duoai}")
-        # DUOAI_Strategy: 2 wins, 1 loss out of 3 closed trades on ETH/USDT and BTC/USDT
-        # Win rate = 2/3 = 0.666...
-        # Avg profit = (0.02 - 0.01 + 0.03) / 3 = 0.04 / 3 = 0.01333...
-        assert abs(perf_duoai['winRate'] - (2/3)) < 0.001
-        assert abs(perf_duoai['avgProfit'] - (0.04/3)) < 0.001
-        assert perf_duoai['tradeCount'] == 3
+    strategy_manager = StrategyManager() # Will use TEST_DB_PATH via env var
+    strategy_manager.params_manager = MockParamsManager() # Uses merged MockParamsManager
+    strategy_manager.bias_reflector = MockBiasReflector() # Uses merged MockBiasReflector
 
-        print(f"\nFetching performance for {other_strategy_id} from DB...")
-        perf_other = strategy_manager.get_strategy_performance(other_strategy_id)
-        print(f"Performance for {other_strategy_id}: {perf_other}")
-        # OtherStrategy: 2 wins out of 2 closed trades
-        # Win rate = 2/2 = 1.0
-        # Avg profit = (0.05 + 0.01) / 2 = 0.06 / 2 = 0.03
-        assert abs(perf_other['winRate'] - 1.0) < 0.001
-        assert abs(perf_other['avgProfit'] - 0.03) < 0.001
-        assert perf_other['tradeCount'] == 2
+    test_token = "ETH/USDT"
+    test_interval = "5m"
 
-        print(f"\nFetching performance for UnknownStrategy from DB...")
-        perf_unknown = strategy_manager.get_strategy_performance("UnknownStrategy")
-        print(f"Performance for UnknownStrategy: {perf_unknown}")
-        assert perf_unknown['winRate'] == 0.0
-        assert perf_unknown['avgProfit'] == 0.0
-        assert perf_unknown['tradeCount'] == 0
+    logger.info("--- Test StrategyManager (Merged get_best_strategy & Mocks) ---")
 
+    # Verify DB setup for the main test strategies
+    perf_v1 = strategy_manager.get_strategy_performance("DUOAI_Strategy_V1")
+    assert perf_v1['tradeCount'] == 50, f"V1 TC: {perf_v1['tradeCount']}"
+    assert abs(perf_v1['winRate'] - 0.60) < 0.001, f"V1 WR: {perf_v1['winRate']}"
+    assert abs(perf_v1['avgProfit'] - 0.01) < 0.001, f"V1 AP: {perf_v1['avgProfit']}"
 
-        # 2. Test update_strategy_performance (should just log, not change DB data)
-        print(f"\nAttempting to update performance for {test_strategy_id} (should only log)...")
-        await strategy_manager.update_strategy_performance(test_strategy_id, {"winRate": 0.99, "avgProfit": 0.5, "tradeCount": 100})
-        perf_after_update_attempt = strategy_manager.get_strategy_performance(test_strategy_id)
-        assert abs(perf_after_update_attempt['winRate'] - (2/3)) < 0.001, "Performance should not change via update_strategy_performance"
+    perf_v2 = strategy_manager.get_strategy_performance("DUOAI_Strategy_V2")
+    assert perf_v2['tradeCount'] == 60, f"V2 TC: {perf_v2['tradeCount']}"
+    assert abs(perf_v2['winRate'] - 0.70) < 0.001, f"V2 WR: {perf_v2['winRate']}"
+    assert abs(perf_v2['avgProfit'] - 0.015) < 0.001, f"V2 AP: {perf_v2['avgProfit']}"
 
+    perf_low = strategy_manager.get_strategy_performance("LowTrade_Strategy")
+    assert perf_low['tradeCount'] == 10, f"Low TC: {perf_low['tradeCount']}"
+    assert abs(perf_low['winRate'] - 0.80) < 0.001, f"Low WR: {perf_low['winRate']}"
+    assert abs(perf_low['avgProfit'] - 0.02) < 0.001, f"Low AP: {perf_low['avgProfit']}"
 
-        # 3. Test mutate_strategy
-        print(f"\nMutating strategy {test_strategy_id} using MockParamsManager...")
-        mock_proposal = {
-            "strategyId": test_strategy_id,
-            "adjustments": {
-                "parameterChanges": {"emaPeriod": 25, "newParam": 123},
-                "roi": {0: 0.12, 60: 0.08},
-                "stoploss": -0.15,
-                "trailingStop": {"value": 0.025, "offset": 0.005} # Updated structure
-            },
-            "confidence": 0.90,
-            "rationale": "Test mutation via ParamsManager"
+    # Test Case 1: Basic Selection (V2 should win based on scoring)
+    # V1 Score: (0.6*0.7) + (0.01*10.0) + (0.6*0.1) = 0.42 + 0.1 + 0.06 = 0.58
+    # V2 Score: (0.7*0.7) + (0.015*10.0) + (0.7*0.1) = 0.49 + 0.15 + 0.07 = 0.71
+    # LowTrade Score (raw): (0.8*0.7) + (0.02*10.0) + (0.8*0.1) = 0.56 + 0.2 + 0.08 = 0.84. Penalized (10 < 50): 0.84 * 0.5 = 0.42
+    logger.info("--- Test Case: Basic Selection (V2 expected) ---")
+    best_strat_info = await strategy_manager.get_best_strategy(test_token, test_interval)
+    assert best_strat_info is not None, "Should find a best strategy"
+    assert best_strat_info['id'] == "DUOAI_Strategy_V2", f"Expected V2, got {best_strat_info['id']}. Score: {best_strat_info.get('calculated_score')}"
+    assert abs(best_strat_info['calculated_score'] - 0.71) < 0.001, f"V2 Score mismatch: {best_strat_info['calculated_score']}"
+    logger.info(f"Test Case Basic Selection Passed. Best: {best_strat_info['id']}")
+
+    # Test Case 2: Low Trade Count Penalty
+    # We expect LowTrade_Strategy to be penalized. V1 should win over it if V2 is made less attractive.
+    logger.info("--- Test Case: Low Trade Count Penalty (V1 expected over LowTrade if V2 is weakened) ---")
+    original_v2_config = strategy_manager.params_manager.strategies_config["DUOAI_Strategy_V2"]
+
+    # Temporarily modify V2's performance to be worse than V1 for this test section
+    original_get_performance = strategy_manager.get_strategy_performance
+    def mock_get_performance_penalty_test(strategy_id_arg):
+        if strategy_id_arg == "DUOAI_Strategy_V2": return {"winRate": 0.1, "avgProfit": 0.001, "tradeCount": 60} # Bad perf for V2
+        return original_get_performance(strategy_id_arg)
+    strategy_manager.get_strategy_performance = mock_get_performance_penalty_test
+
+    # Recalculate scores:
+    # V1 Score = 0.58 (as before)
+    # V2 new score (bad perf): (0.1*0.7) + (0.001*10.0) + (0.7*0.1) = 0.07 + 0.01 + 0.07 = 0.15
+    # LowTrade Penalized Score = 0.42 (as before)
+    # Expected order: V1 (0.58) > LowTrade (0.42) > V2 (0.15)
+    best_strat_penalty_test = await strategy_manager.get_best_strategy(test_token, test_interval)
+    assert best_strat_penalty_test is not None
+    assert best_strat_penalty_test['id'] == "DUOAI_Strategy_V1", f"Expected V1 due to V2 mod and LowTrade penalty, got {best_strat_penalty_test['id']}"
+
+    strategy_manager.get_strategy_performance = original_get_performance # Restore
+    # No need to restore V2 config in params_manager as we mocked get_strategy_performance
+    logger.info(f"Test Case Low Trade Count Penalty Passed. Best: {best_strat_penalty_test['id']}")
+
+    # Test Case 3: Strategy-Specific minTradeCountForScoring
+    # V1 minTradeCountForScoring = 40. Actual trades = 50. Not penalized. Score = 0.58
+    # V2 default threshold = 50. Give it 45 trades. Should be penalized.
+    # Raw V2 score = 0.71. Penalized V2 score = 0.71 * 0.5 = 0.355
+    # Expected order: V1 (0.58) > Penalized V2 (0.355) > LowTrade (0.42 without V2's data mock) or V1 > LowTrade > Penalized V2
+    # Let's ensure LowTrade is also present with its original performance for this test.
+    logger.info("--- Test Case: Strategy-Specific minTradeCountForScoring ---")
+
+    original_get_perf_specific = strategy_manager.get_strategy_performance
+    def mock_get_performance_v2_specific_thresh(strategy_id_arg):
+        if strategy_id_arg == "DUOAI_Strategy_V2":
+            return {"winRate": 0.7, "avgProfit": 0.015, "tradeCount": 45} # V2 has 45 trades
+        # DUOAI_Strategy_V1 and LowTrade_Strategy use their actual performance from DB
+        return original_get_perf_specific(strategy_id_arg)
+    strategy_manager.get_strategy_performance = mock_get_performance_v2_specific_thresh
+
+    # Scores:
+    # V1 = 0.58 (50 trades vs threshold 40 from its config -> no penalty)
+    # V2 (penalized) = ((0.7*0.7) + (0.015*10.0) + (0.7*0.1)) * 0.5 = (0.49 + 0.15 + 0.07) * 0.5 = 0.71 * 0.5 = 0.355
+    # LowTrade (penalized) = 0.42 (10 trades vs default threshold 50 -> penalty)
+    # Expected: V1 (0.58)
+    best_strat_specific_thresh = await strategy_manager.get_best_strategy(test_token, test_interval)
+    assert best_strat_specific_thresh is not None
+    assert best_strat_specific_thresh['id'] == "DUOAI_Strategy_V1", f"Expected V1 due to V2 specific penalty, got {best_strat_specific_thresh['id']}"
+    strategy_manager.get_strategy_performance = original_get_perf_specific # Restore
+    logger.info(f"Test Case Strategy-Specific Threshold Passed. Best: {best_strat_specific_thresh['id']}")
+
+    # Test Case 4: No Strategies Configured
+    logger.info("--- Test Case: No Strategies Configured ---")
+    original_strategies_config = strategy_manager.params_manager.strategies_config
+    strategy_manager.params_manager.update_params_data({}) # Empty config
+    best_strat_no_config = await strategy_manager.get_best_strategy(test_token, test_interval)
+    assert best_strat_no_config is None, "Expected None when no strategies are configured"
+    strategy_manager.params_manager.update_params_data(original_strategies_config) # Restore
+    logger.info("Test Case No Strategies Configured Passed.")
+
+    # Test Case 5: BiasReflector Unavailable
+    logger.info("--- Test Case: BiasReflector Unavailable ---")
+    original_bias_reflector = strategy_manager.bias_reflector
+    strategy_manager.bias_reflector = None # Disable bias reflector
+    # Scores with default bias 0.5 for all:
+    # V1: (0.6*0.7) + (0.01*10.0) + (0.5*0.1) = 0.42 + 0.1 + 0.05 = 0.57
+    # V2: (0.7*0.7) + (0.015*10.0) + (0.5*0.1) = 0.49 + 0.15 + 0.05 = 0.69
+    # LowTrade (penalized): ((0.8*0.7) + (0.02*10.0) + (0.5*0.1)) * 0.5 = (0.56 + 0.2 + 0.05) * 0.5 = 0.81 * 0.5 = 0.405
+    # Expected: V2 (0.69)
+    best_strat_no_bias_reflector = await strategy_manager.get_best_strategy(test_token, test_interval)
+    assert best_strat_no_bias_reflector is not None
+    assert best_strat_no_bias_reflector['id'] == "DUOAI_Strategy_V2", f"Expected V2 with default bias, got {best_strat_no_bias_reflector['id']}"
+    assert abs(best_strat_no_bias_reflector['calculated_score'] - 0.69) < 0.001
+    strategy_manager.bias_reflector = original_bias_reflector # Restore
+    logger.info("Test Case BiasReflector Unavailable Passed.")
+
+    # Test mutate_strategy (with merged MockParamsManager)
+    logger.info("--- Test Mutate Strategy (with merged MockParamsManager) ---")
+    test_mutate_id = "DUOAI_Strategy_V1"
+    mock_proposal_mutate = {
+        "strategyId": test_mutate_id,
+        "adjustments": {
+            "parameterChanges": {"emaPeriod": 30}, # Should go into 'buy_params'
+            "roi": {"0": 0.22}, # Should become 'roi_table'
+            "stoploss": -0.22, # Should become 'stoploss_value'
+            "trailingStop": {"value": 0.033, "offset": 0.011} # Flat trailing params
         }
-        mutation_successful = await strategy_manager.mutate_strategy(test_strategy_id, mock_proposal)
-        print(f"Mutation successful: {mutation_successful}")
-        assert mutation_successful
+    }
+    await strategy_manager.mutate_strategy(test_mutate_id, mock_proposal_mutate)
+    # Fetch all params for the strategy to check
+    mutated_params_v1_all = await strategy_manager.params_manager.get_param("strategies", strategy_id=test_mutate_id)
 
-        # Verify changes through MockParamsManager's internal state
-        mutated_params_from_pm = await strategy_manager.params_manager.get_param("strategies", strategy_id=test_strategy_id)
-        print(f"Parameters from MockParamsManager after mutation: {mutated_params_from_pm}")
-        assert mutated_params_from_pm['buy']['emaPeriod'] == 25
-        assert mutated_params_from_pm['buy']['newParam'] == 123
-        assert mutated_params_from_pm['roi'] == {0: 0.12, 60: 0.08}
-        assert mutated_params_from_pm['stoploss'] == -0.15
-        # Assertions for the new trailing stop structure
-        assert 'trailing' in mutated_params_from_pm, "Trailing params should exist"
-        assert mutated_params_from_pm['trailing']['value'] == 0.025, "Trailing stop value incorrect"
-        assert mutated_params_from_pm['trailing']['offset'] == 0.005, "Trailing stop offset incorrect"
-        assert strategy_manager.params_manager.files_written.get(test_strategy_id) is True
+    assert mutated_params_v1_all["buy_params"]["emaPeriod"] == 30
+    assert mutated_params_v1_all["roi_table"] == {"0": 0.22}
+    assert mutated_params_v1_all["stoploss_value"] == -0.22
+    assert mutated_params_v1_all["trailing_stop_positive"] == 0.033
+    assert mutated_params_v1_all["trailing_stop_positive_offset"] == 0.011
+    logger.info("Test Mutate Strategy with merged mocks passed.")
 
-        # Test case for missing trailingStop parts (optional, but good for robustness)
-        print(f"\nMutating strategy {test_strategy_id} with partial trailingStop proposal...")
-        partial_trailing_proposal = {
-            "strategyId": test_strategy_id,
-            "adjustments": {
-                "trailingStop": {"value": 0.030} # Only value, offset should remain or be None
-            },
-            "confidence": 0.90,
-            "rationale": "Test partial trailingStop mutation"
-        }
-        # Re-initialize a portion of mock params to simulate existing state for 'offset'
-        # This depends on how MockParamsManager is structured. If it merges, this is fine.
-        # If it overwrites the whole 'trailing' dict, then the previous 'offset' would be gone.
-        # Based on current MockParamsManager, it updates specific keys, so previous offset should persist if not provided.
-        # Let's ensure 'offset' was set by previous full mutation.
-        # strategy_manager.params_manager.params[test_strategy_id]['trailing']['offset'] = 0.005 # Ensure it exists
+    # Test zero trade count strategies (from 'main' branch tests)
+    logger.info("--- Test Scenario: All Strategies Have Zero Trades (adapted) ---")
+    zero_trade_strategy_name = "DUOAI_Strategy_Zero"
+    # Setup DB with only open trades for relevant strategies
+    setup_test_db(TEST_DB_PATH, custom_trades_data=[
+        (zero_trade_strategy_name, 'ETH/USDT', 1, '2023-01-01', None, None, None, 100),
+        ("DUOAI_Strategy_V1", 'ETH/USDT', 1, '2023-01-01', None, None, None, 100) # Also zero closed trades
+    ])
 
-        mutation_successful_partial = await strategy_manager.mutate_strategy(test_strategy_id, partial_trailing_proposal)
-        assert mutation_successful_partial
-        mutated_params_partial = await strategy_manager.params_manager.get_param("strategies", strategy_id=test_strategy_id)
-        print(f"Parameters from MockParamsManager after partial trailingStop mutation: {mutated_params_partial}")
-        assert mutated_params_partial['trailing']['value'] == 0.030 # New value
-        assert mutated_params_partial['trailing']['offset'] == 0.005 # Offset from previous full mutation should persist
+    original_pm_config_zero = strategy_manager.params_manager.strategies_config
+    ids_for_zero_test = [zero_trade_strategy_name, "DUOAI_Strategy_V1"]
+    zero_trade_test_config = {
+        k: original_pm_config_zero[k] for k in ids_for_zero_test if k in original_pm_config_zero
+    }
+    strategy_manager.params_manager.update_params_data(zero_trade_test_config)
+    # get_best_strategy uses get_param("strategies") which gets keys from the config directly,
+    # so override_strategy_ids is not strictly necessary if update_params_data sets the exact config.
 
+    best_strat_zero_trades = await strategy_manager.get_best_strategy(test_token, test_interval)
+    assert best_strat_zero_trades is not None, "Should select a strategy even if all have zero trades"
+    # With scoring, both will have score 0 (plus bias). Bias for DUOAI_Strategy_Zero might be default 0.5.
+    # Bias for DUOAI_Strategy_V1 for ETH/USDT is 0.6. So V1 might be picked.
+    # Let's check the expected scores:
+    # ZeroTrade: (0*0.7) + (0*10) + (0.5*0.1) = 0.05. Penalty factor 0.5 -> 0.025
+    # V1: (0*0.7) + (0*10) + (0.6*0.1) = 0.06. Penalty factor 0.5 -> 0.03
+    # So, DUOAI_Strategy_V1 is expected.
+    assert best_strat_zero_trades['id'] == "DUOAI_Strategy_V1", f"Expected DUOAI_Strategy_V1, got {best_strat_zero_trades['id']}"
+    assert best_strat_zero_trades['performance']['tradeCount'] == 0
+    logger.info(f"Test Passed: All zero trades, selected {best_strat_zero_trades['id']}.")
 
-        # 4. Test get_best_strategy
-        print(f"\nGetting best strategy for {test_token} (interval 5m)...")
-        best_strat_info = await strategy_manager.get_best_strategy(test_token, "5m")
-        print(f"Best strategy info: {best_strat_info}")
-        assert best_strat_info is not None
-
-        # Expect "OtherStrategy" to be chosen due to higher winRate and avgProfit
-        expected_best_id = "OtherStrategy"
-        expected_performance = strategy_manager.get_strategy_performance(expected_best_id) # Fetch from DB
-
-        assert best_strat_info['id'] == expected_best_id
-
-        # Performance assertions for "OtherStrategy"
-        assert abs(best_strat_info['performance']['winRate'] - expected_performance['winRate']) < 0.001
-        assert abs(best_strat_info['performance']['avgProfit'] - expected_performance['avgProfit']) < 0.001
-        assert best_strat_info['performance']['tradeCount'] == expected_performance['tradeCount']
-
-        # Parameters from MockParamsManager for "OtherStrategy" (these were not mutated in tests)
-        # Default params for OtherStrategy: {"buy": {"emaPeriod": 50, "rsiThresholdBuy": 60}, ...}
-        assert best_strat_info['parameters']['buy']['emaPeriod'] == 50
-        assert best_strat_info['parameters']['roi'] == {0: 0.2, 30: 0.15, 60: 0.05}
-
-        # Bias from MockBiasReflector for "OtherStrategy" and test_token ("ETH/USDT")
-        # MockBiasReflector returns 0.75 for ("ETH/USDT", "DUOAI_Strategy") and 0.5 otherwise.
-        # Since best strategy is "OtherStrategy", bias should be 0.5.
-        assert best_strat_info['bias'] == 0.5
-
-        # --- Test Scenario: No Strategies Available ---
-        print("\n--- Test Scenario: No Strategies Available ---")
-        original_ids_to_return = strategy_manager.params_manager.strategy_ids_override # Save state
-        strategy_manager.params_manager.override_strategy_ids([]) # No strategies
-
-        best_strat_no_strategies = await strategy_manager.get_best_strategy(test_token, "5m")
-        assert best_strat_no_strategies is None, "Should return None when no strategies are available"
-        print("Test Passed: No strategies available, returns None.")
-        strategy_manager.params_manager.override_strategy_ids(original_ids_to_return) # Restore
-
-        # --- Test Scenario: All Strategies Have Zero Trades ---
-        print("\n--- Test Scenario: All Strategies Have Zero Trades ---")
-        zero_trade_strategy_name = "DUOAI_Strategy_Zero"
-        setup_test_db(TEST_DB_PATH, custom_trades_data=[
-            # No trades for DUOAI_Strategy_Zero, OtherStrategy also has no trades for this scenario
-            (zero_trade_strategy_name, 'ETH/USDT', 1, '2023-01-01 10:00:00', None, None, None, 100), # Open trade only
-            ("OtherStrategy", 'LTC/USDT', 1, '2023-01-05 10:00:00', None, None, None, 200) # Open trade only
-        ])
-        # Ensure MockParamsManager knows about DUOAI_Strategy_Zero and it's the one returned
-        original_params_data = strategy_manager.params_manager.params
-        original_ids_override = strategy_manager.params_manager.strategy_ids_override
-
-        # Setup MockParamsManager for this specific test
-        # It should only know about strategies that have zero trades in the DB for this test
-        zero_trade_params = {
-            zero_trade_strategy_name: strategy_manager.params_manager.default_params_set[zero_trade_strategy_name],
-            "OtherStrategy": strategy_manager.params_manager.default_params_set["OtherStrategy"] # Also has 0 closed trades in this DB setup
-        }
-        strategy_manager.params_manager.update_params_data(zero_trade_params)
-        strategy_manager.params_manager.override_strategy_ids([zero_trade_strategy_name, "OtherStrategy"])
-
-        best_strat_zero_trades = await strategy_manager.get_best_strategy(test_token, "5m")
-        assert best_strat_zero_trades is not None, "Should select a strategy even if all have zero trades"
-        # Based on current logic, the first one encountered ("DUOAI_Strategy_Zero") should be picked
-        assert best_strat_zero_trades['id'] == zero_trade_strategy_name, f"Expected {zero_trade_strategy_name} to be chosen"
-        assert best_strat_zero_trades['performance']['tradeCount'] == 0
-        assert best_strat_zero_trades['performance']['winRate'] == 0.0
-        assert best_strat_zero_trades['performance']['avgProfit'] == 0.0
-        assert "param" in best_strat_zero_trades['parameters'] # Check if params were fetched
-        print(f"Test Passed: All zero trades, selected {best_strat_zero_trades['id']}.")
-
-        # Restore MockParamsManager state
-        strategy_manager.params_manager.update_params_data(original_params_data)
-        strategy_manager.params_manager.override_strategy_ids(original_ids_override)
-        # Restore DB to default for subsequent tests (important!)
-        setup_test_db(TEST_DB_PATH)
+    strategy_manager.params_manager.update_params_data(original_pm_config_zero) # Restore
+    setup_test_db(TEST_DB_PATH, custom_trades_data=all_trades_for_setup) # Restore DB to full data
 
 
-        # --- Test Scenario: Mixed Trade History (Zero and Non-Zero) ---
-        print("\n--- Test Scenario: Mixed Trade History (Zero and Non-Zero) ---")
-        # DB setup: DUOAI_Strategy_Zero (0 trades), OtherStrategy (2 trades, positive perf)
-        # Default DB setup already has OtherStrategy with good performance and DUOAI_Strategy with good performance.
-        # Let's add DUOAI_Strategy_Zero to the DB with no closed trades
-        # And ensure MockParamsManager lists DUOAI_Strategy_Zero, OtherStrategy, and DUOAI_Strategy
-        mixed_trades_data = [
-            ('DUOAI_Strategy', 'ETH/USDT', 0, '2023-01-01 10:00:00', '2023-01-01 12:00:00', 0.02, 0.02*100, 100),
-            ('DUOAI_Strategy', 'ETH/USDT', 0, '2023-01-02 10:00:00', '2023-01-02 12:00:00', -0.01, -0.01*100, 100),
-            ('OtherStrategy', 'LTC/USDT', 0, '2023-01-05 10:00:00', '2023-01-05 12:00:00', 0.05, 0.05*200, 200), # Win
-            ('OtherStrategy', 'LTC/USDT', 0, '2023-01-06 10:00:00', '2023-01-06 12:00:00', 0.01, 0.01*200, 200), # Win
-            (zero_trade_strategy_name, 'BTC/USDT', 1, '2023-01-03 10:00:00', None, None, None, 100) # Open trade only
-        ]
-        setup_test_db(TEST_DB_PATH, custom_trades_data=mixed_trades_data)
+    logger.info("All StrategyManager tests (merged) passed.")
 
-        # Setup MockParamsManager for this test
-        # It should know about DUOAI_Strategy_Zero, OtherStrategy, DUOAI_Strategy
-        mixed_params = {
-            zero_trade_strategy_name: strategy_manager.params_manager.default_params_set[zero_trade_strategy_name],
-            "OtherStrategy": strategy_manager.params_manager.default_params_set["OtherStrategy"],
-            "DUOAI_Strategy": strategy_manager.params_manager.default_params_set["DUOAI_Strategy"]
-        }
-        strategy_manager.params_manager.update_params_data(mixed_params)
-        strategy_manager.params_manager.override_strategy_ids([zero_trade_strategy_name, "OtherStrategy", "DUOAI_Strategy"])
-
-        best_strat_mixed = await strategy_manager.get_best_strategy(test_token, "5m")
-        assert best_strat_mixed is not None
-        assert best_strat_mixed['id'] == "OtherStrategy", "Should select 'OtherStrategy' with positive performance"
-        print("Test Passed: Mixed trade history, selected strategy with non-zero positive performance.")
-
-        # Restore MockParamsManager state and DB
-        strategy_manager.params_manager.update_params_data(original_params_data) # Restore to its state before these specific tests
-        strategy_manager.params_manager.override_strategy_ids(original_ids_override) # Restore to its state before these specific tests
-        setup_test_db(TEST_DB_PATH) # Restore default DB
-
-        # --- Test Scenarios: Tie-Breaking Logic ---
-        print("\n--- Test Scenarios: Tie-Breaking Logic ---")
-        tie_break_params = {s_id: strategy_manager.params_manager.default_params_set[s_id] for s_id in
-                            ["Strategy_A_Tie", "Strategy_B_Tie", "Strategy_C_Tie", "Strategy_D_Tie", "Strategy_E_Winner", "Strategy_F_Loser"]}
-        strategy_manager.params_manager.update_params_data(tie_break_params)
-
-        # Scenario 4a (WinRate Tie, AvgProfit Decides)
-        print("Running Scenario 4a: WinRate Tie, AvgProfit Decides")
-        # Strategy_A_Tie: winRate=0.6, avgProfit=0.02, tradeCount=10
-        # Strategy_B_Tie: winRate=0.6, avgProfit=0.03, tradeCount=5 (Should be chosen)
-        trades_4a_corrected = [
-            # Strategy_A_Tie: WR 0.6 (6 wins / 10 trades), AvgProfit 0.02
-            *[( 'Strategy_A_Tie', 'A/T', 0, '2023-01-01', '2023-01-01', 0.05, 5, 100)]*6, # 6 Wins, sum profit = 0.3
-            *[( 'Strategy_A_Tie', 'A/T', 0, '2023-01-01', '2023-01-01', -0.025, -2.5, 100)]*4, # 4 Losses, sum loss = -0.1. Total profit = 0.2. Avg Profit = 0.02
-            # Strategy_B_Tie: WR 0.6 (3 wins / 5 trades), AvgProfit 0.03
-            *[( 'Strategy_B_Tie', 'B/T', 0, '2023-01-01', '2023-01-01', 0.08, 8, 100)]*3, # 3 Wins, sum profit = 0.24
-            *[( 'Strategy_B_Tie', 'B/T', 0, '2023-01-01', '2023-01-01', -0.045, -4.5, 100)]*2, # 2 Losses, sum loss = -0.09. Total profit = 0.15. Avg Profit = 0.03
-        ]
-        setup_test_db(TEST_DB_PATH, custom_trades_data=trades_4a_corrected)
-        strategy_manager.params_manager.override_strategy_ids(["Strategy_A_Tie", "Strategy_B_Tie"])
-        best_strat_4a = await strategy_manager.get_best_strategy("ANY", "5m")
-        assert best_strat_4a['id'] == "Strategy_B_Tie", f"Scenario 4a failed: Expected Strategy_B_Tie, Got {best_strat_4a['id']}"
-        print("Test Passed: Scenario 4a (WinRate Tie, AvgProfit Decides).")
-
-        # Scenario 4b (WinRate & AvgProfit Tie, TradeCount Decides)
-        print("Running Scenario 4b: WinRate & AvgProfit Tie, TradeCount Decides")
-        # Strategy_C_Tie: WR=0.6, AP=0.02, TC=10
-        # Strategy_D_Tie: WR=0.6, AP=0.02, TC=15 (Should be chosen)
-        trades_4b = [
-            # Strategy_C_Tie: 6 wins, 4 losses. Sum W=0.3, Sum L=-0.1. Net=0.2. AP=0.02. TC=10
-            *[( 'Strategy_C_Tie', 'C/T', 0, '2023-01-01', '2023-01-01', 0.05, 5, 100)]*6,
-            *[( 'Strategy_C_Tie', 'C/T', 0, '2023-01-01', '2023-01-01', -0.025, -2.5, 100)]*4,
-            # Strategy_D_Tie: 9 wins, 6 losses. Sum W=0.45, Sum L=-0.15. Net=0.3. AP=0.02. TC=15
-            *[( 'Strategy_D_Tie', 'D/T', 0, '2023-01-01', '2023-01-01', 0.05, 5, 100)]*9,
-            *[( 'Strategy_D_Tie', 'D/T', 0, '2023-01-01', '2023-01-01', -0.025, -2.5, 100)]*6,
-        ]
-        setup_test_db(TEST_DB_PATH, custom_trades_data=trades_4b)
-        strategy_manager.params_manager.override_strategy_ids(["Strategy_C_Tie", "Strategy_D_Tie"])
-        best_strat_4b = await strategy_manager.get_best_strategy("ANY", "5m")
-        assert best_strat_4b['id'] == "Strategy_D_Tie", f"Scenario 4b failed: Expected Strategy_D_Tie, Got {best_strat_4b['id']}"
-        print("Test Passed: Scenario 4b (WinRate & AvgProfit Tie, TradeCount Decides).")
-
-        # Scenario 4c (Clear Winner on WinRate)
-        print("Running Scenario 4c: Clear Winner on WinRate")
-        # Strategy_E_Winner: WR=0.7 (e.g. 7W/3L), AP=0.01, TC=20
-        # Strategy_F_Loser: WR=0.6 (e.g. 6W/4L), AP=0.05, TC=50
-        trades_4c = [
-            # Strategy_E_Winner: 7 wins (0.03), 3 losses (-0.05666..). SumW=0.21, SumL=-0.17. Net=0.04. AP=0.002 (not 0.01, adjust)
-            # Let's make AP=0.01. Net profit = 0.01 * 20 = 0.2.  7W * x - 3L * y = 0.2
-            # Say, 7 wins of 0.05 (0.35), 3 losses of 0.05 (-0.15). Net=0.2. AP=0.01. WR=0.7. TC=20
-            *[( 'Strategy_E_Winner', 'E/T', 0, '2023-01-01', '2023-01-01', 0.05, 5, 100)]*14, # WR 0.7 (14 W / 20 T)
-            *[( 'Strategy_E_Winner', 'E/T', 0, '2023-01-01', '2023-01-01', -0.116666, -11.66, 100)]*6, # SumP = 0.7-0.69996=0.00004. AP=small. Need better values.
-            # E: 14W * 0.05 = 0.7. 6L * -0.05 = -0.3. Net = 0.4. AP = 0.4/20 = 0.02. WR = 0.7
-            # F: 30W * 0.05 = 1.5. 20L * -0.05 = -1.0. Net = 0.5. AP = 0.5/50 = 0.01. WR = 0.6
-            # This makes E winner: WR 0.7, AP 0.02. F loser: WR 0.6, AP 0.01
-            *[( 'Strategy_E_Winner', 'E/T', 0, '2023-01-01', '2023-01-01', 0.05, 5, 100)]*14,
-            *[( 'Strategy_E_Winner', 'E/T', 0, '2023-01-01', '2023-01-01', -0.05, -5, 100)]*6,
-            *[( 'Strategy_F_Loser', 'F/T', 0, '2023-01-01', '2023-01-01', 0.05, 5, 100)]*30,
-            *[( 'Strategy_F_Loser', 'F/T', 0, '2023-01-01', '2023-01-01', -0.05, -5, 100)]*20,
-        ]
-        setup_test_db(TEST_DB_PATH, custom_trades_data=trades_4c)
-        strategy_manager.params_manager.override_strategy_ids(["Strategy_E_Winner", "Strategy_F_Loser"])
-        best_strat_4c = await strategy_manager.get_best_strategy("ANY", "5m")
-        assert best_strat_4c['id'] == "Strategy_E_Winner", f"Scenario 4c failed: Expected Strategy_E_Winner, Got {best_strat_4c['id']}"
-        print("Test Passed: Scenario 4c (Clear Winner on WinRate).")
-
-        # Restore MockParamsManager to its full default set and default ID behavior for any subsequent general tests
-        strategy_manager.params_manager.update_params_data(strategy_manager.params_manager.default_params_set.copy())
-        strategy_manager.params_manager.override_strategy_ids(None) # Use all keys from params
-        setup_test_db(TEST_DB_PATH) # Restore default DB
-
-        logger.info("All StrategyManager tests passed with DB and Mocks.")
-
-        # Cleanup test DB
-        if os.path.exists(TEST_DB_PATH):
-            os.remove(TEST_DB_PATH)
-        logger.info(f"Test database {TEST_DB_PATH} removed.")
+    # Cleanup test DB
+    if os.path.exists(TEST_DB_PATH):
+        os.remove(TEST_DB_PATH)
+    logger.info(f"Test database {TEST_DB_PATH} removed.")
 
 
     asyncio.run(run_test_strategy_manager())
