@@ -292,42 +292,89 @@ class EntryDecider:
         # CNN patroon check
         pattern_data = await self.cnn_patterns_detector.detect_patterns_multi_timeframe(candles_by_timeframe, symbol)
 
-        # Fetch cnnPatternWeight from ParamsManager
-        cnn_pattern_weight = self.params_manager.get_param("cnnPatternWeight", strategy_id=current_strategy_id, default=1.0)
-        if not isinstance(cnn_pattern_weight, (float, int)):
-            logger.warning(f"Invalid cnnPatternWeight type ({type(cnn_pattern_weight)}) for strategy {current_strategy_id}, using default 1.0.")
-            cnn_pattern_weight = 1.0
-        logger.info(f"Symbol: {symbol}, Using cnnPatternWeight: {cnn_pattern_weight} (Default: 1.0)")
+        # Fetch fallback cnnPatternWeight from ParamsManager
+        fallback_cnn_pattern_weight = self.params_manager.get_param("cnnPatternWeight", strategy_id=current_strategy_id, default=1.0)
+        if not isinstance(fallback_cnn_pattern_weight, (float, int)):
+            logger.warning(f"Invalid fallback cnnPatternWeight type ({type(fallback_cnn_pattern_weight)}) for strategy {current_strategy_id}, using default 1.0.")
+            fallback_cnn_pattern_weight = 1.0
+        logger.info(f"Symbol: {symbol}, Using fallback cnnPatternWeight: {fallback_cnn_pattern_weight} (Default: 1.0)")
 
         weighted_pattern_score = 0.0
+        weighted_cnn_score_contribution = 0.0 # Initialize new variable
         detected_patterns_summary = [] # For logging
         cnn_predictions_data = pattern_data.get('cnn_predictions', {})
         rule_patterns_data = pattern_data.get('patterns', {})
 
-        # 1. Process CNN prediction score (specifically 15m_bullFlag_score)
-        # CNN predictions are assumed to be on '15m' as per cnn_patterns.py
-        cnn_bull_flag_score_key = "15m_bullFlag_score"
-        cnn_score = cnn_predictions_data.get(cnn_bull_flag_score_key)
+        # 1. Fetch Individual CNN Pattern Weights & Calculate Weighted CNN Score Contribution
+        all_cnn_pattern_keys = self.cnn_patterns_detector.get_all_detectable_pattern_keys()
+        pattern_weights_map = {} # To store fetched weights for logging/use
 
-        if cnn_score is not None and isinstance(cnn_score, (float, int)) and cnn_score > 0:
-            contribution = cnn_score * cnn_pattern_weight
-            weighted_pattern_score += contribution
-            logger.info(f"Symbol: {symbol}, CNN Score contribution from '{cnn_bull_flag_score_key}': {cnn_score:.2f} * {cnn_pattern_weight:.2f} (weight) = {contribution:.2f}. Current weighted_score: {weighted_pattern_score:.2f}")
-            detected_patterns_summary.append(f"CNN_{cnn_bull_flag_score_key}({cnn_score:.2f})")
-        elif cnn_score is not None:
-            logger.info(f"Symbol: {symbol}, CNN Score for '{cnn_bull_flag_score_key}' is {cnn_score}, not contributing to weighted_pattern_score.")
+        for pattern_key in all_cnn_pattern_keys:
+            specific_weight_param_name = f"cnn_{pattern_key}_weight"
+            specific_weight = self.params_manager.get_param(specific_weight_param_name, strategy_id=current_strategy_id)
+            if specific_weight is not None and isinstance(specific_weight, (float, int)):
+                pattern_weights_map[pattern_key] = specific_weight
+                logger.info(f"Symbol: {symbol}, Using specific weight for CNN pattern '{pattern_key}': {specific_weight} from param '{specific_weight_param_name}'")
+            else:
+                pattern_weights_map[pattern_key] = fallback_cnn_pattern_weight
+                logger.info(f"Symbol: {symbol}, Using fallback cnnPatternWeight ({fallback_cnn_pattern_weight}) for CNN pattern '{pattern_key}' (specific param '{specific_weight_param_name}' not found or invalid).")
+
+        if isinstance(cnn_predictions_data, dict):
+            for key, score in cnn_predictions_data.items():
+                # Extract pattern_name from key (e.g., 'bullFlag' from '5m_bullFlag_score')
+                # Assuming key format is <timeframe>_<pattern_name>_score or <pattern_name>_score (if no timeframe in key)
+                key_parts = key.split('_')
+                extracted_pattern_name = None
+                if len(key_parts) > 1 and key_parts[-1] == 'score':
+                    # Try to match with known pattern keys
+                    # Example: 5m_bullFlag_score -> bullFlag
+                    # Example: 1h_bearishEngulfing_score -> bearishEngulfing
+                    potential_pattern_name = key_parts[-2] # e.g. bullFlag
+                    if potential_pattern_name in all_cnn_pattern_keys:
+                        extracted_pattern_name = potential_pattern_name
+                    elif len(key_parts) > 2: # For keys like timeframe_patternPart1_patternPart2_score
+                        potential_pattern_name_long = "_".join(key_parts[1:-1])
+                        if potential_pattern_name_long in all_cnn_pattern_keys:
+                             extracted_pattern_name = potential_pattern_name_long
+
+                if extracted_pattern_name and extracted_pattern_name in pattern_weights_map:
+                    current_pattern_weight = pattern_weights_map[extracted_pattern_name]
+                    if score is not None and isinstance(score, (float, int)) and score > 0:
+                        contribution = score * current_pattern_weight
+                        weighted_cnn_score_contribution += contribution
+                        logger.info(f"Symbol: {symbol}, CNN Contribution: Pattern '{extracted_pattern_name}' (from key '{key}') Score: {score:.2f} * Weight: {current_pattern_weight:.2f} = {contribution:.2f}. Cumulative CNN score: {weighted_cnn_score_contribution:.2f}")
+                        detected_patterns_summary.append(f"CNN_{key}({score:.2f},w:{current_pattern_weight:.2f})")
+                    elif score is not None:
+                        logger.info(f"Symbol: {symbol}, CNN Pattern '{extracted_pattern_name}' (from key '{key}') Score {score} is not positive or invalid, not contributing.")
+                elif extracted_pattern_name:
+                     logger.warning(f"Symbol: {symbol}, Weight for extracted CNN pattern name '{extracted_pattern_name}' (from key '{key}') not found in pattern_weights_map. This shouldn't happen if all_cnn_pattern_keys is comprehensive.")
+                # else: # Optional: log if a key in cnn_predictions couldn't be parsed or matched
+                #    logger.debug(f"Symbol: {symbol}, Could not extract a recognized CNN pattern name from cnn_predictions key: '{key}'")
+
         else:
-            logger.info(f"Symbol: {symbol}, No CNN Score found for '{cnn_bull_flag_score_key}'.")
+            logger.warning(f"Symbol: {symbol}, 'cnn_predictions' key missing or not a dict in pattern_data. Skipping CNN score contribution.")
 
+        if not any(s.startswith("CNN_") for s in detected_patterns_summary):
+             logger.info(f"Symbol: {symbol}, No contributing CNN patterns detected or their scores were not positive.")
+
+        weighted_pattern_score += weighted_cnn_score_contribution # Add the total CNN contribution
 
         # 2. Add score for rule-based bullish patterns (break after first found)
+        # This section remains largely the same, but its contribution is added to weighted_pattern_score
         entry_rule_pattern_score = self.params_manager.get_param(
             "entryRulePatternScore",
             strategy_id=current_strategy_id,
-            default=0.7 # This default is already correctly handled by previous change
+            default=0.7
         )
-        # This log was already added when fetching entryRulePatternScore, so it's fine.
-        # logger.info(f"Symbol: {symbol}, Using entryRulePatternScore: {entry_rule_pattern_score} (Default: 0.7)")
+        logger.info(f"Symbol: {symbol}, Using entryRulePatternScore: {entry_rule_pattern_score} (Default: 0.7)") # Explicitly log, as it was commented out
+
+        # The weight for rule-based patterns: The task states "The existing logic for rule_based_bullish_patterns contributing entryRulePatternScore * cnn_pattern_weight can remain."
+        # This implies using the fallback_cnn_pattern_weight for rule-based patterns for consistency with previous behavior,
+        # unless a different interpretation is intended (e.g. a separate weight for rule-based patterns).
+        # For now, sticking to fallback_cnn_pattern_weight.
+        rule_based_pattern_weight_to_use = fallback_cnn_pattern_weight
+        logger.info(f"Symbol: {symbol}, Using weight for rule-based patterns: {rule_based_pattern_weight_to_use} (derived from fallback cnnPatternWeight).")
+
 
         rule_based_bullish_patterns = [
             'bullishEngulfing', 'CDLENGULFING', 'morningStar', 'CDLMORNINGSTAR',
@@ -335,22 +382,25 @@ class EntryDecider:
             'CDLHAMMER', 'CDLINVERTEDHAMMER', 'CDLPIERCING', 'ascendingTriangle', 'pennant'
         ]
 
+        rule_based_contribution_total = 0.0
         if isinstance(rule_patterns_data, dict):
             for p_name in rule_based_bullish_patterns:
                 if rule_patterns_data.get(p_name): # Checks for existence and truthiness
-                    contribution = entry_rule_pattern_score * cnn_pattern_weight
-                    weighted_pattern_score += contribution
-                    logger.info(f"Symbol: {symbol}, Detected rule-based pattern: '{p_name}'. Added contribution: {entry_rule_pattern_score:.2f} * {cnn_pattern_weight:.2f} = {contribution:.2f}. Current weighted_score: {weighted_pattern_score:.2f}")
-                    detected_patterns_summary.append(f"rule({p_name})")
-                    break  # Only the first detected rule-based pattern contributes
+                    contribution = entry_rule_pattern_score * rule_based_pattern_weight_to_use # Using the determined weight
+                    rule_based_contribution_total += contribution # Summing rule-based contributions before adding to main score
+                    logger.info(f"Symbol: {symbol}, Detected rule-based pattern: '{p_name}'. Contribution: {entry_rule_pattern_score:.2f} * {rule_based_pattern_weight_to_use:.2f} = {contribution:.2f}.")
+                    detected_patterns_summary.append(f"rule({p_name},s:{entry_rule_pattern_score:.2f},w:{rule_based_pattern_weight_to_use:.2f})")
+                    break  # Only the first detected rule-based pattern contributes (as per original logic)
         else:
             logger.warning(f"Symbol: {symbol}, 'patterns' key missing or not a dict in pattern_data. Skipping rule-based pattern check.")
 
-        if not any(s.startswith("rule(") for s in detected_patterns_summary): # Log if no rule patterns were found and contributed
+        if rule_based_contribution_total > 0:
+            weighted_pattern_score += rule_based_contribution_total
+            logger.info(f"Symbol: {symbol}, Total Rule-Based Contribution: {rule_based_contribution_total:.2f}. Current weighted_pattern_score (CNNs + Rules): {weighted_pattern_score:.2f}")
+        elif not any(s.startswith("rule(") for s in detected_patterns_summary): # Log if no rule patterns were found and contributed
              logger.info(f"Symbol: {symbol}, No contributing rule-based bullish patterns detected from the predefined list.")
 
-
-        logger.info(f"Symbol: {symbol}, Final Calculated Weighted Pattern Score: {weighted_pattern_score:.2f} from patterns: [{'; '.join(detected_patterns_summary)}]")
+        logger.info(f"Symbol: {symbol}, Final Calculated Weighted Pattern Score: {weighted_pattern_score:.2f} (CNN Contribution: {weighted_cnn_score_contribution:.2f}, Rule Contribution: {rule_based_contribution_total:.2f}) from patterns: [{'; '.join(detected_patterns_summary)}]")
 
         # Fetch learned bias threshold from ParamsManager
         entry_learned_bias_threshold = self.params_manager.get_param(

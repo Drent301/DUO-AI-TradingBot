@@ -113,7 +113,9 @@ class ParamsManager:
                 "DUOAI_Strategy": {
                     "entryConvictionThreshold": 0.7,
                     "exitConvictionDropTrigger": 0.4,
-                    "cnnPatternWeight": 1.0, # NIEUW: Initiële waarde voor CNN-patroon gewicht
+                    "cnnPatternWeight": 1.0, # Fallback weight
+                    "cnn_bullFlag_weight": 1.0, # Specific weight for bullFlag
+                    "cnn_bearishEngulfing_weight": 1.0, # Specific weight for bearishEngulfing
                     "strongPatternThreshold": 0.5, # Default threshold for strong patterns
                     "entryRulePatternScore": 0.7, # NIEUW: Default score for a detected rule-based entry pattern
                     "exitRulePatternScore": 0.7,  # NIEUW: Default score for a detected rule-based exit pattern
@@ -126,7 +128,9 @@ class ParamsManager:
                 "DefaultPipelineRunStrategy": { # Added an entry for the default strategy
                     "entryConvictionThreshold": 0.6,
                     "exitConvictionDropTrigger": 0.3,
-                    "cnnPatternWeight": 1.0,
+                    "cnnPatternWeight": 1.0, # Fallback weight
+                    "cnn_bullFlag_weight": 1.0, # Specific weight for bullFlag
+                    "cnn_bearishEngulfing_weight": 1.0, # Specific weight for bearishEngulfing
                     "strongPatternThreshold": 0.6,
                     "entryRulePatternScore": 0.6,
                     "exitRulePatternScore": 0.6,

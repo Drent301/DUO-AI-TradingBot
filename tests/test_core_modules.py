@@ -852,6 +852,10 @@ async def test_entry_decider_should_enter(
 
     mock_cnn_patterns_instance = MockCNNPatterns.return_value
     mock_cnn_patterns_instance.detect_patterns_multi_timeframe.return_value = mock_cnn_patterns_output
+    # For these specific tests, we don't need to mock get_all_detectable_pattern_keys
+    # as the default implementation in CNNPatterns should suffice if it returns ['bullFlag', 'bearishEngulfing']
+    # and EntryDecider calls it. If tests need specific control, it can be added to the mock_cnn_patterns_instance.
+    # For now, assume EntryDecider correctly calls the real method on the mocked instance.
 
     # Mock AI consensus parts
     # GPTReflector and GrokReflector are part of get_consensus, so their ask_ai/ask_grok need mocking
@@ -879,6 +883,13 @@ async def test_entry_decider_should_enter(
     # Make sure EntryDecider's __init__ doesn't have complex dependencies not mocked here
     # For now, assuming ParamsManager, PromptBuilder, GPTReflector, GrokReflector are the main ones.
     # If BiasReflector, ConfidenceEngine are also initialized in __init__, they might need mocking too.
+
+    # It's crucial that EntryDecider uses the *instance* of CNNPatterns that we are configuring.
+    # So, we pass mock_cnn_patterns_instance to the EntryDecider constructor if possible,
+    # or ensure the patch applies to the instance used by EntryDecider.
+    # The current patching approach `patch('core.entry_decider.CNNPatterns', return_value=mock_cnn_patterns_instance)`
+    # should mean that when EntryDecider does `self.cnn_patterns_detector = CNNPatterns()`, it gets our mock.
+
     with patch('core.entry_decider.ParamsManager', return_value=mock_params_manager_instance), \
          patch('core.entry_decider.PromptBuilder', return_value=mock_prompt_builder_instance), \
          patch('core.entry_decider.GPTReflector', MockGPTReflector), \
@@ -887,7 +898,7 @@ async def test_entry_decider_should_enter(
          patch('core.entry_decider.ConfidenceEngine', MockConfidenceEngine), \
          patch('core.entry_decider.CNNPatterns', return_value=mock_cnn_patterns_instance), \
          patch('core.entry_decider.CooldownTracker', return_value=mock_cooldown_tracker_instance):
-        entry_decider = EntryDecider()
+        entry_decider = EntryDecider() # This will now use the mocked CNNPatterns instance
         entry_decider.get_consensus = AsyncMock(return_value=mock_get_consensus_result)
 
 
@@ -927,8 +938,7 @@ async def test_entry_decider_should_enter(
     # These checks can be very specific if needed by iterating call_args_list
     mock_params_manager_instance.get_param.assert_any_call("cnnPatternWeight", strategy_id=current_strategy_id, default=1.0)
     mock_params_manager_instance.get_param.assert_any_call("strongPatternThreshold", strategy_id=current_strategy_id, default=0.5)
-    if not expected_enter and "pattern_score_low" in expected_reason_part : # Only check if this path was taken
-         pass # Already covered by reason string check
+    # Removed condition for checking pattern_score_low as it's too specific for a general param check section
 
     if expected_enter or ("final_ai_conf_low" not in decision['reason'] and "ai_intent_not_long" not in decision['reason']):
         # Check bias threshold if other conditions didn't lead to early exit from check
@@ -937,6 +947,189 @@ async def test_entry_decider_should_enter(
     # Verify CNNPatterns.detect_patterns_multi_timeframe was called
     mock_cnn_patterns_instance.detect_patterns_multi_timeframe.assert_called_once_with(candles_by_timeframe, symbol)
 
+# --- Start of new test function for CNN pattern weighting ---
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "scenario_name, mock_params_config, cnn_predictions_config, rule_patterns_config, expected_weighted_score, expected_log_parts, mock_detectable_keys",
+    [
+        (
+            "Multi_CNN_IndividualWeights",
+            { # mock_params_config
+                "cnn_bullFlag_weight": 0.7, "cnn_bearishEngulfing_weight": 1.2, "cnnPatternWeight": 1.0, # Fallback
+                "entryRulePatternScore": 0.5, "strongPatternThreshold": 0.1, "entryConvictionThreshold": 0.5,
+                "entryLearnedBiasThreshold": 0.5, "entryTimeEffectivenessImpactFactor": 0.0
+            },
+            {"5m_bullFlag_score": 0.8, "1h_bearishEngulfing_score": 0.9}, # cnn_predictions_config
+            {}, # rule_patterns_config
+            (0.8 * 0.7) + (0.9 * 1.2), # expected_weighted_score = 0.56 + 1.08 = 1.64
+            ["Using specific weight for CNN pattern 'bullFlag': 0.7",
+             "Using specific weight for CNN pattern 'bearishEngulfing': 1.2",
+             "CNN Contribution: Pattern 'bullFlag' (from key '5m_bullFlag_score') Score: 0.80 * Weight: 0.70 = 0.56",
+             "CNN Contribution: Pattern 'bearishEngulfing' (from key '1h_bearishEngulfing_score') Score: 0.90 * Weight: 1.20 = 1.08",
+             "Final Calculated Weighted Pattern Score: 1.64"],
+            ['bullFlag', 'bearishEngulfing'] # mock_detectable_keys
+        ),
+        (
+            "CNN_Uses_FallbackWeight",
+            { # mock_params_config: cnn_bullFlag_weight is missing, so fallback cnnPatternWeight=0.9 is used.
+                "cnnPatternWeight": 0.9, "entryRulePatternScore": 0.0, "strongPatternThreshold": 0.1,
+                "entryConvictionThreshold": 0.5, "entryLearnedBiasThreshold": 0.5, "entryTimeEffectivenessImpactFactor": 0.0
+            },
+            {"5m_bullFlag_score": 0.8}, # cnn_predictions_config
+            {}, # rule_patterns_config
+            0.8 * 0.9, # expected_weighted_score = 0.72
+            ["Using fallback cnnPatternWeight (0.9) for CNN pattern 'bullFlag'",
+             "CNN Contribution: Pattern 'bullFlag' (from key '5m_bullFlag_score') Score: 0.80 * Weight: 0.90 = 0.72",
+             "Final Calculated Weighted Pattern Score: 0.72"],
+            ['bullFlag']
+        ),
+        (
+            "CNN_and_RuleBased_Combination",
+            { # mock_params_config
+                "cnn_bullFlag_weight": 1.1, "cnnPatternWeight": 1.0, # Fallback for rule pattern
+                "entryRulePatternScore": 0.5, "strongPatternThreshold": 0.1, "entryConvictionThreshold": 0.5,
+                "entryLearnedBiasThreshold": 0.5, "entryTimeEffectivenessImpactFactor": 0.0
+            },
+            {"5m_bullFlag_score": 0.7}, # cnn_predictions_config
+            {"bullishEngulfing": True}, # rule_patterns_config
+            (0.7 * 1.1) + (0.5 * 1.0), # expected_weighted_score = 0.77 + 0.5 = 1.27
+            ["Using specific weight for CNN pattern 'bullFlag': 1.1",
+             "CNN Contribution: Pattern 'bullFlag' (from key '5m_bullFlag_score') Score: 0.70 * Weight: 1.10 = 0.77",
+             "Detected rule-based pattern: 'bullishEngulfing'. Contribution: 0.50 * 1.00 = 0.50",
+             "Final Calculated Weighted Pattern Score: 1.27"],
+            ['bullFlag']
+        ),
+        (
+            "No_CNN_Only_RuleBased",
+            { # mock_params_config
+                "cnnPatternWeight": 1.0, "entryRulePatternScore": 0.6, "strongPatternThreshold": 0.1,
+                "entryConvictionThreshold": 0.5, "entryLearnedBiasThreshold": 0.5, "entryTimeEffectivenessImpactFactor": 0.0
+            },
+            {}, # cnn_predictions_config
+            {"morningStar": True}, # rule_patterns_config
+            0.6 * 1.0, # expected_weighted_score = 0.6
+            ["No contributing CNN patterns detected",
+             "Detected rule-based pattern: 'morningStar'. Contribution: 0.60 * 1.00 = 0.60",
+             "Final Calculated Weighted Pattern Score: 0.60"],
+            ['bullFlag'] # Still need some detectable keys for the loop, even if no scores match
+        ),
+        (
+            "Malformed_CNN_Keys_Skipped",
+            { # mock_params_config
+                "cnn_bullFlag_weight": 1.0, "cnnPatternWeight": 0.8, "strongPatternThreshold": 0.1,
+                "entryConvictionThreshold": 0.5, "entryLearnedBiasThreshold": 0.5, "entryTimeEffectivenessImpactFactor": 0.0,
+                "entryRulePatternScore": 0.0
+            },
+            {"5m_bullFlag_score": 0.9, "malformed_key": 0.8, "1h_unknownPattern_score": 0.7}, # cnn_predictions_config
+            {}, # rule_patterns_config
+            0.9 * 1.0, # expected_weighted_score from bullFlag only
+            ["CNN Contribution: Pattern 'bullFlag' (from key '5m_bullFlag_score') Score: 0.90 * Weight: 1.00 = 0.90",
+             # "Could not extract a recognized CNN pattern name from cnn_predictions key: 'malformed_key'", # This log is DEBUG
+             # "Weight for extracted CNN pattern name 'unknownPattern' (from key '1h_unknownPattern_score') not found" # This might happen if unknownPattern not in mock_detectable_keys
+             "Final Calculated Weighted Pattern Score: 0.90"],
+            ['bullFlag', 'someOtherPattern'] # bullFlag is detectable, unknownPattern is not
+        ),
+    ]
+)
+@patch('core.entry_decider.GPTReflector')
+@patch('core.entry_decider.GrokReflector')
+@patch('core.entry_decider.PromptBuilder')
+@patch('core.entry_decider.BiasReflector')
+@patch('core.entry_decider.ConfidenceEngine')
+@patch('core.entry_decider.ParamsManager') # Patched at class level
+@patch('core.entry_decider.CooldownTracker')
+@patch('core.entry_decider.CNNPatterns') # Patched at class level
+async def test_entry_decider_pattern_weighting_logic(
+    MockCNNPatterns, MockCooldownTracker, MockParamsManager, MockConfidenceEngine,
+    MockBiasReflector, MockPromptBuilder, MockGrokReflector, MockGPTReflector,
+    scenario_name, mock_params_config, cnn_predictions_config, rule_patterns_config,
+    expected_weighted_score, expected_log_parts, mock_detectable_keys, caplog
+):
+    caplog.set_level(logging.INFO) # Capture INFO level logs for assertions
+
+    # Setup mocks for instances
+    mock_params_manager_instance = MockParamsManager.return_value
+    mock_params_manager_instance.get_param.side_effect = get_entry_decider_param_side_effect(mock_params_config)
+
+    mock_cooldown_tracker_instance = MockCooldownTracker.return_value
+    mock_cooldown_tracker_instance.is_cooldown_active.return_value = False
+
+    mock_cnn_patterns_instance = MockCNNPatterns.return_value
+    mock_cnn_patterns_instance.detect_patterns_multi_timeframe.return_value = {
+        "cnn_predictions": cnn_predictions_config,
+        "patterns": rule_patterns_config,
+        "context": {} # Minimal context
+    }
+    # IMPORTANT: Mock get_all_detectable_pattern_keys
+    mock_cnn_patterns_instance.get_all_detectable_pattern_keys.return_value = mock_detectable_keys
+
+    # Mock AI consensus to be generally permissive for these tests focusing on pattern score
+    mock_get_consensus_result = {
+        "consensus_intentie": "LONG", "combined_confidence": 0.8, "combined_bias_reported": 0.5,
+        "gpt_raw": {}, "grok_raw": {}
+    }
+    mock_bias_reflector_instance = MockBiasReflector.return_value # Not used directly, but init
+    mock_bias_reflector_instance.get_bias_score.return_value = 0.6 # Permissive bias
+
+    mock_prompt_builder_instance = MockPromptBuilder.return_value # Not used directly, but init
+    mock_prompt_builder_instance.generate_prompt_with_data.return_value = "Test prompt for pattern weighting"
+
+    # Instantiate EntryDecider
+    with patch('core.entry_decider.ParamsManager', return_value=mock_params_manager_instance), \
+         patch('core.entry_decider.PromptBuilder', return_value=mock_prompt_builder_instance), \
+         patch('core.entry_decider.GPTReflector', MockGPTReflector), \
+         patch('core.entry_decider.GrokReflector', MockGrokReflector), \
+         patch('core.entry_decider.BiasReflector', return_value=mock_bias_reflector_instance), \
+         patch('core.entry_decider.ConfidenceEngine', MockConfidenceEngine), \
+         patch('core.entry_decider.CNNPatterns', return_value=mock_cnn_patterns_instance), \
+         patch('core.entry_decider.CooldownTracker', return_value=mock_cooldown_tracker_instance):
+        entry_decider = EntryDecider()
+        entry_decider.get_consensus = AsyncMock(return_value=mock_get_consensus_result)
+
+
+    # Prepare inputs for should_enter
+    symbol = "TEST/COIN"
+    current_strategy_id = "PatternWeightStrategy"
+    mock_df_5m = pd.DataFrame({'open': [10]*60, 'high': [12]*60, 'low': [9]*60, 'close': [11]*60, 'volume': [100]*60})
+    mock_df_5m.attrs['timeframe'] = '5m'
+    candles_by_timeframe = {'5m': mock_df_5m, '1h': mock_df_5m.copy()} # Dummy data for other timeframes if needed
+    trade_context = {'candles_by_timeframe': candles_by_timeframe, 'current_price': 11.0}
+
+    # Call should_enter
+    decision = await entry_decider.should_enter(
+        dataframe=mock_df_5m, symbol=symbol, current_strategy_id=current_strategy_id,
+        trade_context=trade_context,
+        learned_bias=0.6, # Permissive
+        learned_confidence=0.7, # Permissive
+        entry_conviction_threshold=mock_params_config.get("entryConvictionThreshold", 0.5) # From scenario
+    )
+
+    # Assertions
+    # Check weighted_pattern_score from the decision dict (it's returned on non-entry for logging)
+    # or recalculate based on what should have happened.
+    # For simplicity, we assume the test scenarios are set up so other conditions pass,
+    # or we check the weighted_pattern_score logged.
+    # The most reliable is to check the log for "Final Calculated Weighted Pattern Score".
+
+    for log_part in expected_log_parts:
+        assert log_part in caplog.text, f"Scenario '{scenario_name}': Expected log part '{log_part}' not found. Logs:\n{caplog.text}"
+
+    # Find the final calculated score from logs, as it's the most direct way to verify the sum.
+    # This regex will find "Final Calculated Weighted Pattern Score: <score>"
+    import re
+    final_score_match = re.search(r"Final Calculated Weighted Pattern Score: (\d+\.?\d*)", caplog.text)
+    assert final_score_match is not None, f"Scenario '{scenario_name}': Could not find final weighted score in logs. Logs:\n{caplog.text}"
+    logged_weighted_score = float(final_score_match.group(1))
+
+    assert abs(logged_weighted_score - expected_weighted_score) < 0.001, \
+        f"Scenario '{scenario_name}': Weighted pattern score mismatch. Expected {expected_weighted_score}, Got {logged_weighted_score}"
+
+    # Verify that get_all_detectable_pattern_keys was called on the cnn_patterns_detector instance
+    mock_cnn_patterns_instance.get_all_detectable_pattern_keys.assert_called_once()
+
+
+# --- End of new test function ---
 
 # Imports for StrategyManager tests
 from core.strategy_manager import StrategyManager
@@ -1688,6 +1881,158 @@ class TestCNNPatternsMain:
         spike_result = cnn_detector.detect_volume_spike(create_candle_list_vol(insufficient_volumes), period=20, spike_factor=2.0)
         assert spike_result is False, "Expected False for insufficient data (volume spike)"
 
+    @pytest.mark.asyncio
+    async def test_detect_patterns_multi_timeframe_output_structure(self, cnn_patterns_with_dummy_models, caplog):
+        """
+        Tests the output structure of detect_patterns_multi_timeframe,
+        focusing on cnn_predictions and rule-based pattern integration.
+        """
+        caplog.set_level(logging.DEBUG)
+        cnn_detector, test_symbol, test_timeframe_from_fixture = cnn_patterns_with_dummy_models
+
+        # 1. Mock predict_pattern_score
+        async def mock_predict_score(df, symbol, timeframe, pattern_name):
+            if symbol == test_symbol:
+                if pattern_name == 'bullFlag' and timeframe == '5m': return 0.8
+                if pattern_name == 'bearishEngulfing' and timeframe == '1h': return 0.7
+                if pattern_name == 'bullFlag' and timeframe == '15m': return 0.0 # Score that should be ignored or recorded as 0
+            return 0.0 # Default score for other cases
+        cnn_detector.predict_pattern_score = AsyncMock(side_effect=mock_predict_score)
+
+        # 2. Mock rule-based detection methods (simplified)
+        # These are methods of CNNPatterns instance.
+        cnn_detector.detect_bull_flag = MagicMock(return_value=True) # Assume it's a method taking candles list
+        cnn_detector._detect_engulfing = MagicMock(return_value="bearishEngulfing") # Takes candles list
+        # detect_candlestick_patterns takes a DataFrame
+        cnn_detector.detect_candlestick_patterns = MagicMock(return_value={"CDLDOJI": True, "CDLHAMMER": False}) # Example output
+
+        # Mock context methods
+        cnn_detector.determine_trend = MagicMock(return_value="uptrend")
+        cnn_detector.detect_volume_spike = MagicMock(return_value=True)
+
+
+        # 3. Prepare mock DataFrames for different timeframes
+        mock_df_5m = self._create_mock_dataframe(num_rows=30, timeframe='5m')
+        mock_df_15m = self._create_mock_dataframe(num_rows=30, timeframe='15m')
+        mock_df_1h = self._create_mock_dataframe(num_rows=30, timeframe='1h')
+        candles_by_tf = {'5m': mock_df_5m, '15m': mock_df_15m, '1h': mock_df_1h}
+
+        # 4. Call detect_patterns_multi_timeframe
+        output = await cnn_detector.detect_patterns_multi_timeframe(candles_by_tf, test_symbol)
+
+        # 5. Assertions for cnn_predictions
+        assert "cnn_predictions" in output
+        cnn_preds = output["cnn_predictions"]
+        assert "5m_bullFlag_score" in cnn_preds
+        assert cnn_preds["5m_bullFlag_score"] == 0.8
+        assert "1h_bearishEngulfing_score" in cnn_preds
+        assert cnn_preds["1h_bearishEngulfing_score"] == 0.7
+        # Pattern with 0.0 score might be absent or present as 0.0 depending on implementation.
+        # Current EntryDecider logic: `if score is not None and isinstance(score, (float, int)) and score > 0:`
+        # CNNPatterns log: `if score > 0.0: all_patterns["cnn_predictions"][...] = score`
+        # So, 0.0 scores should not be in the output cnn_predictions.
+        assert "15m_bullFlag_score" not in cnn_preds, "Scores of 0.0 should not be included in cnn_predictions"
+
+        # 6. Assertions for rule-based patterns in "patterns"
+        # The consolidation logic in detect_patterns_multi_timeframe is:
+        # `for tf_type_key in ["zoomPatterns", "contextPatterns"]:`
+        # `  for patterns_on_tf in all_patterns[tf_type_key].values():`
+        # `    for pattern_name, status in patterns_on_tf.items():`
+        # `      if status: all_patterns["patterns"][pattern_name] = status`
+        # This means the "patterns" dict will have a flat list of detected rule patterns.
+        assert "patterns" in output
+        rule_patterns = output["patterns"]
+        assert rule_patterns.get("bullFlag") is True # From mocked detect_bull_flag
+        assert rule_patterns.get("bearishEngulfing") is True # From mocked _detect_engulfing
+        assert rule_patterns.get("CDLDOJI") is True # From mocked detect_candlestick_patterns
+        assert "CDLHAMMER" not in rule_patterns # Since its mock value was False
+
+        # 7. Assertions for context
+        assert "context" in output
+        assert output["context"]["trend"] == "uptrend"
+        assert output["context"]["volume_spike"] is True
+
+        # Verify mocks were called for different timeframes (example for predict_pattern_score)
+        # Calls are (df, symbol, timeframe, pattern_name)
+        # Check a few specific calls to ensure iteration over timeframes and patterns
+        expected_calls = [
+            call(mock_df_5m, test_symbol, '5m', 'bullFlag'),
+            call(mock_df_5m, test_symbol, '5m', 'bearishEngulfing'), # Will return 0.0 from mock
+            call(mock_df_1h, test_symbol, '1h', 'bullFlag'),       # Will return 0.0 from mock
+            call(mock_df_1h, test_symbol, '1h', 'bearishEngulfing'),
+            call(mock_df_15m, test_symbol, '15m', 'bullFlag'),
+        ]
+        cnn_detector.predict_pattern_score.assert_has_calls(expected_calls, any_order=True)
+        # Check that rule-based detectors were called for each relevant timeframe
+        # Example: cnn_detector.detect_bull_flag would be called with candles_list derived from mock_df_5m, mock_df_15m, mock_df_1h
+        # For simplicity, check call count if logic is complex, or specific calls if simpler.
+        # Total timeframes with data = 3. `detect_bull_flag` is called per timeframe.
+        assert cnn_detector.detect_bull_flag.call_count >= 3 # Called for 5m, 15m, 1h from TIME_FRAME_CONFIG
+        assert cnn_detector.detect_candlestick_patterns.call_count >= 3
+
+
+    @pytest.mark.asyncio
+    async def test_dataframe_to_cnn_input(self, cnn_patterns_with_dummy_models, caplog):
+        """Tests the _dataframe_to_cnn_input helper method."""
+        caplog.set_level(logging.DEBUG)
+        cnn_detector, test_symbol, test_timeframe = cnn_patterns_with_dummy_models
+        pattern_name = 'bullFlag' # Choose one pattern for which dummy model/scaler exists
+        arch_key = "default_simple" # Matches fixture
+        model_key = f"{test_symbol.replace('/', '_')}_{test_timeframe}_{pattern_name}_{arch_key}"
+
+        # Ensure the scaler is loaded for this model_key via the fixture's _load_cnn_models_and_scalers call
+        assert model_key in cnn_detector.scalers, f"Scaler for {model_key} not loaded by fixture."
+        scaler = cnn_detector.scalers[model_key]
+        # The dummy scaler expects 12 features as per fixture:
+        # ['open', 'high', 'low', 'close', 'volume', 'rsi', 'macd', 'macdsignal', 'macdhist', 'bb_lowerband', 'bb_middleband', 'bb_upperband']
+        # Sequence length is 30.
+        sequence_length = scaler.sequence_length_ # Assuming scaler has sequence_length attribute from dummy json
+        num_features = len(scaler.feature_names_in_)
+
+
+        # 1. Normal case
+        normal_df = self._create_mock_dataframe(num_rows=sequence_length + 5, timeframe=test_timeframe)
+        # Ensure all necessary feature columns are present in normal_df
+        for feature in scaler.feature_names_in_:
+            if feature not in normal_df.columns:
+                normal_df[feature] = np.random.rand(len(normal_df)) * 10 # Add missing feature if any
+
+        tensor_output = cnn_detector._dataframe_to_cnn_input(normal_df, model_key, sequence_length)
+        assert tensor_output is not None
+        assert isinstance(tensor_output, torch.Tensor)
+        assert tensor_output.shape == (1, num_features, sequence_length) # Batch, Channels (Features), SeqLen
+        # Check if data is scaled (approx 0-1). This is a loose check.
+        # A more precise check would require knowing exact scaler params and input data.
+        assert tensor_output.min() >= -0.1 and tensor_output.max() <= 1.1 # Scaled data should be roughly in [0,1]
+
+        # 2. DataFrame too short
+        short_df = self._create_mock_dataframe(num_rows=sequence_length - 1, timeframe=test_timeframe)
+        tensor_output_short = cnn_detector._dataframe_to_cnn_input(short_df, model_key, sequence_length)
+        assert tensor_output_short is None
+        assert f"Niet genoeg candles ({len(short_df)}) voor CNN input (nodig: {sequence_length}) voor model_key '{model_key}'" in caplog.text
+
+        # 3. DataFrame with missing feature columns
+        caplog.clear()
+        missing_cols_df = self._create_mock_dataframe(num_rows=sequence_length + 5, timeframe=test_timeframe)
+        # Remove a column expected by the scaler
+        removed_col = scaler.feature_names_in_[0]
+        missing_cols_df_dropped = missing_cols_df.drop(columns=[removed_col])
+        # _dataframe_to_cnn_input should add it back as NaN, then if NaNs are present, return None.
+        # The current _dataframe_to_cnn_input adds missing columns with np.nan, then checks for isnull().values.any().
+        tensor_output_missing_cols = cnn_detector._dataframe_to_cnn_input(missing_cols_df_dropped, model_key, sequence_length)
+        assert tensor_output_missing_cols is None
+        assert f"Kolom '{removed_col}' niet gevonden in dataframe voor model_key '{model_key}'" in caplog.text # Logged as DEBUG
+        assert f"NaN waarden gevonden in input data voor CNN voor model_key '{model_key}'" in caplog.text # Logged as WARNING
+
+        # 4. DataFrame with NaN values in critical columns
+        caplog.clear()
+        nan_df = self._create_mock_dataframe(num_rows=sequence_length + 5, timeframe=test_timeframe)
+        for feature in scaler.feature_names_in_: # Ensure all features exist first
+            if feature not in nan_df.columns: nan_df[feature] = np.random.rand(len(nan_df))
+        nan_df.loc[nan_df.index[-sequence_length//2], scaler.feature_names_in_[0]] = np.nan # Introduce NaN
+        tensor_output_nan = cnn_detector._dataframe_to_cnn_input(nan_df, model_key, sequence_length)
+        assert tensor_output_nan is None
+        assert f"NaN waarden gevonden in input data voor CNN voor model_key '{model_key}'" in caplog.text
 
 
 # Imports for BitvavoExecutor tests
