@@ -7,11 +7,12 @@ import pandas as pd
 import numpy as np
 
 from freqtrade.strategy import IStrategy, merge_informative_pair
-from freqtrade.strategy.interface import IStrategy
-# import talib.abstract as ta # Defer import to where it's used
+from freqtrade.strategy.interface import IStrategy # type: ignore
+# No more talib import
 import freqtrade.vendor.qtpylib.indicators as qtpylib
 from freqtrade.exchange import Exchange
 from freqtrade.persistence import Trade
+from typing import Tuple # For type hinting _calculate_macd_pandas
 
 # Importeer je eigen AI-modules
 from core.gpt_reflector import GPTReflector
@@ -101,6 +102,36 @@ class DUOAI_Strategy(IStrategy):
         self.ai_activation_engine = AIActivationEngine(reflectie_lus_instance=self.reflectie_lus)
         logger.info(f"DUOAI_Strategy geïnitialiseerd.")
 
+    # --- Custom Indicator Calculation Methods (Pandas based) ---
+    def _calculate_rsi_pandas(self, series: pd.Series, period: int = 14) -> pd.Series:
+        """Calculate RSI using Pandas."""
+        delta = series.diff()
+        gain = delta.where(delta > 0, 0).fillna(0)
+        loss = -delta.where(delta < 0, 0).fillna(0)
+
+        avg_gain = gain.ewm(alpha=1/period, adjust=False, min_periods=period).mean()
+        avg_loss = loss.ewm(alpha=1/period, adjust=False, min_periods=period).mean()
+
+        rs = avg_gain / avg_loss
+        rsi = 100.0 - (100.0 / (1.0 + rs))
+
+        # Replace inf values with 100 (where avg_loss is 0)
+        rsi = rsi.replace([float('inf'), -float('inf')], 100.0)
+        # Fill initial NaNs with 50 (neutral)
+        rsi = rsi.fillna(50.0)
+        return rsi
+
+    def _calculate_macd_pandas(self, series: pd.Series, fast_p: int = 12, slow_p: int = 26, signal_p: int = 9) -> Tuple[pd.Series, pd.Series, pd.Series]:
+        """Calculate MACD, Signal, and Histogram using Pandas."""
+        ema_fast = series.ewm(span=fast_p, adjust=False, min_periods=fast_p).mean()
+        ema_slow = series.ewm(span=slow_p, adjust=False, min_periods=slow_p).mean()
+
+        macd_line = ema_fast - ema_slow
+        signal_line = macd_line.ewm(span=signal_p, adjust=False, min_periods=signal_p).mean()
+        macd_hist = macd_line - signal_line
+
+        return macd_line, signal_line, macd_hist
+
     def _get_all_relevant_candles_for_ai(self, pair: str) -> Dict[str, pd.DataFrame]:
         """
         Haalt alle relevante candles (basistimeframe + informatives) op voor AI-modules.
@@ -165,41 +196,30 @@ class DUOAI_Strategy(IStrategy):
         """
         self._load_and_apply_learned_parameters(metadata['pair']) # Load latest params
 
-        try:
-            import talib.abstract as ta
-            # Standaard Freqtrade/TA-Lib indicatoren
-            dataframe['rsi'] = ta.RSI(dataframe, timeperiod=14)
-            macd = ta.MACD(dataframe)
-            dataframe['macd'] = macd['macd']
-            dataframe['macdsignal'] = macd['macdsignal']
-            dataframe['macdhist'] = macd['macdhist']
-            # Bollinger Bands in Freqtrade often use qtpylib, which might use talib or numpy internally
-            # ta.TYPPRICE is used by qtpylib.bollinger_bands if not given a series directly.
-            # If qtpylib.typical_price itself calls ta.TYPPRICE, it needs talib.
-            # For now, assume qtpylib parts are less problematic or handled if TA-Lib is missing.
-            # The main direct TA-Lib calls are RSI, MACD, EMA.
-            # bollinger = qtpylib.bollinger_bands(qtpylib.typical_price(dataframe), window=20, stds=2)
-            # To make bollinger_bands more robust if ta.TYPPRICE fails due to missing talib:
-            try:
-                typical_price_series = ta.TYPPRICE(dataframe) # This requires 'high', 'low', 'close'
-            except Exception: # Could be AttributeError if ta is None, or other talib issues
-                logger.warning("TA-Lib (ta.TYPPRICE) not available for Bollinger Bands typical price. Using 'close'.")
-                typical_price_series = dataframe['close'] # Fallback
+        # --- Calculate Base Timeframe Indicators (Pandas / qtpylib) ---
+        dataframe['rsi'] = self._calculate_rsi_pandas(dataframe['close'], period=14)
 
-            bollinger = qtpylib.bollinger_bands(typical_price_series, window=20, stds=2)
-            dataframe['bb_lowerband'] = bollinger['lower']
-            dataframe['bb_middleband'] = bollinger['mid']
-            dataframe['bb_upperband'] = bollinger['upper']
+        macd_line, signal_line, macd_hist = self._calculate_macd_pandas(dataframe['close'])
+        dataframe['macd'] = macd_line
+        dataframe['macdsignal'] = signal_line
+        dataframe['macdhist'] = macd_hist
 
-            dataframe['ema_10'] = ta.EMA(dataframe, timeperiod=10)
-            dataframe['ema_25'] = ta.EMA(dataframe, timeperiod=25)
-            dataframe['ema_50'] = ta.EMA(dataframe, timeperiod=50)
-        except ImportError:
-            logger.warning("DUOAI_Strategy: TA-Lib module not found. Skipping TA-Lib based indicators (RSI, MACD, EMA, BBands via TYPPRICE).")
-        except Exception as e_ta_pop:
-            logger.error(f"DUOAI_Strategy: Error calculating TA-Lib indicators: {e_ta_pop}. Skipping.")
+        # Bollinger Bands using qtpylib (uses 'close' by default if no typical price series is given)
+        bollinger = qtpylib.bollinger_bands(dataframe['close'], window=20, stds=2)
+        dataframe['bb_lowerband'] = bollinger['lower']
+        dataframe['bb_middleband'] = bollinger['mid']
+        dataframe['bb_upperband'] = bollinger['upper']
 
-        dataframe['volume_mean_20'] = dataframe['volume'].rolling(20).mean() # Numpy based, should be fine
+        # EMAs using qtpylib or direct Pandas
+        dataframe['ema_10'] = qtpylib.ema(dataframe, period=10) # qtpylib.ema uses 'close' column by default
+        dataframe['ema_25'] = qtpylib.ema(dataframe, period=25)
+        dataframe['ema_50'] = qtpylib.ema(dataframe, period=50)
+        # Alternatively, using Pandas directly:
+        # dataframe['ema_10'] = dataframe['close'].ewm(span=10, adjust=False, min_periods=10).mean()
+        # dataframe['ema_25'] = dataframe['close'].ewm(span=25, adjust=False, min_periods=25).mean()
+        # dataframe['ema_50'] = dataframe['close'].ewm(span=50, adjust=False, min_periods=50).mean()
+
+        dataframe['volume_mean_20'] = dataframe['volume'].rolling(window=20).mean() # Numpy based, should be fine
 
         # --- Merge informative timeframes into the main dataframe ---
         # This uses `self.informative_pairs` to tell Freqtrade which (pair, timeframe)
@@ -226,43 +246,35 @@ class DUOAI_Strategy(IStrategy):
                 logger.debug(f"Skipping indicator calculation for {info_tf} as '{prefix}_close' is not in dataframe.")
                 continue
 
-            # try:
-            #     import talib.abstract as ta
-            #     # RSI
-            #     dataframe[f'{prefix}_rsi'] = ta.RSI(dataframe[f'{prefix}_close'], timeperiod=14)
+            logger.debug(f"Calculating indicators for informative timeframe {info_tf} using Pandas/qtpylib.")
 
-            #     # MACD
-            #     macd_inf = ta.MACD(dataframe[f'{prefix}_close'])
-            #     dataframe[f'{prefix}_macd'] = macd_inf['macd']
-            #     dataframe[f'{prefix}_macdsignal'] = macd_inf['macdsignal']
-            #     dataframe[f'{prefix}_macdhist'] = macd_inf['macdhist']
+            # RSI for informative timeframe
+            dataframe[f'{prefix}_rsi'] = self._calculate_rsi_pandas(dataframe[f'{prefix}_close'], period=14)
 
-            #     # Bollinger Bands for informative TFs
-            #     try:
-            #         inf_typical_price_series = ta.TYPPRICE(
-            #             dataframe[f'{prefix}_open'],
-            #             dataframe[f'{prefix}_high'],
-            #             dataframe[f'{prefix}_low'],
-            #             dataframe[f'{prefix}_close']
-            #         )
-            #     except Exception: # Handles if ta is None or specific columns missing for TYPPRICE
-            #         logger.warning(f"TA-Lib (ta.TYPPRICE) not available for informative Bollinger Bands on {info_tf}. Using '{prefix}_close'.")
-            #         inf_typical_price_series = dataframe[f'{prefix}_close'] # Fallback
+            # MACD for informative timeframe
+            inf_macd_line, inf_signal_line, inf_macd_hist = self._calculate_macd_pandas(dataframe[f'{prefix}_close'])
+            dataframe[f'{prefix}_macd'] = inf_macd_line
+            dataframe[f'{prefix}_macdsignal'] = inf_signal_line
+            dataframe[f'{prefix}_macdhist'] = inf_macd_hist
 
-            #     bollinger_inf = qtpylib.bollinger_bands(inf_typical_price_series, window=20, stds=2)
-            #     dataframe[f'{prefix}_bb_lowerband'] = bollinger_inf['lower']
-            #     dataframe[f'{prefix}_bb_middleband'] = bollinger_inf['mid']
-            #     dataframe[f'{prefix}_bb_upperband'] = bollinger_inf['upper']
+            # Bollinger Bands for informative timeframe
+            # qtpylib.bollinger_bands defaults to using the 'close' column of the passed series.
+            # Here, we pass the specific '{prefix}_close' series.
+            bollinger_inf = qtpylib.bollinger_bands(dataframe[f'{prefix}_close'], window=20, stds=2)
+            dataframe[f'{prefix}_bb_lowerband'] = bollinger_inf['lower']
+            dataframe[f'{prefix}_bb_middleband'] = bollinger_inf['mid']
+            dataframe[f'{prefix}_bb_upperband'] = bollinger_inf['upper']
 
-            #     # EMA
-            #     dataframe[f'{prefix}_ema_10'] = ta.EMA(dataframe[f'{prefix}_close'], timeperiod=10)
-            #     dataframe[f'{prefix}_ema_25'] = ta.EMA(dataframe[f'{prefix}_close'], timeperiod=25)
-            #     dataframe[f'{prefix}_ema_50'] = ta.EMA(dataframe[f'{prefix}_close'], timeperiod=50)
-            # except ImportError:
-            #     logger.warning(f"DUOAI_Strategy: TA-Lib module not found during informative TF processing for {info_tf}. Skipping TA-Lib indicators.")
-            # except Exception as e_ta_info:
-            #     logger.error(f"DUOAI_Strategy: Error calculating TA-Lib indicators for informative TF {info_tf}: {e_ta_info}. Skipping.")
-            logger.warning(f"DUOAI_Strategy: TA-Lib dependent indicators for informative timeframe {info_tf} are temporarily disabled.")
+            # EMAs for informative timeframe
+            # qtpylib.ema expects a full dataframe and a column name, or uses 'close' by default.
+            # To use it with prefixed columns, we can create a temporary Series or use Pandas' ewm directly.
+            # Using Pandas ewm for clarity with prefixed columns:
+            dataframe[f'{prefix}_ema_10'] = dataframe[f'{prefix}_close'].ewm(span=10, adjust=False, min_periods=10).mean()
+            dataframe[f'{prefix}_ema_25'] = dataframe[f'{prefix}_close'].ewm(span=25, adjust=False, min_periods=25).mean()
+            dataframe[f'{prefix}_ema_50'] = dataframe[f'{prefix}_close'].ewm(span=50, adjust=False, min_periods=50).mean()
+            # Alternatively, using qtpylib.ema by renaming the column temporarily (less clean):
+            # temp_series_for_ema = dataframe[f'{prefix}_close'].rename('close')
+            # dataframe[f'{prefix}_ema_10'] = qtpylib.ema(temp_series_for_ema.to_frame(), period=10) # Needs a DataFrame
 
             # Volume Mean (e.g., volume_mean_20) - Numpy based
             if f'{prefix}_volume' in dataframe.columns:
