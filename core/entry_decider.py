@@ -148,6 +148,11 @@ class EntryDecider:
 
         combined_bias_reported = (gpt_reported_bias + grok_reported_bias) / 2.0
 
+        # Enhanced logging for individual AI responses
+        logger.info(f"GPT Raw Reflectie for {token} (first 200 chars): {gpt_response.get('reflectie', '')[:200]}")
+        logger.info(f"Grok Raw Reflectie for {token} (first 200 chars): {grok_response.get('reflectie', '')[:200]}")
+        logger.info(f"GPT Parsed for {token}: Intentie='{gpt_intentie}', Confidence={gpt_confidence:.2f}, Reported Bias={gpt_reported_bias:.2f}")
+        logger.info(f"Grok Parsed for {token}: Intentie='{grok_intentie}', Confidence={grok_confidence:.2f}, Reported Bias={grok_reported_bias:.2f}")
 
         logger.info(f"AI Consensus voor {token}: Intentie={consensus_intentie}, Confidence={combined_confidence:.2f}, Reported Bias={combined_bias_reported:.2f}")
 
