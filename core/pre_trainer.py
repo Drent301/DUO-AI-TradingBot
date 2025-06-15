@@ -81,8 +81,8 @@ class PreTrainer:
                 logger.error(f"PreTrainer: Unexpected error initializing BitvavoExecutor: {e_gen}", exc_info=True)
 
         # Instantiate CNNPatterns detector
-        # CNNPatterns internally creates its own ParamsManager instance.
-        # If shared PM is needed, CNNPatterns constructor would need modification.
+        # CNNPatterns is initialized with the shared self.params_manager instance.
+        # This allows it to use the same ParamsManager as the PreTrainer.
         try:
             self.cnn_pattern_detector: CNNPatterns = CNNPatterns(params_manager=self.params_manager)
             logger.info("CNNPatterns initialized in PreTrainer with shared ParamsManager.")
@@ -1298,9 +1298,9 @@ class PreTrainer:
             logger.error(f"Fout bij opslaan tijd-van-dag effectiviteit naar {TIME_EFFECTIVENESS_FILE.resolve()}: {e}", exc_info=True) # exc_info=True is correct
         return result_dict
 
-    async def run_pretraining_pipeline(self, strategy_id: str, params_manager=None):
+    async def run_pretraining_pipeline(self, strategy_id: str):
         logger.info(f"Start pre-training pipeline voor strategie: {strategy_id}...")
-        if params_manager: self.params_manager = params_manager
+        # self.params_manager will be used directly
         pairs_to_fetch = self.params_manager.get_param("data_fetch_pairs")
         timeframes_to_fetch = self.params_manager.get_param("data_fetch_timeframes")
         patterns_to_train_list = self.params_manager.get_param('patterns_to_train')

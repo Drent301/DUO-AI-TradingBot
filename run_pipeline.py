@@ -221,8 +221,7 @@ async def main():
             # run_pretraining_pipeline no longer takes pair/timeframe directly.
             # It uses what's in ParamsManager (which we just set if CLI args were used).
             await pre_trainer.run_pretraining_pipeline(
-                strategy_id=strategy_id,
-                params_manager=params_manager # This ensures the PM instance with CLI overrides is used
+                strategy_id=strategy_id
             )
             logger.info(f"--- CNN Pre-training Pipeline for strategy_id: {strategy_id} Finished ---")
 
