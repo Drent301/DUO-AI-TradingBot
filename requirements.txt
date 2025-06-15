@@ -1,15 +1,15 @@
-ccxt
-pandas-ta
-openai
-groq
-numpy
-pandas
-scikit-learn
+ccxt==4.4.89
+pandas-ta==0.3.14b0
+openai==1.86.0
+groq==0.28.0
+numpy==2.2.6
+pandas==2.3.0
+scikit-learn==1.7.0
 # matplotlib
 # seaborn
-python-dotenv
-requests
-pytest
-pytest-asyncio
-optuna>=3.0.0
-torch
+python-dotenv==1.1.0
+requests==2.32.4
+pytest==8.4.0
+pytest-asyncio==1.0.0
+optuna==4.3.0
+torch==2.7.1

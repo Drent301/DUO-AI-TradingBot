@@ -1,6 +1,27 @@
 import pandas as pd
 import pathlib
 import json
+import logging
+import os
+import sys
+
+# Configure logging
+log_dir = "user_data/logs"
+log_file_path = os.path.join(log_dir, "data_validator.log")
+
+# Create log directory if it doesn't exist
+os.makedirs(log_dir, exist_ok=True)
+
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.FileHandler(log_file_path),
+        logging.StreamHandler(sys.stdout)
+    ]
+)
+logger = logging.getLogger(__name__)
+
 def load_data_for_pair(base_data_dir: str, exchange: str, pair: str, timeframe: str) -> pd.DataFrame | None:
     """
     Loads Freqtrade data for a specific pair and timeframe into a Pandas DataFrame.
@@ -10,13 +31,13 @@ def load_data_for_pair(base_data_dir: str, exchange: str, pair: str, timeframe: 
     pair_filename = pair.replace('/', '_')
     file_path = pathlib.Path(base_data_dir) / exchange.lower() / f"{pair_filename}-{timeframe}.json"
 
-    print(f"\nAttempting to load data from: {file_path}")
+    logger.info(f"\nAttempting to load data from: {file_path}")
     try:
         with open(file_path, 'r') as f:
             data = json.load(f)
 
         if not data:
-            print(f"File loaded but contains no data: {file_path}")
+            logger.warning(f"File loaded but contains no data: {file_path}")
             return None
 
         df = pd.DataFrame(data, columns=["date", "open", "high", "low", "close", "volume"])
@@ -31,78 +52,78 @@ def load_data_for_pair(base_data_dir: str, exchange: str, pair: str, timeframe: 
 
         df.dropna(subset=["open", "high", "low", "close", "volume"], inplace=True) # Drop rows where essential OHLCV is NaN after conversion
 
-        print(f"Successfully loaded and processed data for {pair} - {timeframe}. Shape: {df.shape}")
+        logger.info(f"Successfully loaded and processed data for {pair} - {timeframe}. Shape: {df.shape}")
         return df
     except FileNotFoundError:
-        print(f"Error: Data file not found: {file_path}")
+        logger.error(f"Error: Data file not found: {file_path}")
         return None
     except json.JSONDecodeError:
-        print(f"Error: Could not decode JSON from file: {file_path}")
+        logger.error(f"Error: Could not decode JSON from file: {file_path}")
         return None
     except Exception as e:
-        print(f"An unexpected error occurred while loading {file_path}: {e}")
+        logger.error(f"An unexpected error occurred while loading {file_path}: {e}")
         return None
 
 def validate_ohlcv_data(df: pd.DataFrame, pair: str, timeframe: str) -> bool:
     """
     Validates basic OHLCV data integrity.
     """
-    print(f"\n--- Validating OHLCV data for {pair} - {timeframe} ---")
+    logger.info(f"\n--- Validating OHLCV data for {pair} - {timeframe} ---")
     required_columns = ["open", "high", "low", "close", "volume"]
     missing_cols = [col for col in required_columns if col not in df.columns]
 
     if missing_cols:
-        print(f"Validation FAILED: Missing required columns: {missing_cols}")
+        logger.error(f"Validation FAILED: Missing required columns: {missing_cols}")
         return False
 
     if df.empty:
-        print("Validation FAILED: DataFrame is empty.")
+        logger.error("Validation FAILED: DataFrame is empty.")
         return False
 
     if df[required_columns].isnull().any().any():
-        print(f"Validation FAILED: Contains NaN values in OHLCV columns.")
-        print(df[required_columns].isnull().sum())
+        logger.error(f"Validation FAILED: Contains NaN values in OHLCV columns.")
+        logger.error(df[required_columns].isnull().sum())
         return False
 
     # Check if high is always >= low, open, close and low is always <= open, close
     if not (df['high'] >= df['low']).all():
-        print("Validation FAILED: Not all high values are greater than or equal to low values.")
+        logger.error("Validation FAILED: Not all high values are greater than or equal to low values.")
         return False
     if not (df['high'] >= df['open']).all():
-        print("Validation FAILED: Not all high values are greater than or equal to open values.")
+        logger.error("Validation FAILED: Not all high values are greater than or equal to open values.")
         return False
     if not (df['high'] >= df['close']).all():
-        print("Validation FAILED: Not all high values are greater than or equal to close values.")
+        logger.error("Validation FAILED: Not all high values are greater than or equal to close values.")
         return False
     if not (df['low'] <= df['open']).all():
-        print("Validation FAILED: Not all low values are less than or equal to open values.")
+        logger.error("Validation FAILED: Not all low values are less than or equal to open values.")
         return False
     if not (df['low'] <= df['close']).all():
-        print("Validation FAILED: Not all low values are less than or equal to close values.")
+        logger.error("Validation FAILED: Not all low values are less than or equal to close values.")
         return False
 
-    print("OHLCV data validation SUCCEEDED.")
+    logger.info("OHLCV data validation SUCCEEDED.")
     return True
 
 def check_cnn_data_suitability(df: pd.DataFrame, pair: str, timeframe: str):
     """
     Provides descriptive information about CNN data suitability.
     """
-    print(f"\n--- CNN Data Suitability Check for {pair} - {timeframe} ---")
+    logger.info(f"\n--- CNN Data Suitability Check for {pair} - {timeframe} ---")
     if df.empty:
-        print("DataFrame is empty. Cannot assess CNN suitability.")
+        logger.warning("DataFrame is empty. Cannot assess CNN suitability.")
         return
 
-    print(f"DataFrame Shape: {df.shape}")
-    print(f"DataFrame Columns: {df.columns.tolist()}")
+    logger.info(f"DataFrame Shape: {df.shape}")
+    logger.info(f"DataFrame Columns: {df.columns.tolist()}")
 
-    print("\nConsiderations for CNN input (e.g., for core/cnn_patterns.py):")
-    print("- Ensure sufficient historical data points (sequence length) for each sample.")
-    print("  Current dataset length:", len(df))
-    print("- Data normalization or scaling (e.g., MinMaxScaler, StandardScaler) is typically required.")
-    print("- OHLCV data might need to be transformed into image-like structures (e.g., Gramian Angular Fields, recurrence plots) or specific feature sets.")
-    print("- The exact input requirements depend heavily on the CNN architecture defined in `core/cnn_patterns.py` (if applicable) or other model.")
-    print("- Features might include raw OHLCV, returns, or technical indicators.")
+    logger.info("\nConsiderations for CNN input (e.g., for core/cnn_patterns.py):")
+    logger.info("- Ensure sufficient historical data points (sequence length) for each sample.")
+    logger.info(f"  Current dataset length: {len(df)}")
+    logger.info("- Data normalization or scaling (e.g., MinMaxScaler, StandardScaler) is typically required.")
+    logger.info("- OHLCV data might need to be transformed into image-like structures (e.g., Gramian Angular Fields, recurrence plots) or specific feature sets.")
+    logger.info("- The exact input requirements depend heavily on the CNN architecture defined in `core/cnn_patterns.py` (if applicable) or other model.")
+    logger.info("- Features might include raw OHLCV, returns, or technical indicators.")
 
 if __name__ == "__main__":
     pairs_to_validate = ["ZEN/BTC", "LSK/BTC", "ETH/BTC", "ETH/EUR"]
@@ -113,16 +134,16 @@ if __name__ == "__main__":
     # e.g., user_data/data if files are in user_data/data/binance/
     base_data_dir_to_validate = "user_data/data"
 
-    print(f"Starting data validation process for exchange: {exchange_to_validate}")
-    print(f"Using base data directory: {base_data_dir_to_validate}")
-    print("---")
+    logger.info(f"Starting data validation process for exchange: {exchange_to_validate}")
+    logger.info(f"Using base data directory: {base_data_dir_to_validate}")
+    logger.info("---")
 
     # Create dummy data for testing if no real data is present
     # This helps in testing the script's logic without actual Freqtrade downloads.
     # You would remove/comment this out when using with actual downloaded data.
     create_dummy_data = False # Set to True to create dummy files for a quick test run
     if create_dummy_data:
-        print("Attempting to create dummy data for testing...")
+        logger.info("Attempting to create dummy data for testing...")
         dummy_pair_for_test = "ETH/BTC"
         dummy_timeframe_for_test = "1h"
         dummy_file_path = pathlib.Path(base_data_dir_to_validate) / exchange_to_validate.lower() / f"{dummy_pair_for_test.replace('/', '_')}-{dummy_timeframe_for_test}.json"
@@ -155,9 +176,9 @@ if __name__ == "__main__":
         if not dummy_file_path.exists():
             with open(dummy_file_path, 'w') as f:
                 json.dump(sample_json_data, f)
-            print(f"Created dummy data file: {dummy_file_path}")
+            logger.info(f"Created dummy data file: {dummy_file_path}")
         else:
-            print(f"Dummy data file already exists: {dummy_file_path}")
+            logger.info(f"Dummy data file already exists: {dummy_file_path}")
         # To test with only dummy data, update pairs and timeframes:
         # pairs_to_validate = [dummy_pair_for_test]
         # timeframes_to_validate = [dummy_timeframe_for_test]
@@ -165,9 +186,9 @@ if __name__ == "__main__":
 
     for pair in pairs_to_validate:
         for timeframe in timeframes_to_validate:
-            print(f"\n======================================================================")
-            print(f"Processing: Pair: {pair}, Timeframe: {timeframe}, Exchange: {exchange_to_validate}")
-            print(f"======================================================================")
+            logger.info(f"\n======================================================================")
+            logger.info(f"Processing: Pair: {pair}, Timeframe: {timeframe}, Exchange: {exchange_to_validate}")
+            logger.info(f"======================================================================")
 
             df_pair_data = load_data_for_pair(
                 base_data_dir=base_data_dir_to_validate,
@@ -181,7 +202,7 @@ if __name__ == "__main__":
                     # calculate_indicators was here
                     check_cnn_data_suitability(df_pair_data, pair, timeframe)
             else:
-                print(f"Skipping validation and checks for {pair} - {timeframe} due to loading error or empty data.")
-            print("----------------------------------------------------------------------\n")
+                logger.warning(f"Skipping validation and checks for {pair} - {timeframe} due to loading error or empty data.")
+            logger.info("----------------------------------------------------------------------\n")
 
-    print("Data validation script finished.")
+    logger.info("Data validation script finished.")
