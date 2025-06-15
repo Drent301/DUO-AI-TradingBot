@@ -15,7 +15,7 @@ import pandas as pd
 from typing import List, Dict, Any, Optional
 
 # Assuming ParamsManager is in core.params_manager
-# from core.params_manager import ParamsManager # Actual import if running within a larger system
+from core.params_manager import ParamsManager # Actual import if running within a larger system
 
 logger = logging.getLogger(__name__)
 # Default log level, can be overridden by application config

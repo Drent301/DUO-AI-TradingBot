@@ -151,7 +151,7 @@ De `cnn_patterns.py` module kan, zoals eerder genoemd, zowel regelgebaseerde als
 ### Dynamische Configuratie, AI-Advies en Runtime Aanpassingen
 De AI-modules binnen dit project kunnen adviezen genereren voor diverse strategieparameters. Sommige hiervan worden intern door de AI gebruikt (bijvoorbeeld via aparte AI-specifieke filters of logica zoals `cooldown_tracker.py`). Echter, voor Freqtrade's kernconfiguratie (`config/config.json`) geldt:
 *   **AI-Advies vs. Directe Aanpassing:** AI-gegenereerde suggesties voor parameters in `config.json` (zoals `slippageTolerancePct` of `stake_amount`) dienen als **advies**. Ze worden niet automatisch door de AI in `config.json` gewijzigd tijdens runtime.
-*   **Herstart Vereist voor `config.json` Wijzigingen:** Alle aanpassingen aan fundamentele Freqtrade-instellingen in `config/config.json` (zoals `pair_whitelist`, `stake_amount`, `exchange` details, etc.), ongeacht of ze handmatig of op basis van AI-advies worden gedaan, worden **niet dynamisch tijdens runtime door Freqtrade overgenomen.** Een **volledige herstart van de Freqtrade bot is noodzakelijk** om deze wijzigingen actief te maken.
+*   **Herstart Vereist voor `config.json` Wijzigingen:** Alle aanpassingen aan fundamentele Freqtrade-instellingen in `config.json` (zoals `pair_whitelist`, `stake_amount`, `exchange` details, etc.), ongeacht of ze handmatig of op basis van AI-advies worden gedaan, worden **niet dynamisch tijdens runtime door Freqtrade overgenomen.** Een **volledige herstart van de Freqtrade bot is noodzakelijk** om deze wijzigingen actief te maken.
 *   **Interne AI-Mechanismen:** Voor bepaalde parameters, zoals cooldowns, kan de AI gebruikmaken van eigen, parallelle mechanismen (zoals `cooldown_tracker.py`) die Freqtrade's instellingen aanvullen zonder `config.json` direct te wijzigen.
 
 ### `preferredPairs` en Dynamisch Pair Management
@@ -173,3 +173,54 @@ Het project bevat nu een **uitgebreide, formele pytest testsuite** in de /tests/
 -   **Continue Verbetering Testsuite:** Voortdurende uitbreiding en onderhoud van de `pytest` testsuite om maximale codekwaliteit en betrouwbaarheid te garanderen.
 -   **Uitgebreide Monitoring en Visualisatie:** Ontwikkeling van geavanceerdere tools voor monitoring van botprestaties en datavisualisatie, mogelijk via een AI-ondersteunde GUI.
 -   **Integratie van Backtesting Resultaten in Leerprocessen:** Formeel integreren van Freqtrade's backtesting resultaten in de leerlus van de `AIOptimizer` en `PatternWeightOptimizer` voor snellere iteratie en parameteroptimalisatie.
+
+## Automated Testing
+
+Automated testing is crucial for maintaining the stability and reliability of the DUO-AI Trading Bot, especially as the codebase evolves. Implementing a comprehensive test suite can help catch bugs and regressions early, before they impact production.
+
+**Key Benefits:**
+
+*   **Early Bug Detection:** Tests can identify issues automatically, such as when a function is removed or its behavior changes unexpectedly (e.g., the previous `calculate_indicators` issue).
+*   **Safer Refactoring:** With good test coverage, developers can refactor and improve code with more confidence, knowing that tests will verify existing functionality remains intact.
+*   **Documentation:** Tests serve as a form of executable documentation, demonstrating how different parts of the system are intended to be used.
+
+**Recommendations:**
+
+*   **Unit Tests:** Write unit tests for individual functions and classes, particularly for core logic in `core/` modules, utility functions, and strategy components. These tests should verify that each unit behaves as expected in isolation.
+*   **Integration Tests:** Develop integration tests to ensure that different parts of the system work together correctly. This could include testing the data processing pipeline, the interaction between the AI components and the strategy, or the reflection loop.
+*   **Testing Framework:** Utilize a testing framework like `pytest` (which is already included in the project's dependencies) to write and run tests efficiently.
+
+## Logging Strategy
+
+The project employs a consistent logging strategy:
+
+*   **Console Output:** Most scripts, including the main pipeline (`run_pipeline.py`) and application entrypoint (`main.py`), will output log messages directly to the console (stdout).
+*   **File-based Logging:** In addition to console output, these scripts also write logs to dedicated files within the `user_data/logs/` directory. This allows for persistent storage and easier review of historical log data.
+    *   `run_pipeline.py` logs to `user_data/logs/pipeline_run.log`.
+    *   `main.py` logs to `user_data/logs/main.log`.
+    *   Utility scripts like `data_downloader.py` and `data_validator.py` log to `user_data/logs/data_downloader.log` and `user_data/logs/data_validator.log` respectively.
+    *   `process_backtest_reflections.py` logs to `user_data/logs/process_backtest_reflections.log`.
+*   **Log Directory:** The `user_data/logs/` directory is automatically created if it doesn't exist when a script attempts to log to it.
+
+## Environment Variables Setup
+
+Configuration specific to your environment, especially sensitive data like API keys, is managed using environment variables loaded from a `.env` file.
+
+**Setup Steps:**
+
+1.  **Locate Example File:** In the project root directory, you will find an `env.example` file. This file lists all the environment variables the application might use, along with placeholder values or descriptions.
+2.  **Create `.env` File:** Make a copy of `env.example` and name it `.env`.
+    ```bash
+    cp env.example .env
+    ```
+3.  **Edit `.env`:** Open the `.env` file and fill in the actual values for your environment. For example, you'll need to provide your API keys for services like Bitvavo, OpenAI, or Groq if you intend to use features that rely on them.
+    ```
+    # Example content of .env
+    BITVAVO_API_KEY=your_actual_bitvavo_api_key
+    BITVAVO_SECRET_KEY=your_actual_bitvavo_secret_key
+    OPENAI_API_KEY=your_actual_openai_api_key
+    # ... and so on for other variables
+    ```
+4.  **Security Note:** The `.env` file is included in `.gitignore`, meaning it should **not** be committed to your version control system (e.g., Git). This is crucial for keeping your sensitive credentials private.
+
+The application will automatically load variables from the `.env` file when it starts.

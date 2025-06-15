@@ -23,6 +23,25 @@ python utils/data_downloader.py
 import subprocess
 import os
 import pathlib
+import logging
+import sys
+
+# Configure logging
+log_dir = "user_data/logs"
+log_file_path = os.path.join(log_dir, "data_downloader.log")
+
+# Create log directory if it doesn't exist
+os.makedirs(log_dir, exist_ok=True)
+
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.FileHandler(log_file_path),
+        logging.StreamHandler(sys.stdout)
+    ]
+)
+logger = logging.getLogger(__name__)
 
 def download_data(pairs: list[str], timeframes: list[str], exchange: str, data_dir: str = "user_data/data/binance", days: int = None, since: str = None):
     """
@@ -87,26 +106,26 @@ def download_data(pairs: list[str], timeframes: list[str], exchange: str, data_d
             # For example, if data_dir is just 'my_data/binance'.
             # In this scenario, freqtrade might expect --datadir to be 'my_data'.
             # This is a fallback, might need adjustment based on actual Freqtrade behavior for non-standard dirs.
-            print(f"Warning: 'data' directory not found in path {data_dir_path}. Using {data_dir_path.parent} as Freqtrade datadir. This might be incorrect.")
+            logger.warning(f"Warning: 'data' directory not found in path {data_dir_path}. Using {data_dir_path.parent} as Freqtrade datadir. This might be incorrect.")
             freqtrade_datadir = str(data_dir_path.parent)
 
 
     except IndexError:
-        print(f"Error: Could not determine Freqtrade datadir from {data_dir_path}. Please ensure it follows a structure like '.../user_data/data/exchange_name'")
+        logger.error(f"Error: Could not determine Freqtrade datadir from {data_dir_path}. Please ensure it follows a structure like '.../user_data/data/exchange_name'")
         return
     except ValueError: # Handles cases where 'data' is not in parts
-        print(f"Error: The 'data' directory was not found in the path '{data_dir_path}'. Cannot determine appropriate --datadir for Freqtrade.")
+        logger.error(f"Error: The 'data' directory was not found in the path '{data_dir_path}'. Cannot determine appropriate --datadir for Freqtrade.")
         return
 
 
-    print(f"Using Freqtrade --datadir: {freqtrade_datadir}")
+    logger.info(f"Using Freqtrade --datadir: {freqtrade_datadir}")
 
     # Create the specific data directory if it doesn't exist
     try:
         os.makedirs(data_dir_path, exist_ok=True)
-        print(f"Ensured data directory exists: {data_dir_path}")
+        logger.info(f"Ensured data directory exists: {data_dir_path}")
     except OSError as e:
-        print(f"Error creating directory {data_dir_path}: {e}")
+        logger.error(f"Error creating directory {data_dir_path}: {e}")
         return
 
     for pair in pairs:
@@ -131,28 +150,28 @@ def download_data(pairs: list[str], timeframes: list[str], exchange: str, data_d
                 # The problem description implies 'days' will be used for the 5-year requirement.
                 pass
 
-            print(f"Executing command: {' '.join(command)}")
+            logger.info(f"Executing command: {' '.join(command)}")
             try:
                 process = subprocess.run(command, check=True, capture_output=True, text=True)
-                print(f"Successfully downloaded data for {pair} - {timeframe}")
+                logger.info(f"Successfully downloaded data for {pair} - {timeframe}")
                 if process.stdout:
-                    print("Stdout:")
-                    print(process.stdout)
+                    logger.info("Stdout:")
+                    logger.info(process.stdout)
                 if process.stderr:
-                    print("Stderr:")
-                    print(process.stderr)
+                    logger.warning("Stderr:")
+                    logger.warning(process.stderr)
             except subprocess.CalledProcessError as e:
-                print(f"Error downloading data for {pair} - {timeframe} on {exchange}.")
-                print(f"Command failed: {' '.join(e.cmd)}")
-                print(f"Return code: {e.returncode}")
+                logger.error(f"Error downloading data for {pair} - {timeframe} on {exchange}.")
+                logger.error(f"Command failed: {' '.join(e.cmd)}")
+                logger.error(f"Return code: {e.returncode}")
                 if e.stdout:
-                    print("Stdout:")
-                    print(e.stdout)
+                    logger.error("Stdout:")
+                    logger.error(e.stdout)
                 if e.stderr:
-                    print("Stderr:")
-                    print(e.stderr)
+                    logger.error("Stderr:")
+                    logger.error(e.stderr)
             except FileNotFoundError:
-                print("Error: 'freqtrade' command not found. Make sure Freqtrade is installed and in your PATH.")
+                logger.error("Error: 'freqtrade' command not found. Make sure Freqtrade is installed and in your PATH.")
                 return # Stop further processing if freqtrade is not found
 
 if __name__ == "__main__":
@@ -167,17 +186,17 @@ if __name__ == "__main__":
     try:
         with open(CONFIG_PATH_PROJECT_ROOT, 'r') as f:
             config_data = json.load(f)
-        print(f"Loaded configuration from {CONFIG_PATH_PROJECT_ROOT}")
+        logger.info(f"Loaded configuration from {CONFIG_PATH_PROJECT_ROOT}")
     except FileNotFoundError:
         try:
             with open(CONFIG_PATH_RELATIVE_TO_UTILS, 'r') as f:
                 config_data = json.load(f)
-            print(f"Loaded configuration from {CONFIG_PATH_RELATIVE_TO_UTILS}")
+            logger.info(f"Loaded configuration from {CONFIG_PATH_RELATIVE_TO_UTILS}")
         except FileNotFoundError:
-            print(f"Error: Configuration file not found at {CONFIG_PATH_PROJECT_ROOT} or {CONFIG_PATH_RELATIVE_TO_UTILS}")
+            logger.error(f"Error: Configuration file not found at {CONFIG_PATH_PROJECT_ROOT} or {CONFIG_PATH_RELATIVE_TO_UTILS}")
             exit(1) # Exit if config not found
     except json.JSONDecodeError:
-        print("Error: Could not decode JSON from the configuration file.")
+        logger.error("Error: Could not decode JSON from the configuration file.")
         exit(1)
 
 
@@ -185,13 +204,13 @@ if __name__ == "__main__":
     pairs_to_download = config_data['exchange']['pair_whitelist']
     data_directory = f"user_data/data/{exchange_name.lower()}"
 
-    print(f"--- Data Download Configuration ---")
-    print(f"Exchange: {exchange_name}")
-    print(f"Pairs: {pairs_to_download}")
-    print(f"Timeframes: {TARGET_TIMEFRAMES}")
-    print(f"Data Directory: {data_directory}")
-    print(f"Days to Download: {DAYS_TO_DOWNLOAD}")
-    print(f"-----------------------------------")
+    logger.info(f"--- Data Download Configuration ---")
+    logger.info(f"Exchange: {exchange_name}")
+    logger.info(f"Pairs: {pairs_to_download}")
+    logger.info(f"Timeframes: {TARGET_TIMEFRAMES}")
+    logger.info(f"Data Directory: {data_directory}")
+    logger.info(f"Days to Download: {DAYS_TO_DOWNLOAD}")
+    logger.info(f"-----------------------------------")
 
     download_data(
         pairs=pairs_to_download,
@@ -200,4 +219,4 @@ if __name__ == "__main__":
         data_dir=data_directory,
         days=DAYS_TO_DOWNLOAD
     )
-    print("Data download process finished.")
+    logger.info("Data download process finished.")

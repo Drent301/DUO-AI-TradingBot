@@ -8,8 +8,8 @@ pattern weights stored in ParamsManager to enhance strategy effectiveness.
 import logging
 from typing import Dict, Any, Optional
 
-# from core.params_manager import ParamsManager # Actual import if running within a larger system
-# from core.pattern_performance_analyzer import PatternPerformanceAnalyzer # Actual import
+from core.params_manager import ParamsManager # Actual import if running within a larger system
+from core.pattern_performance_analyzer import PatternPerformanceAnalyzer # Actual import
 
 logger = logging.getLogger(__name__)
 # logger.setLevel(logging.INFO) # Allow external configuration

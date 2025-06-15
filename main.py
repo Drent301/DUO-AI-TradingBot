@@ -10,15 +10,21 @@ import dotenv
 dotenv.load_dotenv()
 
 # Configureer basis logging
-logging.basicConfig(level=logging.INFO,
-                    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-                    handlers=[logging.StreamHandler(sys.stdout)])
+# AANGEPAST: Schrijf logbestanden naar user_data/logs/main.log
+log_dir = "user_data/logs"
+log_file_path = os.path.join(log_dir, "main.log")
 
-# Voeg de projectroot en core map toe aan PYTHONPATH
-project_root = Path(__file__).parent
-sys.path.append(str(project_root))
-sys.path.append(str(project_root / 'core'))
-sys.path.append(str(project_root / 'strategies'))
+# Create log directory if it doesn't exist
+os.makedirs(log_dir, exist_ok=True)
+
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.FileHandler(log_file_path), # Log to a file
+        logging.StreamHandler(sys.stdout) # Log also to console
+    ]
+)
 
 logger = logging.getLogger(__name__)
 

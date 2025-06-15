@@ -12,11 +12,6 @@ from typing import Dict, Any, Optional, List
 import pandas as pd
 from dotenv import load_dotenv
 
-# Modify sys.path to ensure 'core' modules can be imported
-SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-PARENT_DIR = os.path.dirname(SCRIPT_DIR) # This should be the project root
-sys.path.insert(0, PARENT_DIR)
-
 # Now import core components
 try:
     from core.ai_activation_engine import AIActivationEngine
@@ -35,10 +30,19 @@ except ImportError as e:
     sys.exit(1)
 
 # Setup logging
+log_dir = "user_data/logs"
+log_file_path = os.path.join(log_dir, "process_backtest_reflections.log")
+
+# Create log directory if it doesn't exist
+os.makedirs(log_dir, exist_ok=True)
+
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    handlers=[logging.StreamHandler(sys.stdout)]
+    handlers=[
+        logging.FileHandler(log_file_path),
+        logging.StreamHandler(sys.stdout)
+    ]
 )
 logger = logging.getLogger(__name__)
 
@@ -146,7 +150,10 @@ async def main(args):
     Main asynchronous function to process backtest reflections.
     """
     logger.info("Starting backtest reflection process...")
-    load_dotenv(os.path.join(PARENT_DIR, '.env')) # Load .env from project root
+    # Load .env from project root (assuming script is run from project root or PYTHONPATH is set correctly)
+    dotenv_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '.env')
+    load_dotenv(dotenv_path=dotenv_path)
+
 
     # 1. Initialize Freqtrade configuration (minimal for data loading)
     try:
