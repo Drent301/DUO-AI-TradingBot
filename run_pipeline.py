@@ -124,100 +124,81 @@ async def main():
         logger.info("--- Data Validation Process Finished ---")
 
     if args.pretrain_cnn:
-        logger.info(f"--- Starting CNN Pre-training Process for Pair: {args.pretrain_pair}, Timeframe: {args.pretrain_timeframe} (Simplified Data Loading) ---")
-
-        # This path is designed to work even if Freqtrade is not fully installed (e.g. TA-Lib issues)
-        # It relies on CNNPatterns and PreTrainer which should not have hard Freqtrade import dependencies at their top level.
-
+        logger.info(f"--- Starting CNN Pre-training Pipeline ---")
         try:
-            # Simplified: Load only the base OHLCV data for the target pair and timeframe
-            logger.info(f"Loading base OHLCV data for {args.pretrain_pair} - {args.pretrain_timeframe}")
-            exchange_name_for_loading = "binance"
-            base_ohlcv_df = load_data_for_pair(
-                base_data_dir="user_data/data",
-                exchange=exchange_name_for_loading,
-                pair=args.pretrain_pair,
-                timeframe=args.pretrain_timeframe
+            logger.info("Instantiating ParamsManager for pre-training...")
+            # ParamsManager loads its settings from JSON files within its constructor
+            params_manager = ParamsManager(user_data_dir="user_data")
+            # Potentially update params_manager with CLI args if needed, e.g.:
+            # params_manager.update_specific_params({'pretrain_pair': args.pretrain_pair, 'pretrain_timeframe': args.pretrain_timeframe})
+            # However, the idea is that ParamsManager itself defines these for the pipeline.
+
+            logger.info("Instantiating PreTrainer...")
+            # PreTrainer needs a configuration. This might include exchange details if BitvavoExecutor is used.
+            # Assuming PreTrainer's config can take 'user_data_dir' and potentially other relevant settings.
+            # If BitvavoExecutor is initialized by PreTrainer, it might need 'exchange_name' or similar.
+            # For now, providing a basic config. PreTrainer should be designed to fetch further
+            # specific params it needs from the params_manager instance.
+            pre_trainer_config = {
+                'user_data_dir': "user_data",
+                'exchange_name': "binance", # Example, if PreTrainer initializes BitvavoExecutor
+                # Add other necessary basic configs for PreTrainer initialization if any.
+            }
+            pre_trainer = PreTrainer(config=pre_trainer_config)
+
+            strategy_id = "DuoAI_Strategy_Pretrain" # Default strategy ID
+            logger.info(f"Running pre-training pipeline for strategy_id: {strategy_id}...")
+
+            # run_pretraining_pipeline is an async method, so it needs to be run in an event loop.
+            # Since main() is already async and run with asyncio.run() at the script's end,
+            # we can await it here directly.
+            await pre_trainer.run_pretraining_pipeline(
+                strategy_id=strategy_id,
+                params_manager=params_manager
             )
-
-            if base_ohlcv_df is None or base_ohlcv_df.empty:
-                logger.error(f"Failed to load base OHLCV data for {args.pretrain_pair} - {args.pretrain_timeframe} from user_data/data/{exchange_name_for_loading}. Skipping pre-training.")
-            else:
-                logger.info(f"Successfully loaded base OHLCV data for {args.pretrain_pair} - {args.pretrain_timeframe}. Shape: {base_ohlcv_df.shape}")
-
-                logger.info(f"Instantiating CNNPatterns and preparing features for {args.pretrain_pair} - {args.pretrain_timeframe}...")
-                cnn_patterns = CNNPatterns()
-                scaled_features_df, fitted_scaler = cnn_patterns.prepare_cnn_features(
-                    dataframe=base_ohlcv_df.copy(),
-                    timeframe=args.pretrain_timeframe,
-                    pair_name=args.pretrain_pair
-                )
-
-                if scaled_features_df is None or scaled_features_df.empty or fitted_scaler is None:
-                    logger.error(f"Feature preparation failed for {args.pretrain_pair} - {args.pretrain_timeframe} using base_ohlcv_df. Skipping pre-training.")
-                else:
-                    logger.info(f"Successfully prepared features for {args.pretrain_pair} - {args.pretrain_timeframe}. Scaled features shape: {scaled_features_df.shape}")
-
-                    logger.info(f"Instantiating PreTrainer for {args.pretrain_pair} - {args.pretrain_timeframe}...")
-                    pre_trainer_config = {
-                        'user_data_dir': 'user_data',
-                        'pretrain_pair': args.pretrain_pair,
-                        'pretrain_timeframe': args.pretrain_timeframe,
-                        'hyperparameters': {'sequence_length': 30} # Example, PreTrainer might use this
-                    }
-                    pre_trainer = PreTrainer(config=pre_trainer_config)
-
-                    logger.info(f"Calling PreTrainer.pretrain for {args.pretrain_pair} - {args.pretrain_timeframe}...")
-                    pre_trainer.pretrain(
-                        features_df=scaled_features_df,
-                        scaler=fitted_scaler,
-                        pair=args.pretrain_pair,
-                        timeframe=args.pretrain_timeframe,
-                        cnn_patterns_instance=cnn_patterns
-                    )
-                    logger.info(f"Pre-training placeholder process completed for {args.pretrain_pair} - {args.pretrain_timeframe}.")
-            logger.info(f"--- CNN Pre-training Process (Simplified Data Path) for {args.pretrain_pair} - {args.pretrain_timeframe} Finished ---")
+            logger.info(f"--- CNN Pre-training Pipeline for strategy_id: {strategy_id} Finished ---")
 
         except Exception as e:
-            logger.error(f"Error during simplified CNN pre-training data loading/processing for {args.pretrain_pair} - {args.pretrain_timeframe}: {e}", exc_info=True)
-            logger.info(f"--- CNN Pre-training Process for {args.pretrain_pair} - {args.pretrain_timeframe} Failed ---")
+            logger.error(f"Error during CNN pre-training pipeline: {e}", exc_info=True)
+            logger.info(f"--- CNN Pre-training Pipeline Failed ---")
 
     # Initialize Core Components
+    # Note: If --pretrain-cnn is the only task, other initializations might not be needed or
+    # should be conditional. The current structure seems to allow this.
     logger.info("Initializing core components...")
     try:
-        # ParamsManager is now initialized inside PreTrainer and potentially other components if needed
-        # If a global instance is required by other parts of the pipeline, it can be initialized here.
-        # For now, assuming components that need it will initialize it or receive it.
+        # ParamsManager might be initialized here if needed globally,
+        # but for pre-training, it's handled within the --pretrain-cnn block.
         # DUOAI_Strategy initializes its own ParamsManager.
-        pass
-
-        # If we are ONLY pre-training, we might not want to initialize the full strategy's components here.
-        # Let's assume the script can either pre-train OR run the main pipeline.
         if not args.pretrain_cnn: # Only run main pipeline components if not in pre-training mode
-            logger.info("Initializing core components for main trading pipeline...")
-            logger.info("Core components for main pipeline are initialized within DUOAI_Strategy itself if strategy is run.")
+            logger.info("Skipping main trading pipeline initialization as --pretrain-cnn was specified.")
+            # If there were other components to initialize here for a non-pretrain run, they would go here.
+        else:
+            # If --pretrain-cnn was run, this section for other core components might be skipped or adjusted
+            logger.info("Pre-training was run. Main pipeline component initialization might be skipped or adjusted.")
+            pass
+
 
     except Exception as e:
         logger.error(f"Fatal error during (potential) core component initialization for main pipeline: {e}", exc_info=True)
-        sys.exit(1)
+        # Decide if sys.exit(1) is appropriate here. If pre-training succeeded, maybe not.
+        # For now, let it continue to the end of the script.
 
-    # Run the Pre-training Pipeline
-    try:
-        logger.info("--- Running Pre-training & Backtesting Pipeline ---")
-
-        # The main pipeline execution logic. This should only run if not in a specific pre-training mode,
-        # or if pre-training is a step before this.
-        # For now, let's assume if --pretrain-cnn is passed, we don't run this main flow.
-        if not args.pretrain_cnn:
-            logger.info("--- Attempting to run main trading pipeline (DUOAI_Strategy flow) ---")
-            logger.info("Main pipeline execution (strategy's own PreTrainer, etc.) would occur here if invoked.")
-            logger.info("This script's primary role for the main pipeline might be for specific utility tasks like pre-training.")
-
-    except Exception as e:
-        logger.error(f"Error during main pipeline operations: {e}", exc_info=True)
+    # Main pipeline execution logic (e.g., running DUOAI_Strategy)
+    # This should only run if not in a specific pre-training mode.
+    if not args.pretrain_cnn:
+        logger.info("--- Attempting to run main trading pipeline (DUOAI_Strategy flow, if configured) ---")
+        # Example:
+        # if FREQTRADE_AVAILABLE and DUOAI_Strategy:
+        #     logger.info("Freqtrade is available. To run the main strategy, you would typically use Freqtrade's CLI.")
+        #     logger.info("e.g., freqtrade trade --config user_data/configs/config_duoai.json --strategy DUOAI_Strategy")
+        # else:
+        #     logger.info("Freqtrade or DUOAI_Strategy not available. Main trading pipeline execution is skipped.")
+        logger.info("Main pipeline execution (strategy's own PreTrainer, etc.) is typically handled by Freqtrade CLI or a dedicated strategy runner.")
+        logger.info("This script focuses on utility tasks like data download, validation, and the new pre-training pipeline.")
 
     logger.info("===================================================================")
-    logger.info("=== Full Data and Training Pipeline Run Finished Successfully ===")
+    logger.info("=== Pipeline Run Finished ===") # Adjusted message
     logger.info("===================================================================")
 
     if args.start_reflection_loop:
@@ -229,6 +210,7 @@ async def main():
                 logger.error("Reflection symbols are empty or invalid. Please provide a comma-separated list, e.g., --reflection-symbols ETH/USDT,BTC/USDT")
             else:
                 reflection_loop = ReflectieLus() # Assuming ReflectieLus() doesn't require params_manager or other complex init for now
+                # Ensure main() is async to use await here.
                 await reflection_loop.start_reflection_loop(symbols=parsed_symbols, interval_minutes=args.reflection_interval)
                 # The line above is an infinite loop, so code below this in the if block won't be reached.
         except Exception as e:
@@ -241,13 +223,15 @@ if __name__ == "__main__":
     api_key = os.getenv('BITVAVO_API_KEY')
     secret_key = os.getenv('BITVAVO_SECRET_KEY')
 
+    # Note: The check for api_key and secret_key is a general warning.
+    # Specific components like BitvavoExecutor (if used by PreTrainer or ReflectieLus)
+    # will handle their own configuration and raise errors if critical keys are missing.
     if not api_key or not secret_key:
         logger.warning("BITVAVO_API_KEY or BITVAVO_SECRET_KEY not found in .env file.")
-        logger.warning("BitvavoExecutor may not initialize correctly, limiting live data operations.")
-        # Allow to proceed, as some parts of the pipeline might work with cached data or without Bitvavo.
+        logger.warning("Components requiring Bitvavo API access may not initialize or function correctly.")
 
     try:
-        asyncio.run(main())
+        asyncio.run(main()) # main() is already defined as an async function
     except KeyboardInterrupt:
         logger.info("Pipeline execution interrupted by user (KeyboardInterrupt).")
         sys.exit(0)
