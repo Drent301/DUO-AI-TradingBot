@@ -11,6 +11,11 @@ from typing import Dict, Any, Optional, List
 
 import pandas as pd
 from dotenv import load_dotenv
+from pathlib import Path # Import Path
+
+# Define base paths assuming this script might be in a 'scripts' or 'utils' subdirectory
+SCRIPT_DIR = Path(__file__).resolve().parent
+PROJECT_ROOT_DIR = SCRIPT_DIR.parent # Adjust if script is at project root (then PROJECT_ROOT_DIR = SCRIPT_DIR)
 
 # Now import core components
 try:
@@ -24,23 +29,24 @@ try:
     from freqtrade.configuration import Configuration
     from freqtrade.enums import CandleType
 except ImportError as e:
+    # Logger might not be initialized yet, so print is safer here.
     print(f"Error importing core modules or Freqtrade: {e}")
-    print("Ensure that the script is run from a context where 'core' and 'freqtrade' are available.")
-    print(f"Current SCRIPT_DIR: {SCRIPT_DIR}, PARENT_DIR: {PARENT_DIR}")
+    print("Ensure that the script is run from a context where 'core' and 'freqtrade' are available, or PYTHONPATH is set.")
+    # print(f"Current SCRIPT_DIR: {SCRIPT_DIR}, PROJECT_ROOT_DIR: {PROJECT_ROOT_DIR}") # For debugging
     sys.exit(1)
 
 # Setup logging
-log_dir = "user_data/logs"
-log_file_path = os.path.join(log_dir, "process_backtest_reflections.log")
+LOG_DIR = PROJECT_ROOT_DIR / "user_data" / "logs"
+LOG_FILE_PATH = LOG_DIR / "process_backtest_reflections.log"
 
 # Create log directory if it doesn't exist
-os.makedirs(log_dir, exist_ok=True)
+LOG_DIR.mkdir(parents=True, exist_ok=True)
 
 logging.basicConfig(
-    level=logging.INFO,
+    level=logging.INFO, # Consider making this configurable
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     handlers=[
-        logging.FileHandler(log_file_path),
+        logging.FileHandler(LOG_FILE_PATH),
         logging.StreamHandler(sys.stdout)
     ]
 )
@@ -55,27 +61,33 @@ BASE_TIMEFRAME = '5m' # Example, should match strategy
 async def load_ohlcv_data_from_freqtrade_file(
     pair: str,
     timeframe: str,
-    data_dir: str,
+    data_dir: str, # Will be converted to Path internally
     exchange_name: str,
     candle_type: CandleType = CandleType.SPOT
 ) -> Optional[pd.DataFrame]:
     """
     Loads OHLCV data for a given pair and timeframe from Freqtrade's data directory.
     Uses Freqtrade's load_pair_history function.
+    Freqtrade's `load_pair_history` is expected to return a DataFrame with lowercase
+    OHLCV column names ('open', 'high', 'low', 'close', 'volume') and numeric types.
+    If issues arise with data from `load_pair_history` (e.g., mixed case columns or non-numeric types),
+    explicit standardization (e.g., `df.columns = df.columns.str.lower()`,
+    `pd.to_numeric` for OHLCV columns) could be added here.
     """
+    data_dir_path = Path(data_dir) # Convert string argument to Path
     try:
-        logger.debug(f"Attempting to load OHLCV data for {pair} ({timeframe}) from {data_dir} for exchange {exchange_name} and candle type {candle_type}")
-        # Freqtrade's load_pair_history handles both .json and .feather
+        logger.debug(f"Attempting to load OHLCV data for {pair} ({timeframe}) from {data_dir_path} for exchange {exchange_name} and candle type {candle_type}")
+        # Freqtrade's load_pair_history should handle Path objects for datadir
         df = load_pair_history(
             pair=pair,
             timeframe=timeframe,
-            datadir=data_dir,
-            data_format="json", # Or detect based on files available; Freqtrade handles this
+            datadir=data_dir_path, # Pass Path object
+            data_format="json",
             candle_type=candle_type,
-            exchange=exchange_name # Required by Freqtrade
+            exchange=exchange_name
         )
         if df.empty:
-            logger.warning(f"No data found for {pair} ({timeframe}) in {data_dir}")
+            logger.warning(f"No data found for {pair} ({timeframe}) in {data_dir_path}")
             return None
         logger.info(f"Successfully loaded {len(df)} candles for {pair} ({timeframe})")
         return df
@@ -118,25 +130,36 @@ async def load_historical_candles_for_trade(
         df_filtered = df[df.index <= close_dt].copy()
 
         if df_filtered.empty:
-            logger.warning(f"No candles found for {pair} ({tf}) before or at {close_dt}. Raw df length: {len(df)}")
-            # Try to get the last N candles if no candles are before close_dt (e.g. if trade is very old)
-            if not df.empty:
-                 df_filtered = df.iloc[-startup_candle_count:].copy()
-                 logger.info(f"Using last {startup_candle_count} candles for {pair} ({tf}) as a fallback.")
-            else:
-                logger.warning(f"Still no candles for {pair} ({tf}) after fallback.")
-                continue
+            # This means there is NO data at or before the trade's close time.
+            # Using the tail of the original df would be incorrect as it might be data far after the trade.
+            logger.warning(
+                f"No candles found for {pair} ({tf}) at or before trade close_dt {close_dt}. "
+                f"Original df for timeframe goes from {df.index.min()} to {df.index.max()} (len: {len(df)}). "
+                f"Cannot provide relevant historical data for this timeframe for this trade."
+            )
+            # Do not use a fallback that takes data from a potentially different period.
+            # Effectively, this timeframe will be missing from all_candles for this trade.
+            continue
         else:
-             # Ensure sufficient history (e.g., last N candles up to close_dt)
+             # Data exists up to close_dt. Take the last startup_candle_count candles from this filtered set.
+            original_filtered_len = len(df_filtered)
             df_filtered = df_filtered.iloc[-startup_candle_count:].copy()
+            logger.info(
+                f"Filtered data for {pair} ({tf}) up to {close_dt}: {original_filtered_len} candles. "
+                f"Taking last {len(df_filtered)} (max {startup_candle_count}) candles for analysis."
+            )
             if len(df_filtered) < startup_candle_count:
-                 logger.warning(f"Loaded {len(df_filtered)} candles for {pair} ({tf}), less than requested {startup_candle_count}")
+                 logger.warning(
+                     f"Loaded {len(df_filtered)} candles for {pair} ({tf}), which is less than the "
+                     f"requested startup_candle_count of {startup_candle_count} (available data up to close_dt was limited)."
+                 )
 
-        if not df_filtered.empty:
+        if not df_filtered.empty: # This check is now more about whether the slice operation itself yielded data
             all_candles[tf] = df_filtered
-            logger.debug(f"Loaded {len(df_filtered)} candles for {pair} ({tf}) up to {close_dt.isoformat()}")
+            logger.debug(f"Final selected data for {pair} ({tf}): {len(df_filtered)} candles, ending at {df_filtered.index.max().isoformat()}")
         else:
-            logger.warning(f"Filtered dataframe for {pair} ({tf}) is empty after attempting to get {startup_candle_count} candles.")
+            # This case should be less common now with the revised logic, but good to keep.
+            logger.warning(f"Filtered dataframe for {pair} ({tf}) is unexpectedly empty after selection process.")
 
 
     if not all_candles.get(base_timeframe):
@@ -150,17 +173,26 @@ async def main(args):
     Main asynchronous function to process backtest reflections.
     """
     logger.info("Starting backtest reflection process...")
-    # Load .env from project root (assuming script is run from project root or PYTHONPATH is set correctly)
-    dotenv_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '.env')
-    load_dotenv(dotenv_path=dotenv_path)
+    # Load .env from project root
+    dotenv_path = PROJECT_ROOT_DIR / '.env'
+    if dotenv_path.exists():
+        load_dotenv(dotenv_path=dotenv_path)
+        logger.info(f"Loaded .env file from {dotenv_path}")
+    else:
+        logger.warning(f".env file not found at {dotenv_path}. Proceeding with environment variables if already set.")
+
+    # Convert string paths from args to Path objects
+    config_file_path = Path(args.config_file)
+    data_dir_path = Path(args.data_dir)
+    backtest_file_path = Path(args.backtest_file)
 
 
     # 1. Initialize Freqtrade configuration (minimal for data loading)
     try:
-        ft_config = Configuration.from_files([args.config_file])
-        ft_config['datadir'] = args.data_dir # Override datadir from CLI
-        ft_config['exchange']['name'] = args.exchange_name # Ensure exchange name is set
-        # Set strategy name if needed by any Freqtrade components used
+        # Configuration.from_files expects a list of strings or Path objects
+        ft_config = Configuration.from_files([config_file_path])
+        ft_config['datadir'] = str(data_dir_path) # Freqtrade config likely expects string paths
+        ft_config['exchange']['name'] = args.exchange_name
         ft_config['strategy'] = args.strategy_name
 
         # Populate base_timeframe and informative_timeframes from strategy if possible
@@ -180,11 +212,13 @@ async def main(args):
     # 2. Initialize core AI components
     logger.info("Initializing AI components...")
     try:
-        params_manager = ParamsManager(config_file=args.config_file) # Assumes config.json structure
-        reflectie_lus = ReflectieLus() # Dependencies like PromptBuilder are initialized internally
-        bias_reflector = BiasReflector(params_manager=params_manager)
-        confidence_engine = ConfidenceEngine(params_manager=params_manager)
-        # cnn_patterns = CNNPatterns() # Initialized within ReflectieLus's PromptBuilder or AIActivationEngine
+        # ParamsManager might take a Path object if updated, or convert to str if needed
+        params_manager = ParamsManager(config_file=str(config_file_path))
+        reflectie_lus = ReflectieLus()
+        # BiasReflector and ConfidenceEngine might take params_manager or config path
+        # Assuming they are updated or can handle it.
+        bias_reflector = BiasReflector(params_manager=params_manager) # Pass PM
+        confidence_engine = ConfidenceEngine(params_manager=params_manager) # Pass PM
         ai_activation_engine = AIActivationEngine(reflectie_lus_instance=reflectie_lus)
     except Exception as e:
         logger.error(f"Error initializing AI components: {e}", exc_info=True)
@@ -192,30 +226,57 @@ async def main(args):
     logger.info("AI components initialized successfully.")
 
     # 3. Parse Freqtrade backtest JSON results file
+    # This script is primarily designed for Freqtrade results from version ~2023.x onwards,
+    # which typically output a dictionary with a top-level 'strategy' key,
+    # containing results per strategy. It also attempts to handle older formats
+    # where the JSON might be a direct list of trades.
     try:
-        with open(args.backtest_file, 'r') as f:
+        with backtest_file_path.open('r', encoding='utf-8') as f: # Use Path.open()
             backtest_results = json.load(f)
-        logger.info(f"Successfully loaded backtest results from {args.backtest_file}")
+        logger.info(f"Successfully loaded backtest results from {backtest_file_path}")
     except Exception as e:
-        logger.error(f"Error reading or parsing backtest file {args.backtest_file}: {e}", exc_info=True)
+        logger.error(f"Error reading or parsing backtest file {backtest_file_path}: {e}", exc_info=True)
         return
 
-    # Extract trades - structure depends on Freqtrade version
-    # Assuming results are a list of strategies, each with a list of trades
     trades_to_process = []
-    if isinstance(backtest_results, dict) and 'strategy' in backtest_results: # Newer format
-        strategy_results = backtest_results.get('strategy', {}).get(args.strategy_name)
-        if strategy_results:
-            trades_to_process = strategy_results.get('trades', [])
-    elif isinstance(backtest_results, list): # Older format might be a list of trades directly
-        # This needs careful checking of the actual JSON structure from your Freqtrade version
-        logger.warning("Processing older backtest format (list of trades). Ensure this matches your file structure.")
-        trades_to_process = backtest_results
+    # Try to identify newer Freqtrade backtest format (dictionary with 'strategy' key)
+    if isinstance(backtest_results, dict) and 'strategy' in backtest_results:
+        logger.debug("Detected modern Freqtrade backtest result format (dictionary with 'strategy' key).")
+        strategy_data = backtest_results.get('strategy', {}).get(args.strategy_name)
+        if strategy_data and isinstance(strategy_data, dict):
+            trades_to_process = strategy_data.get('trades', [])
+            if not trades_to_process:
+                logger.warning(f"No trades found under 'strategy.{args.strategy_name}.trades'.")
+        else:
+            logger.warning(f"Strategy '{args.strategy_name}' not found in the 'strategy' part of the backtest results.")
+            logger.info(f"Available strategies in backtest file: {list(backtest_results.get('strategy', {}).keys())}")
+
+    # Try to identify older Freqtrade backtest format (direct list of trades)
+    elif isinstance(backtest_results, list):
+        logger.warning("Detected older Freqtrade backtest result format (direct list of trades).")
+        # Assumption: If it's a list, it's a list of trades.
+        # Further validation might be needed if other list-based formats exist.
+        if all(isinstance(item, dict) and 'pair' in item and 'close_timestamp' in item for item in backtest_results):
+            trades_to_process = backtest_results
+        else:
+            logger.error("The backtest file is a list, but items do not look like trade objects.")
+            trades_to_process = [] # Ensure it's empty if format is wrong
+
+    # Handle unrecognized format
+    else:
+        logger.error(
+            f"Unrecognized backtest JSON structure in '{backtest_file_path}'. "
+            f"Expected a dictionary with a 'strategy' key or a direct list of trades. "
+            f"Found top-level type: {type(backtest_results)} with keys: {list(backtest_results.keys()) if isinstance(backtest_results, dict) else 'N/A (not a dict)'}. "
+            f"Cannot process this file."
+        )
+        return # Stop processing
 
     if not trades_to_process:
-        logger.error(f"No trades found for strategy '{args.strategy_name}' in the backtest file, or file format not recognized as expected.")
-        if isinstance(backtest_results, dict) and 'strategy' in backtest_results :
-             logger.info(f"Available strategies in backtest file: {list(backtest_results['strategy'].keys())}")
+        logger.error(f"No trades extracted for strategy '{args.strategy_name}' from the backtest file '{backtest_file_path}'. Please check strategy name and file content/format.")
+        # Log available strategies again if it was a dict structure, for user convenience
+        if isinstance(backtest_results, dict) and 'strategy' in backtest_results and not strategy_data:
+             logger.info(f"Reminder: Available strategies in 'strategy' key: {list(backtest_results.get('strategy', {}).keys())}")
         return
 
     # Sort trades chronologically by close_timestamp

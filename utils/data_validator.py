@@ -1,22 +1,25 @@
 import pandas as pd
-import pathlib
+from pathlib import Path # Ensure Path is imported directly
 import json
 import logging
-import os
+import os # Keep os for os.getenv if used elsewhere, not directly here for paths.
 import sys
 
-# Configure logging
-log_dir = "user_data/logs"
-log_file_path = os.path.join(log_dir, "data_validator.log")
+# Configure logging using pathlib
+SCRIPT_DIR = Path(__file__).resolve().parent
+PROJECT_ROOT_DIR = SCRIPT_DIR.parent # Assumes utils is directly under project root
+
+LOG_DIR = PROJECT_ROOT_DIR / "user_data" / "logs"
+LOG_FILE_PATH = LOG_DIR / "data_validator.log"
 
 # Create log directory if it doesn't exist
-os.makedirs(log_dir, exist_ok=True)
+LOG_DIR.mkdir(parents=True, exist_ok=True)
 
 logging.basicConfig(
-    level=logging.INFO,
+    level=logging.INFO, # Consider making this configurable
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     handlers=[
-        logging.FileHandler(log_file_path),
+        logging.FileHandler(LOG_FILE_PATH),
         logging.StreamHandler(sys.stdout)
     ]
 )
@@ -28,12 +31,21 @@ def load_data_for_pair(base_data_dir: str, exchange: str, pair: str, timeframe: 
     Freqtrade stores data in JSON files like <BASE_DATA_DIR>/<EXCHANGE>/<PAIR_WITH_UNDERSCORE>-<TIMEFRAME>.json
     e.g., user_data/data/binance/ETH_BTC-5m.json
     """
+    base_data_dir_path = Path(base_data_dir)
+    # If base_data_dir is relative, resolve it against project root for robustness,
+    # common if script is called from project root and 'user_data/data' is passed.
+    if not base_data_dir_path.is_absolute() and base_data_dir_path.parts[0] == 'user_data':
+        base_data_dir_path = (PROJECT_ROOT_DIR / base_data_dir_path).resolve()
+    elif not base_data_dir_path.is_absolute(): # Generic relative path
+        base_data_dir_path = base_data_dir_path.resolve()
+
+
     pair_filename = pair.replace('/', '_')
-    file_path = pathlib.Path(base_data_dir) / exchange.lower() / f"{pair_filename}-{timeframe}.json"
+    file_path = base_data_dir_path / exchange.lower() / f"{pair_filename}-{timeframe}.json"
 
     logger.info(f"\nAttempting to load data from: {file_path}")
     try:
-        with open(file_path, 'r') as f:
+        with file_path.open('r', encoding='utf-8') as f: # Use Path.open()
             data = json.load(f)
 
         if not data:
@@ -44,24 +56,34 @@ def load_data_for_pair(base_data_dir: str, exchange: str, pair: str, timeframe: 
 
         # Convert 'date' from milliseconds to datetime
         df['date'] = pd.to_datetime(df['date'], unit='ms')
+
+        # Standardize 'date' column to UTC
+        if df['date'].dt.tz is None:
+            df['date'] = df['date'].dt.tz_localize('UTC')
+            logger.debug(f"Localized 'date' column to UTC for {file_path}")
+        else:
+            df['date'] = df['date'].dt.tz_convert('UTC')
+            logger.debug(f"Converted 'date' column to UTC for {file_path}")
+
         df.set_index('date', inplace=True)
 
-        # Ensure OHLCV are numeric
+        # Ensure OHLCV column names are lowercase (already done by columns list above)
+        # and convert to numeric. This also handles if source JSON had string numbers.
         for col in ["open", "high", "low", "close", "volume"]:
             df[col] = pd.to_numeric(df[col], errors='coerce')
 
-        df.dropna(subset=["open", "high", "low", "close", "volume"], inplace=True) # Drop rows where essential OHLCV is NaN after conversion
+        df.dropna(subset=["open", "high", "low", "close", "volume"], inplace=True)
 
         logger.info(f"Successfully loaded and processed data for {pair} - {timeframe}. Shape: {df.shape}")
         return df
     except FileNotFoundError:
-        logger.error(f"Error: Data file not found: {file_path}")
+        logger.error(f"Error: Data file not found: {file_path}", exc_info=True)
         return None
     except json.JSONDecodeError:
-        logger.error(f"Error: Could not decode JSON from file: {file_path}")
+        logger.error(f"Error: Could not decode JSON from file: {file_path}", exc_info=True)
         return None
     except Exception as e:
-        logger.error(f"An unexpected error occurred while loading {file_path}: {e}")
+        logger.error(f"An unexpected error occurred while loading {file_path}: {e}", exc_info=True)
         return None
 
 def validate_ohlcv_data(df: pd.DataFrame, pair: str, timeframe: str) -> bool:
@@ -73,33 +95,33 @@ def validate_ohlcv_data(df: pd.DataFrame, pair: str, timeframe: str) -> bool:
     missing_cols = [col for col in required_columns if col not in df.columns]
 
     if missing_cols:
-        logger.error(f"Validation FAILED: Missing required columns: {missing_cols}")
+        logger.error(f"Validation FAILED for {pair} - {timeframe}: Missing required columns: {missing_cols}", exc_info=False) # No direct exception
         return False
 
     if df.empty:
-        logger.error("Validation FAILED: DataFrame is empty.")
+        logger.error(f"Validation FAILED for {pair} - {timeframe}: DataFrame is empty.", exc_info=False)
         return False
 
     if df[required_columns].isnull().any().any():
-        logger.error(f"Validation FAILED: Contains NaN values in OHLCV columns.")
-        logger.error(df[required_columns].isnull().sum())
+        logger.error(f"Validation FAILED for {pair} - {timeframe}: Contains NaN values in OHLCV columns.", exc_info=False)
+        logger.error(df[required_columns].isnull().sum()) # Log sum of NaNs per column
         return False
 
     # Check if high is always >= low, open, close and low is always <= open, close
     if not (df['high'] >= df['low']).all():
-        logger.error("Validation FAILED: Not all high values are greater than or equal to low values.")
+        logger.error(f"Validation FAILED for {pair} - {timeframe}: Not all high values are greater than or equal to low values.", exc_info=False)
         return False
     if not (df['high'] >= df['open']).all():
-        logger.error("Validation FAILED: Not all high values are greater than or equal to open values.")
+        logger.error(f"Validation FAILED for {pair} - {timeframe}: Not all high values are greater than or equal to open values.", exc_info=False)
         return False
     if not (df['high'] >= df['close']).all():
-        logger.error("Validation FAILED: Not all high values are greater than or equal to close values.")
+        logger.error(f"Validation FAILED for {pair} - {timeframe}: Not all high values are greater than or equal to close values.", exc_info=False)
         return False
     if not (df['low'] <= df['open']).all():
-        logger.error("Validation FAILED: Not all low values are less than or equal to open values.")
+        logger.error(f"Validation FAILED for {pair} - {timeframe}: Not all low values are less than or equal to open values.", exc_info=False)
         return False
     if not (df['low'] <= df['close']).all():
-        logger.error("Validation FAILED: Not all low values are less than or equal to close values.")
+        logger.error(f"Validation FAILED for {pair} - {timeframe}: Not all low values are less than or equal to close values.", exc_info=False)
         return False
 
     logger.info("OHLCV data validation SUCCEEDED.")
@@ -132,22 +154,22 @@ if __name__ == "__main__":
     exchange_to_validate = "binance"
     # This should be the directory containing the <exchange_name> subdirectories
     # e.g., user_data/data if files are in user_data/data/binance/
-    base_data_dir_to_validate = "user_data/data"
+    # Define relative to project root for clarity
+    base_data_dir_to_validate_path = PROJECT_ROOT_DIR / "user_data" / "data"
 
     logger.info(f"Starting data validation process for exchange: {exchange_to_validate}")
-    logger.info(f"Using base data directory: {base_data_dir_to_validate}")
+    logger.info(f"Using base data directory: {base_data_dir_to_validate_path}")
     logger.info("---")
 
     # Create dummy data for testing if no real data is present
-    # This helps in testing the script's logic without actual Freqtrade downloads.
-    # You would remove/comment this out when using with actual downloaded data.
     create_dummy_data = False # Set to True to create dummy files for a quick test run
     if create_dummy_data:
         logger.info("Attempting to create dummy data for testing...")
-        dummy_pair_for_test = "ETH/BTC"
-        dummy_timeframe_for_test = "1h"
-        dummy_file_path = pathlib.Path(base_data_dir_to_validate) / exchange_to_validate.lower() / f"{dummy_pair_for_test.replace('/', '_')}-{dummy_timeframe_for_test}.json"
-        dummy_file_path.parent.mkdir(parents=True, exist_ok=True)
+        dummy_pair_for_test = "ETH/BTC" # Example pair
+        dummy_timeframe_for_test = "1h" # Example timeframe
+        # Construct dummy_file_path using base_data_dir_to_validate_path (which is a Path object)
+        dummy_file_path = base_data_dir_to_validate_path / exchange_to_validate.lower() / f"{dummy_pair_for_test.replace('/', '_')}-{dummy_timeframe_for_test}.json"
+        dummy_file_path.parent.mkdir(parents=True, exist_ok=True) # Correct usage
         # Sample data: [timestamp_ms, open, high, low, close, volume]
         # Timestamps should be increasing
         sample_json_data = [
@@ -174,7 +196,7 @@ if __name__ == "__main__":
             [1672599600000, 149, 152, 147, 150, 2900] # 20th point
         ]
         if not dummy_file_path.exists():
-            with open(dummy_file_path, 'w') as f:
+            with dummy_file_path.open('w', encoding='utf-8') as f: # Use Path.open()
                 json.dump(sample_json_data, f)
             logger.info(f"Created dummy data file: {dummy_file_path}")
         else:
@@ -191,7 +213,7 @@ if __name__ == "__main__":
             logger.info(f"======================================================================")
 
             df_pair_data = load_data_for_pair(
-                base_data_dir=base_data_dir_to_validate,
+                base_data_dir=str(base_data_dir_to_validate_path), # Pass as string, function converts to Path
                 exchange=exchange_to_validate,
                 pair=pair,
                 timeframe=timeframe

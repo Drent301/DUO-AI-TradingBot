@@ -2,33 +2,37 @@
 import logging
 import pandas as pd
 from typing import Optional
-import os # For environment variables if needed for paths
-import asyncio # For asyncio.to_thread
-from datetime import datetime, timedelta # For date calculations
+import os # For environment variables
+from pathlib import Path # Import Path
+import asyncio
+from datetime import datetime, timedelta
 
 # Attempt to import from utils, assuming they are in PYTHONPATH
 try:
     from utils.data_validator import load_data_for_pair
     from utils.data_downloader import download_data as freqtrade_download_data
 except ImportError as e:
-    logging.error(f"MarketDataProvider: Failed to import utils: {e}. Market data functionality will be limited.")
-    # Define dummy functions if imports fail, so AIOptimizer can at least import this module
+    # Logger might not be fully configured here if this is a top-level import issue.
+    # Print might be more reliable for critical import errors if logging isn't set up.
+    logging.error(f"MarketDataProvider: Failed to import utils: {e}. Market data functionality will be limited.", exc_info=True)
     def load_data_for_pair(*args, **kwargs) -> Optional[pd.DataFrame]:
-        logging.error("MarketDataProvider: load_data_for_pair (dummy) called due to import error.")
+        logging.error("MarketDataProvider: load_data_for_pair (dummy) called due to import error.", exc_info=False) # No exception context for dummy
         return None
     def freqtrade_download_data(*args, **kwargs):
-        logging.error("MarketDataProvider: freqtrade_download_data (dummy) called due to import error.")
+        logging.error("MarketDataProvider: freqtrade_download_data (dummy) called due to import error.", exc_info=False) # No exception context for dummy
         pass
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_BASE_DATA_DIR = "user_data/data" # Default location for Freqtrade data
+# Define project root assuming core is a subdirectory of project root
+PROJECT_ROOT_DIR = Path(__file__).resolve().parent.parent
+DEFAULT_USER_DATA_DIR_STR = "user_data" # Default user_data directory name
 
 async def get_recent_market_data(
     symbol: str,
     timeframe: str,
     exchange: str = "binance",
-    days_to_load: int = 90, # How many days of data the AI optimizer might need
+    days_to_load: int = 90,
     download_if_missing: bool = True
 ) -> Optional[pd.DataFrame]:
     """
@@ -49,12 +53,21 @@ async def get_recent_market_data(
     """
     logger.info(f"Attempting to get recent market data for {exchange} - {symbol} - {timeframe} ({days_to_load} days).")
 
-    base_data_dir = os.getenv("FREQTRADE_USER_DATA_DIR", "user_data") + "/data"
-    exchange_specific_data_dir = f"{base_data_dir}/{exchange.lower()}"
+    # Determine base_data_dir using Path, relative to project root if FREQTRADE_USER_DATA_DIR is not set
+    user_data_dir_str = os.getenv("FREQTRADE_USER_DATA_DIR", DEFAULT_USER_DATA_DIR_STR)
+    user_data_path = Path(user_data_dir_str)
+    if not user_data_path.is_absolute():
+        user_data_path = (PROJECT_ROOT_DIR / user_data_path).resolve()
+
+    # This is the directory containing exchange-specific folders, e.g., user_data/data/
+    base_data_dir_for_load = (user_data_path / "data").resolve()
+    # This is the specific path for the exchange, e.g., user_data/data/binance/
+    exchange_specific_data_dir_for_download = (base_data_dir_for_load / exchange.lower()).resolve()
+
 
     df = await asyncio.to_thread(
         load_data_for_pair,
-        base_data_dir=base_data_dir,
+        base_data_dir=str(base_data_dir_for_load), # load_data_for_pair expects string
         exchange=exchange.lower(),
         pair=symbol,
         timeframe=timeframe
@@ -98,13 +111,14 @@ async def get_recent_market_data(
                 pairs=[symbol],
                 timeframes=[timeframe],
                 exchange=exchange.lower(),
-                data_dir=exchange_specific_data_dir,
-                days=days_to_load + 5 # Add a small buffer for download
+                # data_downloader.py expects data_dir to be like user_data/data/exchange
+                data_dir=str(exchange_specific_data_dir_for_download),
+                days=days_to_load + 5
             )
             logger.info(f"Download attempt finished for {symbol} - {timeframe}. Reloading data.")
             df = await asyncio.to_thread(
                 load_data_for_pair,
-                base_data_dir=base_data_dir,
+                base_data_dir=str(base_data_dir_for_load), # Pass the base 'data' dir
                 exchange=exchange.lower(),
                 pair=symbol,
                 timeframe=timeframe

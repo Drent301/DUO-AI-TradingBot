@@ -16,13 +16,13 @@ class PromptBuilder:
             try:
                 self.grok_sentiment_fetcher = GrokSentimentFetcher()
             except ValueError as e: # Typically API key missing
-                logger.warning(f"Failed to initialize default GrokSentimentFetcher (ValueError): {e}. Social sentiment will not be fetched.")
+                logger.warning(f"Failed to initialize default GrokSentimentFetcher (ValueError): {e}. Social sentiment will not be fetched.", exc_info=True)
                 self.grok_sentiment_fetcher = None
-            except ImportError: # If GrokSentimentFetcher class itself is not found
-                logger.warning("GrokSentimentFetcher class not found by PromptBuilder. Social sentiment will not be fetched.")
+            except ImportError as e_imp: # If GrokSentimentFetcher class itself is not found
+                logger.warning(f"GrokSentimentFetcher class not found by PromptBuilder: {e_imp}. Social sentiment will not be fetched.", exc_info=True)
                 self.grok_sentiment_fetcher = None
             except Exception as e: # Catch any other unexpected errors during init
-                logger.error(f"An unexpected error occurred during GrokSentimentFetcher initialization: {e}")
+                logger.error(f"An unexpected error occurred during GrokSentimentFetcher initialization: {e}", exc_info=True)
                 self.grok_sentiment_fetcher = None
 
 
@@ -65,7 +65,7 @@ class PromptBuilder:
                     source_of_grok_data = "fetched"
                     logger.info(f"Successfully fetched {len(grok_data)} Grok items for {symbol}.")
                 except Exception as e:
-                    logger.error(f"Error fetching Grok data in PromptBuilder for {symbol}: {e}")
+                    logger.error(f"Error fetching Grok data in PromptBuilder for {symbol}: {e}", exc_info=True)
                     source_of_grok_data = "fetch_failed"
                     # grok_data remains []
             else:
@@ -329,11 +329,11 @@ async def test_prompt_builder():
                 json_str = after_start_marker.strip()
             return json.loads(json_str)
         except IndexError: # start_marker not found
-            logger.error(f"Start marker '{start_marker}' not found in prompt.")
+            logger.error(f"Start marker '{start_marker}' not found in prompt.", exc_info=False) # No direct exception
             return None
         except json.JSONDecodeError as e:
-            logger.error(f"JSONDecodeError for block starting with '{start_marker}': {e}")
-            logger.error(f"Problematic JSON string part: {json_str[:200]}...")
+            logger.error(f"JSONDecodeError for block starting with '{start_marker}': {e}", exc_info=True)
+            logger.error(f"Problematic JSON string part: {json_str[:200]}...") # No exc_info for follow-up log
             return None
 
     candlestick_data = extract_json_block(prompt_ma_with_data, "Detected Candlestick Patterns:\n", "\nDetected CNN Patterns:")

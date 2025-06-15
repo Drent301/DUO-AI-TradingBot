@@ -3,43 +3,51 @@ import asyncio
 import os
 import sys
 import argparse
+from pathlib import Path
 
-# Load environment variables from .env file
-from dotenv import load_dotenv
-load_dotenv() # Load default .env file
+# Load environment variables from .env file will be handled by config_validator
+# from dotenv import load_dotenv
+# load_dotenv() # Load default .env file
 
 # Util imports
 from utils.data_downloader import download_data
-# VERWIJDERD: calculate_indicators uit deze importregel
 from utils.data_validator import load_data_for_pair, validate_ohlcv_data, check_cnn_data_suitability
+from utils.config_validator import load_and_validate_config # Import the new validator
 import pandas as pd
 
-# Configure logging
-# AANGEPAST: Schrijf logbestanden naar user_data/logs/pipeline_run.log
-log_dir = "user_data/logs"
-log_file_path = os.path.join(log_dir, "pipeline_run.log")
-
-# Create log directory if it doesn't exist
-os.makedirs(log_dir, exist_ok=True)
-
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    handlers=[
-        logging.FileHandler(log_file_path), # Log to a file
-        logging.StreamHandler(sys.stdout) # Log also to console
-    ]
-)
+# Logger setup will be deferred until config is loaded
 logger = logging.getLogger(__name__)
+
+# Define base paths for clarity
+BASE_DIR = Path(__file__).resolve().parent
+DEFAULT_CONFIG_PATH = BASE_DIR / "config" / "config.json"
+ENV_FILE_PATH = BASE_DIR / ".env"
+LOG_DIR_RELATIVE_TO_USER_DATA = "logs" # e.g. user_data/logs
+PIPELINE_LOG_FILENAME = "pipeline_run.log"
+
+
+def setup_logging(log_file_path: Path):
+    """Configurest basis logging."""
+    log_file_path.parent.mkdir(parents=True, exist_ok=True)
+    logging.basicConfig(
+        level=logging.INFO,
+        format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+        handlers=[
+            logging.FileHandler(log_file_path), # Log to a file
+            logging.StreamHandler(sys.stdout) # Log also to console
+        ]
+    )
 
 # Attempt to import Freqtrade-dependent modules, handle if Freqtrade is not installed
 try:
-    from strategies.DUOAI_Strategy import DUOAI_Strategy
+    from strategies.DUOAI_Strategy import DUOAI_Strategy #TODO: Check if strategy name can come from config
     from freqtrade.data.dataprovider import DataProvider
     from freqtrade.configuration import Configuration
     FREQTRADE_AVAILABLE = True
 except ImportError:
-    logger.warning("Freqtrade modules not found. Some functionalities (like main strategy execution or Freqtrade-dependent data processing in pretrain) will be unavailable.")
+    # Logger might not be configured yet if this fails at module load time.
+    # Using print for this specific early warning.
+    print("Warning: Freqtrade modules not found. Some functionalities will be unavailable.", file=sys.stderr)
     DUOAI_Strategy = None
     DataProvider = None
     Configuration = None
@@ -53,84 +61,134 @@ try:
     from core.pre_trainer import PreTrainer
     from core.reflectie_lus import ReflectieLus
 except ImportError as e:
-    logger.error(f"Failed to import core modules: {e}. Ensure PYTHONPATH is set correctly or run from project root.")
+    # Logger might not be configured.
+    print(f"Failed to import core modules: {e}. Ensure PYTHONPATH is set correctly or run from project root.", file=sys.stderr)
     sys.exit(1)
 
-async def main():
-    logger.info("======================================================================")
-    logger.info("=== Starting Full Data Fetching, Pre-Training, & Backtesting Pipeline ===")
-    logger.info("======================================================================")
 
+async def main():
+    # --- Argument Parsing ---
     parser = argparse.ArgumentParser(description="Run the AI trading pipeline.")
-    parser.add_argument('--download-data', action='store_true', help='Download historical market data using Freqtrade.')
+    parser.add_argument('--config', type=str, default=str(DEFAULT_CONFIG_PATH), help='Path to the Freqtrade config.json file.')
+    parser.add_argument('--env', type=str, default=str(ENV_FILE_PATH), help='Path to the .env file.')
+    parser.add_argument('--download-data', action='store_true', help='Download historical market data.')
     parser.add_argument('--validate-data', action='store_true', help='Validate downloaded market data.')
     parser.add_argument('--pretrain-cnn', action='store_true', help='Run CNN pre-training process.')
-    parser.add_argument('--pretrain-pair', type=str, default='ETH/BTC', help='Pair to use for CNN pre-training (e.g., ETH/BTC).')
-    parser.add_argument('--pretrain-timeframe', type=str, default='5m', help='Timeframe to use for CNN pre-training (e.g., 5m).')
+    parser.add_argument('--pretrain-pair', type=str, help='Pair to use for CNN pre-training (e.g., ETH/BTC). Default from config.')
+    parser.add_argument('--pretrain-timeframe', type=str, help='Timeframe to use for CNN pre-training (e.g., 5m). Default from config.')
     parser.add_argument('--start-reflection-loop', action='store_true', help='Start the continuous AI reflection loop.')
-    parser.add_argument('--reflection-symbols', type=str, default='ETH/USDT,BTC/USDT', help='Comma-separated list of symbols for the reflection loop (e.g., ETH/USDT,BTC/USDT).')
+    parser.add_argument('--reflection-symbols', type=str, help='Comma-separated list of symbols for the reflection loop (e.g., ETH/USDT,BTC/USDT). Default from config pair_whitelist.')
     parser.add_argument('--reflection-interval', type=int, default=60, help='Interval in minutes for the reflection loop.')
-    # Potentially add other arguments from core components if needed, or let them use ParamsManager
     args = parser.parse_args()
 
+    # --- Initial Setup (Config, Logging) ---
+    try:
+        config_path_obj = Path(args.config)
+        env_path_obj = Path(args.env)
+        ft_config = load_and_validate_config(str(config_path_obj), str(env_path_obj))
+
+        user_data_dir = Path(ft_config.get("user_data_dir", "user_data"))
+        if not user_data_dir.is_absolute():
+            user_data_dir = BASE_DIR / user_data_dir
+
+        log_dir = user_data_dir / LOG_DIR_RELATIVE_TO_USER_DATA
+        log_file_path = log_dir / PIPELINE_LOG_FILENAME
+        setup_logging(log_file_path)
+
+        logger.info(f"Validated Freqtrade configuration loaded from {config_path_obj}")
+        logger.info(f"Environment variables loaded from {env_path_obj}")
+        logger.info(f"Logging to: {log_file_path}")
+
+    except ValueError as e:
+        print(f"Configuration error: {e}", file=sys.stderr)
+        # Attempt to log if logger was somehow initialized by a miracle
+        if logger and logger.handlers:
+             logger.error(f"Configuration error: {e}", exc_info=True)
+        sys.exit(1)
+    except Exception as e:
+        print(f"Unexpected error during initialization: {e}", file=sys.stderr)
+        if logger and logger.handlers:
+            logger.error(f"Unexpected error during initialization: {e}", exc_info=True)
+        sys.exit(1)
+
+    logger.info("======================================================================")
+    logger.info("=== Starting AI Trading Pipeline ===")
+    logger.info("======================================================================")
+
+    # --- Get settings from config, with CLI overrides or defaults ---
+    exchange_name = ft_config.get("exchange", {}).get("name", "binance") # Default to binance if not in config
+    # Use all pairs from whitelist by default for download/validation, can be overridden by more specific CLI args later if needed
+    config_pairs = ft_config.get("exchange", {}).get("pair_whitelist", [])
+    # Timeframe from config, can be overridden by CLI for specific tasks like pretraining
+    config_timeframe = ft_config.get("timeframe", "5m") # Default to 5m
+
+    # data_dir from config, typically user_data/data
+    # This is the root data directory (e.g. user_data/data)
+    base_data_dir = Path(ft_config.get("data_dir", str(user_data_dir / "data")))
+    if not base_data_dir.is_absolute(): # If data_dir is relative in config
+        base_data_dir = BASE_DIR / base_data_dir
+
+
+    # --- Data Download ---
     if args.download_data:
         logger.info("--- Initiating Data Download Process ---")
-        pairs_to_download = ["ZEN/BTC", "LSK/BTC", "ETH/BTC", "ETH/EUR"] # As defined in previous steps
-        timeframes_to_download = ["1m", "5m", "15m", "1h", "4h", "1d"]
-        exchange_to_download = "binance"
-        days_to_download = 5 * 365
-        # data_dir for download_data is the specific exchange data directory, e.g., user_data/data/binance
-        # download_data function defaults to "user_data/data/binance"
-        # Explicitly setting for clarity and consistency with problem description
-        downloader_data_dir = f"user_data/data/{exchange_to_download.lower()}"
+        # TODO: Potentially add CLI args for these if needed, or use config values
+        pairs_to_download = config_pairs
+        timeframes_to_download = ft_config.get("timeframes_to_download", ["1m", "5m", "15m", "1h", "4h", "1d"]) # Example: make this configurable
+        days_to_download = ft_config.get("days_to_download", 5 * 365) # Example
+
+        # download_data expects the data_dir to be specific to the exchange, e.g., user_data/data/binance
+        downloader_data_dir = base_data_dir / exchange_name.lower()
+        downloader_data_dir.mkdir(parents=True, exist_ok=True)
+
 
         try:
             download_data(
                 pairs=pairs_to_download,
                 timeframes=timeframes_to_download,
-                exchange=exchange_to_download,
-                data_dir=downloader_data_dir,
+                exchange=exchange_name,
+                data_dir=str(downloader_data_dir), # download_data might expect str
                 days=days_to_download
             )
-            logger.info("--- Data Download Process Finished ---")
+            logger.info(f"--- Data Download Process Finished for exchange {exchange_name} ---")
         except Exception as e:
             logger.error(f"Error during data download process: {e}", exc_info=True)
-            # Decide if pipeline should stop if download fails. For now, it will continue.
 
+    # --- Data Validation ---
     if args.validate_data:
         logger.info("--- Initiating Data Validation Process ---")
-        pairs_to_validate = ["ZEN/BTC", "LSK/BTC", "ETH/BTC", "ETH/EUR"] # As defined in previous steps
-        timeframes_to_validate = ["1m", "5m", "15m", "1h", "4h", "1d"]
-        exchange_to_validate = "binance"
-        # base_data_dir for load_data_for_pair is the root of exchange data, e.g., user_data/data
-        base_data_dir_for_validation = "user_data/data"
+        pairs_to_validate = config_pairs
+        # Validate all timeframes that were potentially downloaded, or a specific list from config
+        timeframes_to_validate = ft_config.get("timeframes_to_validate", ["1m", "5m", "15m", "1h", "4h", "1d"])
 
         for pair in pairs_to_validate:
-            for timeframe in timeframes_to_validate:
-                logger.info(f"--- Validating data for {pair} - {timeframe} on {exchange_to_validate} ---")
+            for timeframe_val in timeframes_to_validate: # Renamed to avoid conflict
+                logger.info(f"--- Validating data for {pair} - {timeframe_val} on {exchange_name} ---")
                 df_pair_data = load_data_for_pair(
-                    base_data_dir=base_data_dir_for_validation,
-                    exchange=exchange_to_validate,
+                    base_data_dir=str(base_data_dir), # load_data_for_pair might expect str
+                    exchange=exchange_name,
                     pair=pair,
-                    timeframe=timeframe
+                    timeframe=timeframe_val
                 )
                 if df_pair_data is not None and not df_pair_data.empty:
-                    # Pass pair and timeframe to validation functions as they expect them
-                    if validate_ohlcv_data(df_pair_data, pair, timeframe):
-                        # VERWIJDERD: De aanroep naar calculate_indicators
-                        check_cnn_data_suitability(df_pair_data, pair, timeframe)
+                    if validate_ohlcv_data(df_pair_data, pair, timeframe_val):
+                        check_cnn_data_suitability(df_pair_data, pair, timeframe_val)
                 else:
-                    logger.warning(f"No data loaded for {pair} - {timeframe}. Skipping further validation for this item.")
+                    logger.warning(f"No data loaded for {pair} - {timeframe_val}. Skipping further validation.")
         logger.info("--- Data Validation Process Finished ---")
 
+    # --- CNN Pre-training ---
     if args.pretrain_cnn:
         logger.info(f"--- Starting CNN Pre-training Pipeline ---")
+        pretrain_pair = args.pretrain_pair or (config_pairs[0] if config_pairs else "ETH/BTC") # Default to first pair or ETH/BTC
+        pretrain_timeframe = args.pretrain_timeframe or config_timeframe
         try:
             logger.info("Instantiating ParamsManager for pre-training...")
             # ParamsManager loads its settings from JSON files within its constructor
-            params_manager = ParamsManager(user_data_dir="user_data")
+            # Use user_data_dir from the loaded and validated config
+            params_manager = ParamsManager(user_data_dir=str(user_data_dir))
             # Potentially update params_manager with CLI args if needed, e.g.:
-            # params_manager.update_specific_params({'pretrain_pair': args.pretrain_pair, 'pretrain_timeframe': args.pretrain_timeframe})
+            # params_manager.update_specific_params({'pretrain_pair': pretrain_pair, 'pretrain_timeframe': pretrain_timeframe})
             # However, the idea is that ParamsManager itself defines these for the pipeline.
 
             logger.info("Instantiating PreTrainer...")
@@ -140,21 +198,23 @@ async def main():
             # For now, providing a basic config. PreTrainer should be designed to fetch further
             # specific params it needs from the params_manager instance.
             pre_trainer_config = {
-                'user_data_dir': "user_data",
-                'exchange_name': "binance", # Example, if PreTrainer initializes BitvavoExecutor
+                'user_data_dir': str(user_data_dir), # Use validated user_data_dir
+                'exchange_name': exchange_name,   # Use validated exchange_name
                 # Add other necessary basic configs for PreTrainer initialization if any.
             }
             pre_trainer = PreTrainer(config=pre_trainer_config)
 
             strategy_id = "DuoAI_Strategy_Pretrain" # Default strategy ID
-            logger.info(f"Running pre-training pipeline for strategy_id: {strategy_id}...")
+            logger.info(f"Running pre-training pipeline for strategy_id: {strategy_id} on pair {pretrain_pair}, timeframe {pretrain_timeframe}...")
 
             # run_pretraining_pipeline is an async method, so it needs to be run in an event loop.
             # Since main() is already async and run with asyncio.run() at the script's end,
             # we can await it here directly.
             await pre_trainer.run_pretraining_pipeline(
                 strategy_id=strategy_id,
-                params_manager=params_manager
+                params_manager=params_manager,
+                pair=pretrain_pair,        # Pass pair for pre-training
+                timeframe=pretrain_timeframe # Pass timeframe for pre-training
             )
             logger.info(f"--- CNN Pre-training Pipeline for strategy_id: {strategy_id} Finished ---")
 
@@ -204,13 +264,15 @@ async def main():
     if args.start_reflection_loop:
         logger.info("--- Initiating AI Reflection Loop ---")
         logger.info("The script will now enter the reflection loop. Other operations will not proceed past this point if this is the final operation.")
+        reflection_symbols_str = args.reflection_symbols or ",".join(config_pairs) # Default to all pairs in whitelist
         try:
-            parsed_symbols = [symbol.strip() for symbol in args.reflection_symbols.split(',')]
-            if not parsed_symbols or all(s == '' for s in parsed_symbols):
-                logger.error("Reflection symbols are empty or invalid. Please provide a comma-separated list, e.g., --reflection-symbols ETH/USDT,BTC/USDT")
+            parsed_symbols = [symbol.strip() for symbol in reflection_symbols_str.split(',') if symbol.strip()]
+            if not parsed_symbols: # Check if list is empty after stripping
+                logger.error("Reflection symbols are empty or invalid after parsing. Please provide a comma-separated list, e.g., --reflection-symbols ETH/USDT,BTC/USDT or ensure config has pair_whitelist.")
             else:
-                reflection_loop = ReflectieLus() # Assuming ReflectieLus() doesn't require params_manager or other complex init for now
-                # Ensure main() is async to use await here.
+                logger.info(f"Starting reflection loop for symbols: {parsed_symbols} with interval {args.reflection_interval} minutes.")
+                # Pass validated config and user_data_dir to ReflectieLus constructor
+                reflection_loop = ReflectieLus(config=ft_config, user_data_dir=user_data_dir)
                 await reflection_loop.start_reflection_loop(symbols=parsed_symbols, interval_minutes=args.reflection_interval)
                 # The line above is an infinite loop, so code below this in the if block won't be reached.
         except Exception as e:
@@ -218,20 +280,18 @@ async def main():
         logger.info("--- AI Reflection Loop Finished (or encountered an error) ---") # This line might only be reached if the loop breaks due to error
 
 if __name__ == "__main__":
-    # Check for environment variables needed by BitvavoExecutor early
-    # This is just a preliminary check; BitvavoExecutor itself will raise ValueError
-    api_key = os.getenv('BITVAVO_API_KEY')
-    secret_key = os.getenv('BITVAVO_SECRET_KEY')
-
-    # Note: The check for api_key and secret_key is a general warning.
-    # Specific components like BitvavoExecutor (if used by PreTrainer or ReflectieLus)
-    # will handle their own configuration and raise errors if critical keys are missing.
-    if not api_key or not secret_key:
-        logger.warning("BITVAVO_API_KEY or BITVAVO_SECRET_KEY not found in .env file.")
-        logger.warning("Components requiring Bitvavo API access may not initialize or function correctly.")
+    # The primary validation of API keys is now handled by load_and_validate_config based on the
+    # configured exchange. A general warning here is less critical but can be kept if desired,
+    # or removed to avoid redundancy if load_and_validate_config is comprehensive enough.
+    # For now, let's remove the specific Bitvavo key check here as it's implicitly covered.
+    # if not os.getenv('BITVAVO_API_KEY') or not os.getenv('BITVAVO_SECRET_KEY'):
+    #    if logger and logger.handlers: # Check if logger is available
+    #        logger.warning("Specific API keys (e.g., BITVAVO_API_KEY) not found. This might be an issue if the configured exchange requires them.")
+    #    else:
+    #        print("Warning: Specific API keys not found. Check .env file if your exchange requires them.", file=sys.stderr)
 
     try:
-        asyncio.run(main()) # main() is already defined as an async function
+        asyncio.run(main())
     except KeyboardInterrupt:
         logger.info("Pipeline execution interrupted by user (KeyboardInterrupt).")
         sys.exit(0)

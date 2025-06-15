@@ -23,15 +23,19 @@ from core.confidence_engine import ConfidenceEngine
 import dotenv # Toegevoegd voor de __main__ sectie
 
 logger = logging.getLogger(__name__)
-logger.setLevel(logging.INFO)
+# logger.setLevel(logging.INFO) # Logging level configured by application
 
-# Padconfiguratie
-MEMORY_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'memory')
-LOG_FILE = os.path.join(MEMORY_DIR, 'reflectie-logboek.json')
+from pathlib import Path # Import Path
+
+# Padconfiguratie met pathlib
+CORE_DIR = Path(__file__).resolve().parent
+PROJECT_ROOT_DIR = CORE_DIR.parent # Assumes 'core' is directly under project root
+MEMORY_DIR = (PROJECT_ROOT_DIR / 'user_data' / 'memory').resolve() # Ensure absolute path
+LOG_FILE = (MEMORY_DIR / 'reflectie-logboek.json').resolve()
 # cache_Dir and cache_file for live_search_cache are now handled within grok_sentiment_fetcher.py
 
 # Zorg dat de memory map bestaat
-os.makedirs(MEMORY_DIR, exist_ok=True)
+MEMORY_DIR.mkdir(parents=True, exist_ok=True)
 
 class ReflectieLus:
     """
@@ -50,9 +54,13 @@ class ReflectieLus:
 
 
         # Initialiseer logboekbestand als het niet bestaat
-        if not os.path.exists(LOG_FILE):
-            with open(LOG_FILE, 'w', encoding='utf-8') as f:
-                json.dump([], f)
+        if not LOG_FILE.exists():
+            try:
+                with LOG_FILE.open('w', encoding='utf-8') as f:
+                    json.dump([], f)
+                logger.info(f"Leeg reflectie logboek aangemaakt: {LOG_FILE}")
+            except Exception as e:
+                logger.error(f"Kon leeg reflectie logboek niet aanmaken op {LOG_FILE}: {e}", exc_info=True)
         logger.info(f"ReflectieLus geïnitialiseerd. Logboek: {LOG_FILE}")
 
     async def _store_reflection(self, reflection: Dict[str, Any]) -> bool:
@@ -65,24 +73,26 @@ class ReflectieLus:
             return False
         try:
             logs = []
-            if os.path.exists(LOG_FILE) and os.path.getsize(LOG_FILE) > 0:
-                with open(LOG_FILE, 'r', encoding='utf-8') as f:
+            if LOG_FILE.exists() and LOG_FILE.stat().st_size > 0:
+                with LOG_FILE.open('r', encoding='utf-8') as f:
                     try:
                         logs = json.load(f)
                         if not isinstance(logs, list): # Ensure it's a list
+                            logger.warning(f"Log file {LOG_FILE} did not contain a list. Resetting.")
                             logs = []
                     except json.JSONDecodeError:
+                        logger.warning(f"Log file {LOG_FILE} is corrupt or empty. Resetting.", exc_info=True)
                         logs = [] # Bestand leeg of ongeldig, begin met lege lijst
 
             logs.append({**reflection, "timestamp": datetime.now().isoformat()})
 
-            with open(LOG_FILE, 'w', encoding='utf-8') as f:
+            with LOG_FILE.open('w', encoding='utf-8') as f:
                 json.dump(logs, f, indent=2)
 
             logger.debug(f'[StoreReflection] Reflectie opgeslagen voor {reflection.get("token", "N/A")}.')
             return True
         except Exception as e:
-            logger.warning(f'[StoreReflection] Fout bij opslaan: {e}')
+            logger.warning(f'[StoreReflection] Fout bij opslaan naar {LOG_FILE}: {e}', exc_info=True)
             return False
 
     def _update_last_reflection_timestamp(self, token: str):
@@ -141,10 +151,10 @@ class ReflectieLus:
                 additional_context=additional_context_for_prompt
             )
         except AttributeError as e:
-            logger.error(f"PromptBuilder of methode niet gevonden: {e}. Implementeer PromptBuilder eerst.")
+            logger.error(f"PromptBuilder of methode niet gevonden: {e}. Implementeer PromptBuilder eerst.", exc_info=True)
             prompt = f"Dummy prompt for {symbol} due to PromptBuilder error." # Fallback dummy prompt
         except Exception as e:
-            logger.error(f"Fout tijdens prompt generatie: {e}")
+            logger.error(f"Fout tijdens prompt generatie: {e}", exc_info=True)
             prompt = f"Dummy prompt for {symbol} due to error: {e}"
 
 
@@ -157,7 +167,7 @@ class ReflectieLus:
         grok_result = await self.grok_reflector.ask_grok(prompt, context={"symbol": symbol, "strategy_id": strategy_id, **trade_context})
 
         if not gpt_result and not grok_result:
-            logger.error(f"[ReflectieCyclus] Geen AI-reflectie ontvangen van GPT of Grok voor {symbol}.")
+            logger.error(f"[ReflectieCyclus] Geen AI-reflectie ontvangen van GPT of Grok voor {symbol}.", exc_info=False) # No direct exception context
             return None
 
         # Handle cases where one or both results might be None or empty
@@ -255,54 +265,44 @@ Grok: {grok_result.get('reflectie', 'N/A') if grok_result else 'N/A'}"
                 )
                 logger.info(f"[ReflectieCyclus] Called BiasReflector.update_bias for {symbol}/{strategy_id} with sentiment details.")
             except Exception as e:
-                logger.error(f"[ReflectieCyclus] Error calling BiasReflector.update_bias for {symbol}/{strategy_id}: {e}")
+                logger.error(f"[ReflectieCyclus] Error calling BiasReflector.update_bias for {symbol}/{strategy_id}: {e}", exc_info=True)
 
         if confidence_engine_instance:
             trade_profit_pct = trade_context.get('profit_pct') # Can be None
             try:
-                # Ensure first_sentiment_observed and trade_direction are available here
-                # These are the same variables prepared for the BiasReflector call earlier in the code.
-                # sentiment_data_status is directly from reflection_log_entry
-                # first_sentiment_observed was from sentiment_items_logged (from reflection_log_entry)
-                # trade_direction was from trade_context
-
-                # Re-fetch them here to be explicit about their source for this call,
-                # or ensure they are passed down if scope changes.
-                # For now, assuming they are still in scope from the BiasReflector preparation block.
-                # The variables `first_sentiment_observed` and `trade_direction` are defined
-                # just before the `bias_reflector_instance.update_bias` call.
-
                 current_sentiment_data_status = reflection_log_entry.get('sentiment_data_status')
-                # `first_sentiment_observed` and `trade_direction` should be in scope from BiasReflector section
-                # If not, they need to be re-derived:
-                # sentiment_items_logged_for_conf = reflection_log_entry.get('sentiment_items_logged', [])
-                # first_sentiment_observed_for_conf = sentiment_items_logged_for_conf[0] if sentiment_items_logged_for_conf else None
-                # trade_direction_for_conf = trade_context.get('trade_direction')
+                # first_sentiment_observed and trade_direction are in scope from BiasReflector prep block
 
                 await confidence_engine_instance.update_confidence(
                     token=symbol,
                     strategy_id=strategy_id,
                     ai_reported_confidence=reflection_log_entry['combined_confidence'],
                     trade_result_pct=trade_profit_pct,
-                    sentiment_data_status=current_sentiment_data_status, # from reflection_log_entry
-                    first_sentiment_observed=first_sentiment_observed, # from earlier block
-                    trade_direction=trade_direction # from earlier block
+                    sentiment_data_status=current_sentiment_data_status,
+                    first_sentiment_observed=first_sentiment_observed,
+                    trade_direction=trade_direction
                 )
                 logger.info(f"[ReflectieCyclus] Called ConfidenceEngine.update_confidence for {symbol}/{strategy_id} with sentiment details (Status: {current_sentiment_data_status}, FirstObs: {first_sentiment_observed}, Direction: {trade_direction}).")
             except Exception as e:
-                logger.error(f"[ReflectieCyclus] Error calling ConfidenceEngine.update_confidence for {symbol}/{strategy_id}: {e}")
+                logger.error(f"[ReflectieCyclus] Error calling ConfidenceEngine.update_confidence for {symbol}/{strategy_id}: {e}", exc_info=True)
 
         # 6. Verdere Analyse & Aanpassing (via reflectie_analyser en andere modules)
         logger.info(f"[ReflectieCyclus] Starten van verdere analyse voor {symbol} ({strategy_id}).")
         all_logs = []
-        if os.path.exists(LOG_FILE) and os.path.getsize(LOG_FILE) > 0:
+        if LOG_FILE.exists() and LOG_FILE.stat().st_size > 0:
             try:
-                with open(LOG_FILE, 'r', encoding='utf-8') as f:
+                with LOG_FILE.open('r', encoding='utf-8') as f:
                     all_logs = json.load(f)
-                    if not isinstance(all_logs, list): all_logs = []
+                if not isinstance(all_logs, list):
+                    logger.warning(f"Reflectie logboek {LOG_FILE} bevatte geen lijst. Resetting for analysis.")
+                    all_logs = []
             except json.JSONDecodeError:
-                logger.warning(f"Reflectie logboek {LOG_FILE} is leeg of corrupt. Kan geen analyse uitvoeren.")
+                logger.warning(f"Reflectie logboek {LOG_FILE} is leeg of corrupt. Kan geen analyse uitvoeren.", exc_info=True)
                 all_logs = []
+            except Exception as e_read_final:
+                 logger.error(f"Onverwachte fout bij lezen {LOG_FILE} voor finale analyse: {e_read_final}", exc_info=True)
+                 all_logs = []
+
 
         analysis_result = self.analysis_result_placeholder
         mutation_proposal = self.mutation_proposal_placeholder
@@ -320,26 +320,27 @@ Grok: {grok_result.get('reflectie', 'N/A') if grok_result else 'N/A'}"
                     timeframe_bias_analysis = analyzeTimeframeBias(relevant_reflections)
 
                     dummy_performance = {"winRate": 0.0, "avgProfit": 0.0, "tradeCount": 0}
-                    if 'profit_pct' in trade_context:
-                        dummy_performance['winRate'] = 1.0 if trade_context['profit_pct'] > 0 else 0.0
-                        dummy_performance['avgProfit'] = trade_context['profit_pct']
+                    if 'profit_pct' in trade_context: # trade_context can be None
+                        profit_val = trade_context.get('profit_pct', 0.0) # Ensure profit_pct exists
+                        dummy_performance['winRate'] = 1.0 if profit_val > 0 else 0.0
+                        dummy_performance['avgProfit'] = profit_val
                         dummy_performance['tradeCount'] = 1
 
                     current_strategy_params = {
                         "id": strategy_id,
-                        "parameters": { "emaPeriod": 20, "rsiThreshold": 70 }
+                        "parameters": { "emaPeriod": 20, "rsiThreshold": 70 } # Placeholder params
                     }
                     mutation_proposal = generateMutationProposal(
                         current_strategy_params,
-                        combined_bias,
-                        dummy_performance,
-                        timeframe_bias_analysis
+                        combined_bias, # This is from AI reflection
+                        dummy_performance, # Based on current trade_context
+                        timeframe_bias_analysis # Based on historical reflections
                     )
                     logger.info(f"Mutatievoorstel voor {symbol} ({strategy_id}): {mutation_proposal}")
                 except Exception as e:
-                    logger.error(f"Fout tijdens analyse of mutatievoorstel generatie: {e}")
-                    analysis_result = {"summary": f"Analysefout: {e}"}
-                    mutation_proposal = {"action": f"Mutatiefout: {e}"}
+                    logger.error(f"Fout tijdens analyse of mutatievoorstel generatie: {e}", exc_info=True)
+                    analysis_result = {"summary": f"Analysefout: {e}"} # Keep simple error message
+                    mutation_proposal = {"action": f"Mutatiefout: {e}"} # Keep simple error message
 
 
         return {
@@ -452,14 +453,17 @@ Grok: {grok_result.get('reflectie', 'N/A') if grok_result else 'N/A'}"
 # Voorbeeld van hoe je het zou kunnen gebruiken (voor testen)
 if __name__ == "__main__":
     # Corrected path for .env when running this script directly
-    dotenv_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '.env')
-    dotenv.load_dotenv(dotenv_path)
+    # CORE_DIR and PROJECT_ROOT_DIR are defined at the top of the file
+    dotenv_path = PROJECT_ROOT_DIR / '.env'
+    if dotenv_path.exists():
+        dotenv.load_dotenv(dotenv_path)
+    else:
+        logger.warning(f".env file not found at {dotenv_path} for __main__ test run.")
 
 
     async def run_test_reflection_loop():
         # Setup basic logging for the test
-        # Add sys import for logging handler
-        import sys
+        import sys # sys import for StreamHandler
         logging.basicConfig(level=logging.INFO,
                             format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
                             handlers=[logging.StreamHandler(sys.stdout)])

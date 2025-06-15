@@ -8,9 +8,10 @@ for each pattern that contributed to an entry decision.
 """
 import json
 import logging
-import os
+import os # Keep for os.getenv if used, or other non-path operations
 import sqlite3
 from datetime import datetime, timedelta, timezone
+from pathlib import Path # Import Path
 import pandas as pd
 from typing import List, Dict, Any, Optional
 
@@ -21,9 +22,14 @@ logger = logging.getLogger(__name__)
 # Default log level, can be overridden by application config
 # logger.setLevel(logging.INFO) # Commented out to allow external configuration
 
+# Define base directory for context if needed, e.g. project root
+# Assuming this file (core/pattern_performance_analyzer.py) is in: <project_root>/core/
+PROJECT_ROOT_DIR = Path(__file__).resolve().parent.parent
+
 # Default paths if not provided or found in params_manager
-DEFAULT_FREQTRADE_DB_PATH = "user_data/freqtrade.sqlite" # Relative to project root
-DEFAULT_PATTERN_LOG_PATH = "user_data/logs/pattern_performance_log.json" # Relative to project root
+DEFAULT_USER_DATA_DIR = PROJECT_ROOT_DIR / "user_data"
+DEFAULT_FREQTRADE_DB_PATH = DEFAULT_USER_DATA_DIR / "freqtrade.sqlite"
+DEFAULT_PATTERN_LOG_PATH = DEFAULT_USER_DATA_DIR / "logs" / "pattern_performance_log.json"
 DEFAULT_MATCH_WINDOW_MINUTES = 2 # Default time window for matching logs to trades
 
 class PatternPerformanceAnalyzer:
@@ -73,51 +79,45 @@ class PatternPerformanceAnalyzer:
             self.match_window_minutes = DEFAULT_MATCH_WINDOW_MINUTES
 
         # Adjust relative paths to be absolute, assuming 'user_data' implies a path relative to the project root or CWD.
-        # This makes paths more robust, especially when running from different locations.
-        # Note: Freqtrade usually handles user_data_dir resolution based on its config.
-        # This is a fallback for standalone use or if paths are not already absolute.
-        if not os.path.isabs(self.freqtrade_db_path) and "user_data" in self.freqtrade_db_path:
-             self.freqtrade_db_path = os.path.abspath(self.freqtrade_db_path)
-        if not os.path.isabs(self.pattern_log_path) and "user_data" in self.pattern_log_path:
-             self.pattern_log_path = os.path.abspath(self.pattern_log_path)
+        # This makes paths more robust.
+        self.freqtrade_db_path = Path(self.freqtrade_db_path)
+        if not self.freqtrade_db_path.is_absolute():
+            self.freqtrade_db_path = (PROJECT_ROOT_DIR / self.freqtrade_db_path).resolve()
+
+        self.pattern_log_path = Path(self.pattern_log_path)
+        if not self.pattern_log_path.is_absolute():
+            self.pattern_log_path = (PROJECT_ROOT_DIR / self.pattern_log_path).resolve()
+
 
         logger.info(f"PatternPerformanceAnalyzer initialized. DB: '{self.freqtrade_db_path}', Log: '{self.pattern_log_path}', Window: {self.match_window_minutes} mins.")
 
     def _load_pattern_entry_logs(self) -> List[Dict[str, Any]]:
         """
         Loads pattern entry logs from the specified JSONL file.
-
-        Each line in the file is expected to be a JSON object representing a log entry.
-        Timestamps are converted to datetime objects.
-
-        Returns:
-            A list of dictionaries, where each dictionary is a parsed log entry.
-            Returns an empty list if the file is not found or is empty.
         """
         logs: List[Dict[str, Any]] = []
-        if not os.path.exists(self.pattern_log_path):
+        if not self.pattern_log_path.exists(): # Use Path.exists()
             logger.warning(f"Pattern entry log file not found: {self.pattern_log_path}")
             return logs
 
         try:
-            with open(self.pattern_log_path, 'r', encoding='utf-8') as f:
+            with self.pattern_log_path.open('r', encoding='utf-8') as f: # Use Path.open()
                 for line_number, line in enumerate(f, 1):
                     try:
                         log_entry = json.loads(line.strip())
-                        # Convert entry_timestamp to datetime object, making it timezone-aware (UTC)
                         if 'entry_timestamp' in log_entry and isinstance(log_entry['entry_timestamp'], str):
                             dt_obj = datetime.fromisoformat(log_entry['entry_timestamp'])
-                            if dt_obj.tzinfo is None: # Ensure timezone awareness, assuming UTC if naive
+                            if dt_obj.tzinfo is None:
                                 dt_obj = dt_obj.replace(tzinfo=timezone.utc)
                             log_entry['entry_timestamp'] = dt_obj
                         logs.append(log_entry)
                     except json.JSONDecodeError as e:
-                        logger.error(f"Error decoding JSON from line {line_number} in {self.pattern_log_path}: {e}. Line: '{line.strip()[:100]}...'")
-                    except ValueError as e: # Handles datetime.fromisoformat errors for malformed timestamps
-                         logger.error(f"Error converting timestamp from line {line_number} in {self.pattern_log_path}: {e}. Entry: {log_entry}")
+                        logger.error(f"Error decoding JSON from line {line_number} in {self.pattern_log_path}: {e}. Line: '{line.strip()[:100]}...'", exc_info=True)
+                    except ValueError as e:
+                         logger.error(f"Error converting timestamp from line {line_number} in {self.pattern_log_path}: {e}. Entry: {log_entry}", exc_info=True)
 
         except IOError as e:
-            logger.error(f"Error reading pattern log file {self.pattern_log_path}: {e}")
+            logger.error(f"Error reading pattern log file {self.pattern_log_path}: {e}", exc_info=True)
 
         logger.info(f"Loaded {len(logs)} pattern entry logs from {self.pattern_log_path}")
         return logs
@@ -125,39 +125,29 @@ class PatternPerformanceAnalyzer:
     def _load_closed_trades(self) -> pd.DataFrame:
         """
         Loads closed trades from the Freqtrade SQLite database.
-
-        Fetches relevant columns (id, pair, open_date, close_date, profit_ratio)
-        for trades marked as closed (is_open = 0).
-        Date columns are converted to timezone-aware (UTC) datetime objects.
-
-        Returns:
-            A Pandas DataFrame containing closed trade data.
-            Returns an empty DataFrame if the database is not found or an error occurs.
         """
-        if not os.path.exists(self.freqtrade_db_path):
+        if not self.freqtrade_db_path.exists(): # Use Path.exists()
             logger.warning(f"Freqtrade database not found: {self.freqtrade_db_path}")
             return pd.DataFrame()
 
         try:
             # Connect in read-only mode to prevent accidental writes
-            conn = sqlite3.connect(f"file:{self.freqtrade_db_path}?mode=ro", uri=True)
+            # sqlite3.connect with URI=True expects a string path.
+            conn = sqlite3.connect(f"file:{str(self.freqtrade_db_path)}?mode=ro", uri=True)
             query = "SELECT id, pair, open_date, close_date, profit_ratio FROM trades WHERE is_open = 0"
             df = pd.read_sql_query(query, conn)
             conn.close()
 
-            # Convert date columns to timezone-aware UTC datetime objects
-            # Freqtrade stores dates in ISO 8601 format, typically including timezone info (e.g., +00:00 or Z)
-            # pd.to_datetime with utc=True correctly handles these and ensures they are UTC.
             df['open_date'] = pd.to_datetime(df['open_date'], utc=True)
             df['close_date'] = pd.to_datetime(df['close_date'], utc=True)
 
             logger.info(f"Loaded {len(df)} closed trades from {self.freqtrade_db_path}")
             return df
         except sqlite3.Error as e:
-            logger.error(f"SQLite error while loading closed trades from {self.freqtrade_db_path}: {e}")
+            logger.error(f"SQLite error while loading closed trades from {self.freqtrade_db_path}: {e}", exc_info=True)
             return pd.DataFrame()
-        except Exception as e: # Catch other potential errors like issues with pandas
-            logger.error(f"Unexpected error loading closed trades: {e}")
+        except Exception as e:
+            logger.error(f"Unexpected error loading closed trades from {self.freqtrade_db_path}: {e}", exc_info=True)
             return pd.DataFrame()
 
     def analyze_pattern_performance(self) -> Dict[str, Dict[str, Any]]:
@@ -287,23 +277,27 @@ if __name__ == '__main__':
     # Example Usage (requires setup of dummy files or ParamsManager)
     logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 
-    # Create dummy pattern_performance_log.json
-    dummy_log_path = "user_data/logs/pattern_performance_log.json"
-    os.makedirs(os.path.dirname(dummy_log_path), exist_ok=True)
+    # Define dummy paths using Path objects relative to where the script is run,
+    # or use PROJECT_ROOT_DIR for more robustness if structure is known.
+    # For this example, assume user_data is at project root.
+    test_user_data_dir = PROJECT_ROOT_DIR / "user_data"
+    dummy_log_path = test_user_data_dir / "logs" / "pattern_performance_log_test.json"
+    dummy_log_path.parent.mkdir(parents=True, exist_ok=True) # Use Path.mkdir()
+
     dummy_log_entries = [
         {"pair": "ETH/USDT", "entry_timestamp": (datetime.now(timezone.utc) - timedelta(hours=2)).isoformat(), "contributing_patterns": ["cnn_5m_bullFlag", "rule_morningStar"], "decision_details": {}},
         {"pair": "ETH/USDT", "entry_timestamp": (datetime.now(timezone.utc) - timedelta(hours=1)).isoformat(), "contributing_patterns": ["cnn_1h_bearishEngulfing"], "decision_details": {}},
         {"pair": "BTC/USDT", "entry_timestamp": (datetime.now(timezone.utc) - timedelta(minutes=30)).isoformat(), "contributing_patterns": ["rule_bullishEngulfing"], "decision_details": {}},
     ]
-    with open(dummy_log_path, 'w', encoding='utf-8') as f:
+    with dummy_log_path.open('w', encoding='utf-8') as f: # Use Path.open()
         for entry in dummy_log_entries:
             json.dump(entry, f)
             f.write('\n')
 
     # Create dummy freqtrade.sqlite
-    dummy_db_path = "user_data/freqtrade.sqlite"
-    if os.path.exists(dummy_db_path): os.remove(dummy_db_path) # Clean start for dummy
-    conn = sqlite3.connect(dummy_db_path)
+    dummy_db_path = test_user_data_dir / "freqtrade_test.sqlite"
+    if dummy_db_path.exists(): dummy_db_path.unlink() # Use Path.unlink()
+    conn = sqlite3.connect(str(dummy_db_path)) # sqlite3.connect needs string
     cursor = conn.cursor()
     cursor.execute("""
         CREATE TABLE trades (
@@ -314,18 +308,18 @@ if __name__ == '__main__':
     # Trade 1: Matches first log for ETH/USDT
     cursor.execute("INSERT INTO trades VALUES (?,?,?,?,?,?)",
                    (1, "ETH/USDT", 0,
-                    (datetime.now(timezone.utc) - timedelta(hours=2, minutes=1)).isoformat(), # open_date slightly before log
-                    (datetime.now(timezone.utc) - timedelta(hours=1, minutes=30)).isoformat(), 0.02)) # 2% profit
+                    (datetime.now(timezone.utc) - timedelta(hours=2, minutes=1)).isoformat(),
+                    (datetime.now(timezone.utc) - timedelta(hours=1, minutes=30)).isoformat(), 0.02))
     # Trade 2: Matches second log for ETH/USDT (loss)
     cursor.execute("INSERT INTO trades VALUES (?,?,?,?,?,?)",
                    (2, "ETH/USDT", 0,
                     (datetime.now(timezone.utc) - timedelta(hours=1, minutes=1)).isoformat(),
-                    (datetime.now(timezone.utc) - timedelta(minutes=30)).isoformat(), -0.01)) # -1% profit
+                    (datetime.now(timezone.utc) - timedelta(minutes=30)).isoformat(), -0.01))
     # Trade 3: Matches BTC/USDT log
     cursor.execute("INSERT INTO trades VALUES (?,?,?,?,?,?)",
                    (3, "BTC/USDT", 0,
                     (datetime.now(timezone.utc) - timedelta(minutes=30, seconds=30)).isoformat(),
-                    (datetime.now(timezone.utc) - timedelta(minutes=10)).isoformat(), 0.05)) # 5% profit
+                    (datetime.now(timezone.utc) - timedelta(minutes=10)).isoformat(), 0.05))
     # Trade 4: Unmatched trade
     cursor.execute("INSERT INTO trades VALUES (?,?,?,?,?,?)",
                    (4, "ADA/USDT", 0,
@@ -335,9 +329,10 @@ if __name__ == '__main__':
     conn.close()
 
     # Create analyzer instance (without ParamsManager for this direct test)
+    # Pass paths as strings, as constructor expects Optional[str]
     analyzer = PatternPerformanceAnalyzer(
-        freqtrade_db_path=dummy_db_path,
-        pattern_log_path=dummy_log_path
+        freqtrade_db_path=str(dummy_db_path),
+        pattern_log_path=str(dummy_log_path)
     )
 
     # Set a specific match window for testing

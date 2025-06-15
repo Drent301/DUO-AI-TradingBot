@@ -10,12 +10,13 @@ from freqtrade.strategy import IStrategy, merge_informative_pair
 from freqtrade.strategy.interface import IStrategy # type: ignore
 # No more talib import
 import freqtrade.vendor.qtpylib.indicators as qtpylib
-from freqtrade.exchange import Exchange
+# from freqtrade.exchange import Exchange # Exchange not directly used in this snippet
 from freqtrade.persistence import Trade
 from typing import Tuple # For type hinting _calculate_macd_pandas
 
 # Importeer je eigen AI-modules
-import os # Added for path operations
+import os # Keep for os.path operations if any remain after pathlib, or for env vars
+from pathlib import Path # Import Path
 import json # Added for json.dump
 from core.gpt_reflector import GPTReflector
 from core.grok_reflector import GrokReflector
@@ -114,12 +115,26 @@ class DUOAI_Strategy(IStrategy):
         self.ai_activation_engine = AIActivationEngine(reflectie_lus_instance=self.reflectie_lus)
 
         # Define pattern performance log file path and ensure the 'logs' directory exists.
-        # This file is used to log contributing patterns for later performance analysis.
-        self.PATTERN_PERFORMANCE_LOG_FILE = os.path.join(
-            self.config['user_data_dir'], 'logs', 'pattern_performance_log.json'
-        )
-        os.makedirs(os.path.dirname(self.PATTERN_PERFORMANCE_LOG_FILE), exist_ok=True)
-        logger.info(f"Pattern performance log will be saved to: {self.PATTERN_PERFORMANCE_LOG_FILE}")
+        user_data_dir_path = Path(self.config['user_data_dir']) # Convert to Path
+        # Ensure user_data_dir_path is absolute for robust path construction
+        # Freqtrade usually provides an absolute path for user_data_dir.
+        # If it could be relative, it should be resolved against a known root.
+        # For now, assume Freqtrade provides a usable absolute or resolvable path.
+        if not user_data_dir_path.is_absolute():
+            # This case should ideally not happen if Freqtrade config is well-formed.
+            # If it can, one might need to resolve it, e.g. user_data_dir_path = Path.cwd() / user_data_dir_path
+            logger.warning(f"user_data_dir '{self.config['user_data_dir']}' is not absolute. Assuming it's resolvable or Freqtrade handles it.")
+            # For robustness, ensure it's resolved if used as a base for other paths.
+            # However, Freqtrade itself uses this path, so it should be valid as is.
+
+        self.PATTERN_PERFORMANCE_LOG_FILE = (user_data_dir_path / 'logs' / 'pattern_performance_log.json').resolve()
+
+        try:
+            self.PATTERN_PERFORMANCE_LOG_FILE.parent.mkdir(parents=True, exist_ok=True)
+            logger.info(f"Pattern performance log will be saved to: {self.PATTERN_PERFORMANCE_LOG_FILE}")
+        except Exception as e:
+            logger.error(f"Could not create directory for pattern performance log {self.PATTERN_PERFORMANCE_LOG_FILE.parent}: {e}", exc_info=True)
+
 
         logger.info(f"DUOAI_Strategy geïnitialiseerd.")
 
@@ -450,11 +465,11 @@ class DUOAI_Strategy(IStrategy):
             }
             try:
                 # Append the log entry as a new JSON line to the performance log file
-                with open(self.PATTERN_PERFORMANCE_LOG_FILE, 'a', encoding='utf-8') as f:
+                with self.PATTERN_PERFORMANCE_LOG_FILE.open('a', encoding='utf-8') as f: # Use Path.open()
                     json.dump(log_data, f)
                     f.write('\n')
             except Exception as e:
-                logger.error(f"Fout bij schrijven naar pattern_performance_log.json: {e}")
+                logger.error(f"Fout bij schrijven naar {self.PATTERN_PERFORMANCE_LOG_FILE}: {e}", exc_info=True)
 
             return 1.0 # Signal Freqtrade to enter
 
@@ -512,15 +527,15 @@ class DUOAI_Strategy(IStrategy):
             # self.trailing_stop = sl_optimization_result.get("trailing_stop", self.trailing_stop)
             # self.trailing_only_offset_is_reached = sl_optimization_result.get("trailing_only_offset_is_reached", self.trailing_only_offset_is_reached)
 
+            # Ensure all params passed to update_strategy_roi_sl_params are appropriate
+            # The method in ParamsManager expects specific keys.
+            # Assuming self.minimal_roi, self.stoploss etc. are correctly maintained by the strategy.
             asyncio.create_task(self.params_manager.update_strategy_roi_sl_params(
                 strategy_id=self.name,
-                new_roi=self.minimal_roi, # ROI is not typically optimized here, but included for completeness
+                new_roi=self.minimal_roi,
                 new_stoploss=self.stoploss,
-                new_trailing_stop_positive=self.trailing_stop_positive,
-                new_trailing_stop_positive_offset=self.trailing_stop_positive_offset
-                # Pass other params if they are also being updated:
-                # new_trailing_stop=self.trailing_stop,
-                # new_trailing_only_offset_is_reached=self.trailing_only_offset_is_reached
+                new_trailing_stop=self.trailing_stop_positive, # Map strategy attribute to ParamsManager expected key
+                new_trailing_only_offset_is_reached=self.trailing_stop_positive_offset # Map strategy attribute
             ))
             logger.info(f"TSL parameters bijgewerkt voor {pair}: Stoploss={self.stoploss}, TSL_Offset={self.trailing_stop_positive_offset}, TSL_Trigger={self.trailing_stop_positive}")
 

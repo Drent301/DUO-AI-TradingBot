@@ -34,13 +34,13 @@ class ExitOptimizer:
         try:
             self.prompt_builder = PromptBuilder()
         except Exception as e:
-            logger.error(f"Failed to initialize PromptBuilder: {e}")
+            logger.error(f"Failed to initialize PromptBuilder: {e}", exc_info=True)
             self.prompt_builder = None
         self.bias_reflector = BiasReflector()
         try:
             self.confidence_engine = ConfidenceEngine()
         except Exception as e:
-            logger.error(f"Failed to initialize ConfidenceEngine: {e}")
+            logger.error(f"Failed to initialize ConfidenceEngine: {e}", exc_info=True)
             self.confidence_engine = None
 
         self.cnn_patterns_detector = CNNPatterns()
@@ -377,7 +377,7 @@ class ExitOptimizer:
                         except ValueError:
                             logger.warning(f"[{ai_name}] Could not parse SL percentage (ValueError) from regex match '{sl_match.group(1)}' in reflection: '{reflection}'")
                         except Exception as e:
-                            logger.error(f"[{ai_name}] Unexpected error parsing SL from regex match '{sl_match.group(1)}': {e}. Reflection: '{reflection}'")
+                            logger.error(f"[{ai_name}] Unexpected error parsing SL from regex match '{sl_match.group(1)}': {e}. Reflection: '{reflection}'", exc_info=True)
 
             if parsed_sl_value_for_this_response is not None and (resp_confidence == highest_confidence_for_sl):
                 # If this response yields a valid SL and has the highest confidence so far (or equal, choosing the latest one)
