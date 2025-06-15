@@ -21,23 +21,26 @@ Ensure you are in the project's root directory, then execute:
 python utils/data_downloader.py
 """
 import subprocess
-import os
-import pathlib
+import os # Keep for os.getenv if used, though not in this file.
+from pathlib import Path # Import Path
 import logging
 import sys
 
-# Configure logging
-log_dir = "user_data/logs"
-log_file_path = os.path.join(log_dir, "data_downloader.log")
+# Configure logging using pathlib
+SCRIPT_DIR = Path(__file__).resolve().parent
+PROJECT_ROOT_DIR = SCRIPT_DIR.parent # Assumes utils is directly under project root
+
+LOG_DIR = PROJECT_ROOT_DIR / "user_data" / "logs"
+LOG_FILE_PATH = LOG_DIR / "data_downloader.log"
 
 # Create log directory if it doesn't exist
-os.makedirs(log_dir, exist_ok=True)
+LOG_DIR.mkdir(parents=True, exist_ok=True)
 
 logging.basicConfig(
-    level=logging.INFO,
+    level=logging.INFO, # Consider making this configurable or using logger.setLevel
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     handlers=[
-        logging.FileHandler(log_file_path),
+        logging.FileHandler(LOG_FILE_PATH),
         logging.StreamHandler(sys.stdout)
     ]
 )
@@ -46,86 +49,53 @@ logger = logging.getLogger(__name__)
 def download_data(pairs: list[str], timeframes: list[str], exchange: str, data_dir: str = "user_data/data/binance", days: int = None, since: str = None):
     """
     Downloads data using Freqtrade.
+    Assumes data_dir is structured like 'path/to/user_data/data/exchange_name'.
+    The --datadir for Freqtrade will then be 'path/to/user_data'.
     """
-    # Ensure data_dir is a Path object for easier manipulation
-    data_dir_path = pathlib.Path(data_dir)
+    data_dir_path = Path(data_dir)
 
-    # Freqtrade's --datadir is the parent of the 'data' folder.
-    # e.g., if data_dir is /some/path/user_data/data/exchange_name
-    # then freqtrade_datadir should be /some/path/user_data
+    # Determine Freqtrade's --datadir.
+    # If data_dir is "user_data/data/binance", freqtrade_datadir should be "user_data".
     try:
-        # Find the 'data' directory and get its parent
-        # This assumes a structure like .../user_data/data/exchange
-        parts = list(data_dir_path.parts)
-        data_index = parts.index('data')
-        freqtrade_datadir = str(pathlib.Path(*parts[:data_index]))
-        if not freqtrade_datadir and len(parts) > data_index +1: # Handle cases like 'user_data/data/binance'
-             freqtrade_datadir = str(pathlib.Path(*parts[:data_index+1])) # then it should be user_data
-             # Correction: if parts = ['user_data', 'data', 'binance'], data_index = 1. parts[:1] = ['user_data']
-             # So freqtrade_datadir should be user_data if the structure is user_data/data/exchange
-             # Let's re-evaluate the logic for freqtrade_datadir.
-             # If data_dir_path = "user_data/data/binance", we want "user_data"
-             # If data_dir_path = "/abs/path/to/user_data/data/binance", we want "/abs/path/to/user_data"
+        if not data_dir_path.is_absolute():
+            if data_dir_path.parts and data_dir_path.parts[0] == 'user_data':
+                 data_dir_path = (PROJECT_ROOT_DIR / data_dir_path).resolve()
+            else:
+                 data_dir_path = data_dir_path.resolve()
 
-        # A more robust way to find the parent 'user_data' or equivalent directory for --datadir
-        current_path = data_dir_path.resolve() # Get absolute path
-        freqtrade_datadir_path = None
-        # Iterate upwards from data_dir_path until a directory containing 'data' is found,
-        # then go one level up from that 'data' directory's parent if possible,
-        # or assume data_dir_path's parent if 'data' is not found.
-        # This logic is tricky. A simpler assumption: freqtrade --datadir is the directory *containing* the 'data' directory.
-        # So if data_dir = 'user_data/data/binance', then user_data/data is where freqtrade looks,
-        # and --datadir should be 'user_data'.
+        # Simplified logic: Assume data_dir is <path_to_user_data>/data/<exchange_name>
+        # So, freqtrade_datadir is <path_to_user_data>
+        if data_dir_path.parent.name == 'data':
+            freqtrade_datadir = data_dir_path.parent.parent
+        else:
+            logger.warning(
+                f"Unexpected data_dir structure: '{data_dir_path}'. "
+                f"Expected <path_to_user_data>/data/<exchange_name>. "
+                f"Falling back to using '{data_dir_path.parent}' as Freqtrade --datadir. "
+                f"This might be incorrect if '{data_dir_path.parent}/data' does not exist."
+            )
+            freqtrade_datadir = data_dir_path.parent
 
-        # Revised logic for freqtrade_datadir:
-        # We expect data_dir to be like ".../some_base_dir/data/exchange_name"
-        # Freqtrade's --datadir should then be ".../some_base_dir"
+        # Ensure the determined freqtrade_datadir actually contains a 'data' subdirectory,
+        # as Freqtrade expects this structure for many operations.
+        if not (freqtrade_datadir / "data").is_dir():
+            logger.warning(
+                f"The determined Freqtrade --datadir '{freqtrade_datadir}' does not appear to contain a 'data' subdirectory. "
+                f"Freqtrade might not work as expected. Please verify your data_dir structure and Freqtrade's requirements."
+            )
 
-        # Let's assume data_dir is '.../parent_of_data_folder/data/exchange_name'
-        # Then freqtrade_datadir is '.../parent_of_data_folder'
-        # Example: data_dir = "user_data/data/binance" -> freqtrade_datadir = "user_data"
-        # Example: data_dir = "/opt/freqtrade/user_data/data/kraken" -> freqtrade_datadir = "/opt/freqtrade/user_data"
-
-        # We need to find the parent of the directory named 'data' in the path.
-        path_parts = data_dir_path.parts
-        try:
-            data_folder_index = path_parts.index("data")
-            # The directory for --datadir is the one *before* 'data' in the path
-            # e.g. ('user_data', 'data', 'binance'), data_folder_index is 1. We need path_parts[0] -> 'user_data'
-            if data_folder_index > 0:
-                freqtrade_datadir = str(pathlib.Path(*path_parts[:data_folder_index]))
-            else: # 'data' is the first component, or not present in the way expected.
-                  # This case is ambiguous. Let's default to data_dir_path.parent if 'data' is top level or not found.
-                  # However, freqtrade expects --datadir to be the root of user_data.
-                  # A common convention is that data_dir is "path_to_freqtrade/user_data/data/exchange".
-                  # So, data_dir.parent.parent should be "path_to_freqtrade/user_data".
-                freqtrade_datadir = str(data_dir_path.parent.parent)
-
-        except ValueError:
-            # If 'data' is not in the path, this indicates an unexpected data_dir structure.
-            # For example, if data_dir is just 'my_data/binance'.
-            # In this scenario, freqtrade might expect --datadir to be 'my_data'.
-            # This is a fallback, might need adjustment based on actual Freqtrade behavior for non-standard dirs.
-            logger.warning(f"Warning: 'data' directory not found in path {data_dir_path}. Using {data_dir_path.parent} as Freqtrade datadir. This might be incorrect.")
-            freqtrade_datadir = str(data_dir_path.parent)
-
-
-    except IndexError:
-        logger.error(f"Error: Could not determine Freqtrade datadir from {data_dir_path}. Please ensure it follows a structure like '.../user_data/data/exchange_name'")
-        return
-    except ValueError: # Handles cases where 'data' is not in parts
-        logger.error(f"Error: The 'data' directory was not found in the path '{data_dir_path}'. Cannot determine appropriate --datadir for Freqtrade.")
+    except Exception as e:
+        logger.error(f"Error determining Freqtrade --datadir from data_dir '{data_dir}': {e}", exc_info=True)
         return
 
-
-    logger.info(f"Using Freqtrade --datadir: {freqtrade_datadir}")
+    logger.info(f"Using Freqtrade --datadir: '{str(freqtrade_datadir)}' for specified data_dir: '{data_dir_path}'")
 
     # Create the specific data directory if it doesn't exist
     try:
-        os.makedirs(data_dir_path, exist_ok=True)
+        data_dir_path.mkdir(parents=True, exist_ok=True)
         logger.info(f"Ensured data directory exists: {data_dir_path}")
     except OSError as e:
-        logger.error(f"Error creating directory {data_dir_path}: {e}")
+        logger.error(f"Error creating directory {data_dir_path}: {e}", exc_info=True)
         return
 
     for pair in pairs:
@@ -135,7 +105,7 @@ def download_data(pairs: list[str], timeframes: list[str], exchange: str, data_d
                 "--exchange", exchange.lower(),
                 "-p", pair,
                 "-t", timeframe,
-                "--datadir", freqtrade_datadir
+                "--datadir", str(freqtrade_datadir) # subprocess needs string paths
             ]
 
             if days is not None:
@@ -143,12 +113,11 @@ def download_data(pairs: list[str], timeframes: list[str], exchange: str, data_d
             elif since is not None:
                 command.extend(["--since", since])
             else:
-                # Default to a small period if neither days nor since is provided, e.g., 7 days
-                # Or raise an error, or make one of them mandatory in the function signature.
-                # For now, let's assume one will be provided by the caller logic,
-                # or Freqtrade has its own default if not specified.
-                # The problem description implies 'days' will be used for the 5-year requirement.
-                pass
+                logger.warning(
+                    f"Neither 'days' nor 'since' provided for downloading {pair} - {timeframe}. "
+                    f"Freqtrade's default download period will apply."
+                )
+                # Freqtrade download-data defaults to 30 days if neither --days nor --since is given.
 
             logger.info(f"Executing command: {' '.join(command)}")
             try:

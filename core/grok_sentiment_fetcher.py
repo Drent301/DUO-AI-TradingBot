@@ -12,21 +12,25 @@ import asyncio # Nodig voor de async main-test
 import dotenv # Nodig voor het laden van .env in de testfunctie
 
 logger = logging.getLogger(__name__)
-logger.setLevel(logging.INFO)
+# logger.setLevel(logging.INFO) # Logging level configured by application
+
+from pathlib import Path # Import Path
 
 GROK_API_KEY = os.getenv('GROK_API_KEY')
-LIVE_SEARCH_API_URL = os.getenv('GROK_LIVE_SEARCH_API_URL', 'https://api.x.ai/v1/live-search') # TODO: Update with official endpoint when available. This is a hypothetical endpoint.
+LIVE_SEARCH_API_URL = os.getenv('GROK_LIVE_SEARCH_API_URL', 'https://api.x.ai/v1/live-search') # TODO: Update with official endpoint
 
-# Padconfiguratie voor cache
-# __file__ is de huidige bestandsnaam. os.path.dirname haalt de map op.
-# os.path.abspath maakt er een absoluut pad van.
-# '..' gaat één map omhoog (van 'core' naar de projectroot).
-# os.path.join voegt dan 'data', 'cache' en 'live_search_cache.json' toe.
-CACHE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'data', 'cache')
-CACHE_FILE = os.path.join(CACHE_DIR, 'live_search_cache.json')
+# Padconfiguratie voor cache met pathlib
+CORE_DIR = Path(__file__).resolve().parent
+PROJECT_ROOT_DIR = CORE_DIR.parent # Assumes 'core' is directly under project root
+
+# Cache directory: <project_root>/data/cache
+# This differs from user_data for other memory files. If this is intentional, keep it.
+# If it should be in user_data, change to: PROJECT_ROOT_DIR / 'user_data' / 'cache'
+CACHE_DIR = (PROJECT_ROOT_DIR / 'data' / 'cache').resolve()
+CACHE_FILE = (CACHE_DIR / 'live_search_cache.json').resolve()
 CACHE_VALID_MINUTES = 5
 
-os.makedirs(CACHE_DIR, exist_ok=True) # Zorg dat de cache map bestaat
+CACHE_DIR.mkdir(parents=True, exist_ok=True) # Zorg dat de cache map bestaat
 
 class GrokSentimentFetcher:
     """
@@ -46,18 +50,30 @@ class GrokSentimentFetcher:
     def _load_cache(self) -> Dict[str, Any]:
         """Laad de cache vanuit een JSON-bestand."""
         try:
-            with open(CACHE_FILE, 'r', encoding='utf-8') as f:
-                return json.load(f)
-        except (FileNotFoundError, json.JSONDecodeError):
+            if CACHE_FILE.exists() and CACHE_FILE.stat().st_size > 0:
+                with CACHE_FILE.open('r', encoding='utf-8') as f:
+                    return json.load(f)
+            return {} # Return empty if not exists or empty
+        except FileNotFoundError: # Should be caught by .exists()
+            logger.info(f"Cache file {CACHE_FILE} not found. Returning empty cache.")
             return {}
+        except json.JSONDecodeError:
+            logger.warning(f"Fout bij decoderen JSON uit cache file {CACHE_FILE}. Returning empty cache.", exc_info=True)
+            return {}
+        except Exception as e:
+            logger.error(f"Onverwachte fout bij laden cache {CACHE_FILE}: {e}", exc_info=True)
+            return {}
+
 
     def _save_cache(self, cache_data: Dict[str, Any]):
         """Sla de cache op naar een JSON-bestand."""
         try:
-            with open(CACHE_FILE, 'w', encoding='utf-8') as f:
+            with CACHE_FILE.open('w', encoding='utf-8') as f:
                 json.dump(cache_data, f, indent=2)
         except IOError as e:
-            logger.error(f"Fout bij opslaan cache bestand: {e}")
+            logger.error(f"Fout bij opslaan cache bestand naar {CACHE_FILE}: {e}", exc_info=True)
+        except Exception as e:
+            logger.error(f"Onverwachte algemene fout bij opslaan cache naar {CACHE_FILE}: {e}", exc_info=True)
 
     async def fetch_live_search_data(self, symbol: str, perform_fetch: bool = True) -> List[Dict[str, Any]]:
         """
@@ -145,20 +161,25 @@ class GrokSentimentFetcher:
             return processed_results
 
         except requests.exceptions.RequestException as e:
-            logger.error(f"[GrokSentimentFetcher] ❌ Fout bij aanroep Grok Live Search API: {e}")
+            logger.error(f"[GrokSentimentFetcher] ❌ Fout bij aanroep Grok Live Search API: {e}", exc_info=True)
             return []
         except json.JSONDecodeError as e:
-            logger.error(f"[GrokSentimentFetcher] ❌ Fout bij parseren JSON respons: {e}. Raw response: {response.text if 'response' in locals() else 'N/A'}")
+            logger.error(f"[GrokSentimentFetcher] ❌ Fout bij parseren JSON respons: {e}. Raw response: {response.text if 'response' in locals() else 'N/A'}", exc_info=True)
             return []
         except Exception as e:
-            logger.error(f"[GrokSentimentFetcher] ❌ Onverwachte fout: {e}")
+            logger.error(f"[GrokSentimentFetcher] ❌ Onverwachte fout: {e}", exc_info=True)
             return []
 
 # Voorbeeld van hoe je het zou kunnen gebruiken (voor testen)
 if __name__ == "__main__":
     # Corrected path for .env when running this script directly
-    dotenv_path = os.path.join(os.path.dirname(__file__), '..', '.env')
-    dotenv.load_dotenv(dotenv_path)
+    # CORE_DIR and PROJECT_ROOT_DIR are defined at the top
+    dotenv_path = PROJECT_ROOT_DIR / '.env'
+    if dotenv_path.exists():
+        dotenv.load_dotenv(dotenv_path)
+    else:
+        logger.warning(f".env file not found at {dotenv_path} for __main__ test run.")
+
 
     async def run_test_grok_sentiment_fetcher():
         try:
@@ -166,9 +187,9 @@ if __name__ == "__main__":
             test_symbol = 'ETH' # Gebruik een echt token om te testen
 
             print(f"\n--- Test GrokSentimentFetcher voor {test_symbol} ---")
-            # Create dummy cache dir for testing if it does not exist
-            if not os.path.exists(CACHE_DIR):
-                os.makedirs(CACHE_DIR)
+            # CACHE_DIR is already a Path object and created at the top
+            if not CACHE_DIR.exists(): # Should already exist due to top-level mkdir
+                CACHE_DIR.mkdir(parents=True, exist_ok=True)
                 print(f"Created cache directory at {CACHE_DIR} for testing.")
 
             sentiment_data = await fetcher.fetch_live_search_data(test_symbol, perform_fetch=True)

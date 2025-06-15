@@ -1,17 +1,18 @@
 # core/pre_trainer.py
 import logging
-import os
+import os # Keep for os.getenv, os.remove if not fully replaced by Path.unlink
 import json
-from typing import Dict, Any, List, Optional # Added Optional
-from datetime import datetime, timedelta
+from pathlib import Path # Import Path
+from typing import Dict, Any, List, Optional
+from datetime import datetime, timedelta, timezone # Added timezone
 from datetime import datetime as dt
 import pandas as pd
-import pandas_ta as ta # Added for pandas_ta
+import pandas_ta as ta
 import numpy as np
 import asyncio
 from core.bitvavo_executor import BitvavoExecutor
-from core.params_manager import ParamsManager # Moved to top
-from core.cnn_patterns import CNNPatterns # Moved to top
+from core.params_manager import ParamsManager
+from core.cnn_patterns import CNNPatterns
 
 from freqtrade.configuration import Configuration
 from freqtrade.data.dataprovider import DataProvider
@@ -19,7 +20,7 @@ from freqtrade.exchange import TimeRange
 from strategies.DUOAI_Strategy import DUOAI_Strategy
 
 import dotenv
-import shutil
+import shutil # Keep for rmtree
 
 # Scikit-learn imports
 from sklearn.model_selection import TimeSeriesSplit, train_test_split
@@ -37,65 +38,78 @@ if TYPE_CHECKING:
     from core.cnn_patterns import CNNPatterns # Forward declaration for type hint
 
 logger = logging.getLogger(__name__)
-logger.setLevel(logging.INFO)
+# logger.setLevel(logging.INFO) # Logging level configured by application
 
-# Sentinel object for constructor arguments (if used by other methods, keep; otherwise can be removed if only __init__ changes)
+# Sentinel object (if still needed, otherwise remove)
 _SENTINEL = object()
 
+# Define paths using pathlib
+CORE_DIR = Path(__file__).resolve().parent
+PROJECT_ROOT_DIR = CORE_DIR.parent # Assumes 'core' is directly under project root
 
-MEMORY_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'memory')
-PRETRAIN_LOG_FILE = os.path.join(MEMORY_DIR, 'pre_train_log.json')
-TIME_EFFECTIVENESS_FILE = os.path.join(MEMORY_DIR, 'time_effectiveness.json')
-# MODELS_DIR is now defined in __init__ based on config or default user_data
-MARKET_REGIMES_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'data', 'market_regimes.json')
+# Memory directory within user_data at project root
+USER_DATA_MEMORY_DIR = PROJECT_ROOT_DIR / 'user_data' / 'memory'
+PRETRAIN_LOG_FILE = USER_DATA_MEMORY_DIR / 'pre_train_log.json'
+TIME_EFFECTIVENESS_FILE = USER_DATA_MEMORY_DIR / 'time_effectiveness.json'
 
-os.makedirs(MEMORY_DIR, exist_ok=True)
-# os.makedirs(MODELS_DIR, exist_ok=True) # MODELS_DIR creation moved to __init__
-os.makedirs(os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'data'), exist_ok=True)
+# Data directory: MARKET_REGIMES_FILE was originally in core/../data, so PROJECT_ROOT_DIR/data
+# If it's meant to be in user_data, this should be USER_DATA_DATA_DIR.
+# For now, matching original relative location from project root.
+STATIC_DATA_DIR = PROJECT_ROOT_DIR / 'data'
+MARKET_REGIMES_FILE = STATIC_DATA_DIR / 'market_regimes.json'
+
+
+# Ensure base directories exist
+USER_DATA_MEMORY_DIR.mkdir(parents=True, exist_ok=True)
+STATIC_DATA_DIR.mkdir(parents=True, exist_ok=True) # For MARKET_REGIMES_FILE if it's there
+
 
 class PreTrainer:
     def __init__(self, config: Dict[str, Any]):
         self.config = config
-        self.params_manager = ParamsManager() # Initialize ParamsManager, potentially pass config if needed
+        self.params_manager = ParamsManager()
         logger.info("ParamsManager initialized in PreTrainer.")
 
-        # BitvavoExecutor and CNNPatternDetector might be needed by other methods.
-        # For now, initialize them as None or based on config if specified.
-        # This part depends on how much of the old functionality is retained vs. replaced by the new `pretrain` flow.
-        # For the specific subtask, only config is mandatory for __init__.
         self.bitvavo_executor: Optional[BitvavoExecutor] = None
         if self.config.get('exchange', {}).get('name', '').lower() == 'bitvavo':
-             # Attempt to initialize if API keys might be in config or .env
             try:
-                self.bitvavo_executor = BitvavoExecutor(params_manager=self.params_manager) # Pass params_manager
+                self.bitvavo_executor = BitvavoExecutor(params_manager=self.params_manager)
                 logger.info("BitvavoExecutor initialized in PreTrainer.")
             except ValueError as e:
-                logger.warning(f"PreTrainer: BitvavoExecutor could not be initialized: {e}. Live data fetching might be unavailable.")
+                logger.warning(f"PreTrainer: BitvavoExecutor could not be initialized: {e}. Live data fetching might be unavailable.", exc_info=True)
+            except Exception as e_gen: # Catch other potential init errors
+                logger.error(f"PreTrainer: Unexpected error initializing BitvavoExecutor: {e_gen}", exc_info=True)
 
-        # CNNPatterns might be passed or instantiated if PreTrainer methods rely on it directly
-        # For the new `pretrain` method, cnn_patterns_instance is passed as an argument.
-        self.cnn_pattern_detector: Optional[CNNPatterns] = None # Placeholder for now.
 
-        # Define models_dir, e.g., user_data/models relative to the project root
-        self.models_dir = self.config.get("user_data_dir", "user_data") + "/models/cnn_pretrainer" # More specific subdirectory
+        self.cnn_pattern_detector: Optional[CNNPatterns] = None
+
+        # Define models_dir based on user_data_dir from config, resolve to absolute path
+        user_data_root_str = self.config.get("user_data_dir", "user_data")
+        user_data_root_path = Path(user_data_root_str)
+        if not user_data_root_path.is_absolute():
+            user_data_root_path = PROJECT_ROOT_DIR / user_data_root_path
+
+        self.models_dir = (user_data_root_path / "models" / "cnn_pretrainer").resolve()
 
         try:
-            os.makedirs(self.models_dir, exist_ok=True)
-            logger.info(f"PreTrainer initialized. Models will be saved in: {os.path.abspath(self.models_dir)}")
+            self.models_dir.mkdir(parents=True, exist_ok=True)
+            logger.info(f"PreTrainer initialized. Models will be saved in: {self.models_dir}")
         except Exception as e:
-            logger.error(f"Could not create models directory {self.models_dir}: {e}")
+            logger.error(f"Could not create models directory {self.models_dir}: {e}", exc_info=True)
 
-        # Load market regimes (remains the same)
         self.market_regimes = {}
         try:
-            if os.path.exists(MARKET_REGIMES_FILE):
-                with open(MARKET_REGIMES_FILE, 'r') as f:
+            if MARKET_REGIMES_FILE.exists():
+                with MARKET_REGIMES_FILE.open('r', encoding='utf-8') as f:
                     self.market_regimes = json.load(f)
                 logger.info(f"Marktregimes geladen uit {MARKET_REGIMES_FILE}")
             else:
                 logger.warning(f"{MARKET_REGIMES_FILE} niet gevonden. Er worden geen specifieke marktregimes gebruikt.")
         except (FileNotFoundError, json.JSONDecodeError) as e:
-            logger.error(f"Fout bij laden/parsen {MARKET_REGIMES_FILE}: {e}.")
+            logger.error(f"Fout bij laden/parsen {MARKET_REGIMES_FILE}: {e}.", exc_info=True)
+            self.market_regimes = {}
+        except Exception as e_gen:
+            logger.error(f"Onverwachte fout bij laden market regimes {MARKET_REGIMES_FILE}: {e_gen}", exc_info=True)
             self.market_regimes = {}
 
         # Initialize Backtester - this might need adjustment based on what PreTrainer's role becomes.
@@ -115,32 +129,50 @@ class PreTrainer:
         try:
             # Construct a minimal config for DUOAI_Strategy and DataProvider
             # This uses the main PreTrainer config as a base.
+
+            # Ensure essential keys like 'user_data_dir' and 'stake_currency' are present.
+            # self.config is the config passed to PreTrainer's constructor.
+            # DUOAI_Strategy expects 'user_data_dir' and 'stake_currency' at the top level of its config.
+
+            # Start with a known set of essential parameters that Freqtrade strategies might need
+            # or that our specific strategy initialization/population might need.
+            required_keys_for_strategy = {
+                'user_data_dir': self.config.get('user_data_dir', str(PROJECT_ROOT_DIR / 'user_data')), # Default if not in PreTrainer's config
+                'stake_currency': self.config.get('stake_currency', 'USDT'), # Default if not in PreTrainer's config
+                # Add any other known critical keys that DUOAI_Strategy might access directly from self.config
+            }
+
             strategy_processing_config = {
-                **self.config, # Spread main config to get user_data_dir, stake_currency etc.
-                "timeframe": timeframe,
-                "exchange": {
-                    "name": "offline_exchange", # Dummy exchange name for offline processing
-                    "pair_whitelist": [pair],
+                **required_keys_for_strategy, # Ensure critical keys are present
+                **self.config, # Spread PreTrainer's main config (might override above if they exist there)
+                "timeframe": timeframe, # Specific to this call
+                "exchange": { # Override exchange settings for offline processing
+                    "name": "offline_exchange",
+                    "pair_whitelist": [pair], # Critical for DataProvider to know which pair's data to handle
                     "pair_blacklist": []
                 },
-                "pairlists": [{"method": "StaticPairList", "config": {"pairs": [pair]}}], # Ensure pair is in whitelist
-                "strategy": "DUOAI_Strategy", # Name of the strategy class
-                "bot_name": "pretrainer_indicator_helper",
-                "pair_whitelist": [pair],
-                "config_pair_whitelist": [pair], # Explicitly for DUOAI_Strategy if it uses this
-                "dry_run": True, # Essential for offline indicator population
-                "process_only_new_candles": False, # Ensure all candles are processed
-                # DUOAI_Strategy.informative_timeframes is a class variable, strategy will access it.
+                "pairlists": [{"method": "StaticPairList", "config": {"pairs": [pair]}}], # Standard for Freqtrade
+                "strategy": "DUOAI_Strategy", # Strategy name for Freqtrade context
+                "bot_name": "pretrainer_indicator_helper", # For logging or context
+
+                # Runtime operational settings for Freqtrade core
+                "pair_whitelist": [pair], # Active pair whitelist for this operation
+                "config_pair_whitelist": [pair], # This is what DUOAI_Strategy.__init__ uses for self.config_pair_whitelist
+
+                "dry_run": True,
+                "process_only_new_candles": False,
             }
+
             # Remove keys that might cause issues if not fully configured for a live bot run
             strategy_processing_config.pop('telegram', None)
             strategy_processing_config.pop('api_server', None)
-
+            # Remove other potentially problematic keys if they are not needed for indicator population
+            # Example: strategy_processing_config.pop('db_url', None) # if it causes issues and isn't needed
 
             ft_config_obj = Configuration.from_dict(strategy_processing_config)
-            # Ensure 'max_open_trades' is set if strategy uses it for anything during indicator population (unlikely but safe)
-            if 'max_open_trades' not in ft_config_obj:
-                ft_config_obj['max_open_trades'] = 10 # A sensible default
+
+            if 'max_open_trades' not in ft_config_obj: # Ensure this key exists
+                ft_config_obj['max_open_trades'] = 10
 
             strategy = DUOAI_Strategy(config=ft_config_obj)
             dataprovider = DataProvider(config=ft_config_obj, exchange=None) # No live exchange needed
@@ -225,11 +257,12 @@ class PreTrainer:
         # 5. Running the training loop.
         # 6. Saving the trained model and the scaler.
 
-        pair_tf_models_dir = os.path.join(self.models_dir, pair.replace('/', '_'), timeframe)
-        os.makedirs(pair_tf_models_dir, exist_ok=True)
+        # Use self.models_dir (which is already a Path object and absolute)
+        pair_tf_models_dir = (self.models_dir / pair.replace('/', '_') / timeframe).resolve()
+        pair_tf_models_dir.mkdir(parents=True, exist_ok=True)
 
-        model_save_path = os.path.join(pair_tf_models_dir, f"cnn_model_placeholder_{pair.replace('/', '_')}_{timeframe}.pth")
-        scaler_save_path = os.path.join(pair_tf_models_dir, f"scaler_placeholder_{pair.replace('/', '_')}_{timeframe}.json")
+        model_save_path = pair_tf_models_dir / f"cnn_model_placeholder_{pair.replace('/', '_')}_{timeframe}.pth"
+        scaler_save_path = pair_tf_models_dir / f"scaler_placeholder_{pair.replace('/', '_')}_{timeframe}.json"
 
         logger.info(f"Placeholder: Model would be saved to {model_save_path}")
         logger.info(f"Placeholder: Scaler would be saved to {scaler_save_path}")
@@ -244,21 +277,27 @@ class PreTrainer:
         Loads gold standard data for a given symbol, timeframe, and pattern type.
         Verifies that the loaded data contains all expected columns and sets the timestamp as index.
         """
-        gold_standard_path = self.params_manager.get_param("gold_standard_data_path")
-        if not gold_standard_path:
+        gold_standard_path_str = self.params_manager.get_param("gold_standard_data_path")
+        if not gold_standard_path_str:
             logger.debug("Gold standard data path not set in parameters. Skipping gold standard loading.")
             return None
 
+        gold_standard_base_path = Path(gold_standard_path_str)
+        if not gold_standard_base_path.is_absolute():
+            gold_standard_base_path = (PROJECT_ROOT_DIR / gold_standard_base_path).resolve()
+            logger.debug(f"Gold standard data path was relative, resolved to: {gold_standard_base_path}")
+
+
         symbol_sanitized = symbol.replace('/', '_')
         filename = f"{symbol_sanitized}_{timeframe}_{pattern_type}_gold.csv"
-        full_path = os.path.join(gold_standard_path, filename)
+        full_path = (gold_standard_base_path / filename).resolve()
 
-        if not os.path.exists(full_path):
+        if not full_path.exists():
             logger.debug(f"Gold standard data file not found: {full_path}")
             return None
 
         try:
-            df = pd.read_csv(full_path)
+            df = pd.read_csv(str(full_path))
             if df.empty:
                 logger.warning(f"Gold standard data file is empty: {full_path}")
                 return None
@@ -292,16 +331,16 @@ class PreTrainer:
             return df
 
         except FileNotFoundError:
-            logger.debug(f"Gold standard data file not found (should have been caught by os.path.exists, but good to handle): {full_path}")
+            logger.debug(f"Gold standard data file not found (should have been caught by .exists(), but good to handle): {full_path}")
             return None
         except pd.errors.EmptyDataError:
-            logger.warning(f"Gold standard data file is empty (pandas error): {full_path}")
+            logger.warning(f"Gold standard data file is empty (pandas error): {full_path}", exc_info=True)
             return None
         except ValueError as ve:
-            logger.error(f"ValueError processing gold standard data file {full_path}: {ve}")
+            logger.error(f"ValueError processing gold standard data file {full_path}: {ve}", exc_info=True)
             return None
         except Exception as e:
-            logger.error(f"An unexpected error occurred while loading gold standard data from {full_path}: {e}")
+            logger.error(f"An unexpected error occurred while loading gold standard data from {full_path}: {e}", exc_info=True)
             return None
 
     def _fetch_ohlcv_for_period_sync(self, symbol: str, timeframe: str, start_dt: dt, end_dt: dt) -> pd.DataFrame | None:
@@ -313,33 +352,30 @@ class PreTrainer:
 
         try:
             # These configurations should ideally come from self.config or be passed reliably
-            exchange_name = self.config.get("exchange", {}).get("name", "binance") # Default to 'binance' or a configured main exchange
-            user_data_dir = self.config.get("user_data_dir", "user_data")
+            exchange_name = self.config.get("exchange", {}).get("name", "binance")
+            user_data_dir_str = self.config.get("user_data_dir", "user_data")
 
-            # Construct the datadir path Freqtrade uses
-            datadir = os.path.join(user_data_dir, "data", exchange_name)
+            user_data_path = Path(user_data_dir_str)
+            if not user_data_path.is_absolute():
+                user_data_path = (PROJECT_ROOT_DIR / user_data_path).resolve()
 
-            if not os.path.isdir(datadir):
+            datadir = (user_data_path / "data" / exchange_name).resolve()
+
+            if not datadir.is_dir():
                  logger.warning(f"PreTrainer: Freqtrade data directory not found: {datadir}. "
                                f"Please ensure data is downloaded via 'freqtrade download-data --exchange {exchange_name}'.")
-                 # Depending on strictness, could return None here or let DataProvider try.
-                 # DataProvider might also log warnings if dir is missing.
 
-            # Minimal config for DataProvider
-            # Note: DataProvider might not strictly need "timeframe" in its config for historic_ohlcv
-            # if it's passed to the method, but good to be consistent.
             dp_config_dict = {
-                "user_data_dir": user_data_dir, # For resolving datadir if not absolute
+                "user_data_dir": str(user_data_path),
                 "exchange": {
                     "name": exchange_name,
-                    "pair_whitelist": [symbol] # Needs the pair to fetch
+                    "pair_whitelist": [symbol]
                 },
-                "datadir": datadir, # Explicitly pass datadir
-                # "timeframe": timeframe # Optional here, as passed to historic_ohlcv
+                "datadir": str(datadir),
             }
             ft_dp_config = Configuration.from_dict(dp_config_dict)
 
-            dataprovider = DataProvider(config=ft_dp_config, exchange=None) # exchange=None for offline data access
+            dataprovider = DataProvider(config=ft_dp_config, exchange=None)
 
             # Create TimeRange object
             # TimeRange expects timestamps in seconds
@@ -420,8 +456,9 @@ class PreTrainer:
                 regime_specific_period_dfs = []
                 for period in periods:
                     try:
-                        regime_start_dt = dt.strptime(period['start_date'], "%Y-%m-%d")
-                        regime_end_dt = dt.strptime(period['end_date'], "%Y-%m-%d").replace(hour=23, minute=59, second=59, microsecond=999999)
+                        regime_start_dt = dt.strptime(period['start_date'], "%Y-%m-%d").replace(tzinfo=timezone.utc)
+                        # Ensure end_dt is also UTC and represents end of the day in UTC
+                        regime_end_dt = dt.strptime(period['end_date'], "%Y-%m-%d").replace(hour=23, minute=59, second=59, microsecond=999999, tzinfo=timezone.utc)
                         if regime_start_dt > regime_end_dt:
                             logger.warning(f"Ongeldige periode in regimes voor {symbol} {regime_category}: start {period['start_date']} is na end {period['end_date']}. Overslaan.")
                             continue
@@ -455,13 +492,13 @@ class PreTrainer:
                 return {"all": pd.DataFrame()}
 
             try:
-                start_dt_global = dt.strptime(global_start_date_str, "%Y-%m-%d")
-                end_dt_global = dt.now()
+                start_dt_global = dt.strptime(global_start_date_str, "%Y-%m-%d").replace(tzinfo=timezone.utc)
+                end_dt_global = datetime.now(timezone.utc) # Use datetime.now(timezone.utc)
                 if global_end_date_str:
-                    end_dt_global = dt.strptime(global_end_date_str, "%Y-%m-%d").replace(hour=23, minute=59, second=59, microsecond=999999)
+                    end_dt_global = dt.strptime(global_end_date_str, "%Y-%m-%d").replace(hour=23, minute=59, second=59, microsecond=999999, tzinfo=timezone.utc)
 
                 if start_dt_global > end_dt_global:
-                    logger.error(f"Global startdatum {global_start_date_str} is na sluttdato {global_end_date_str}.")
+                    logger.error(f"Global startdatum {global_start_date_str} is na einddatum {global_end_date_str if global_end_date_str else 'nu'}.")
                     return {"all": pd.DataFrame()}
 
                 global_df = await asyncio.to_thread(self._fetch_ohlcv_for_period_sync, symbol, timeframe, start_dt_global, end_dt_global)
@@ -472,7 +509,7 @@ class PreTrainer:
                 else:
                     logger.warning(f"Geen data gehaald voor {symbol}-{timeframe} met globale periode.")
             except ValueError as e:
-                logger.error(f"Ugyldig globalt datoformat: {e}.")
+                logger.error(f"Ugyldig globalt datoformat: {e}.", exc_info=True)
                 return {"all": pd.DataFrame()}
 
         # Process "all" data (concatenated from all sources)
@@ -485,11 +522,12 @@ class PreTrainer:
                  # else: concatenated_df will be empty or problematic, handled below
             if not concatenated_df.index.is_unique:
                 concatenated_df = concatenated_df[~concatenated_df.index.duplicated(keep='first')]
-                logger.info(f"Duplikaten verwijderd van geconcateneerde data. Resterende candles: {len(concatenated_df)}")
+                logger.info(f"Removed duplicate indices from concatenated_df for {symbol} ({timeframe}).")
             concatenated_df.sort_index(inplace=True)
+            logger.info(f"Concatenated_df for {symbol} ({timeframe}) sorted. Shape: {concatenated_df.shape}")
             concatenated_df.attrs['timeframe'] = timeframe
             concatenated_df.attrs['pair'] = symbol
-            logger.info(f"Totaal {len(concatenated_df)} unieke candles voor 'all' data voor {symbol} ({timeframe}).")
+            # logger.info(f"Totaal {len(concatenated_df)} unieke candles voor 'all' data voor {symbol} ({timeframe}).") # Redundant with shape log
 
             # Apply strategy indicators to the 'all' data
             if concatenated_df is not None and not concatenated_df.empty:
@@ -516,7 +554,9 @@ class PreTrainer:
 
                 if not regime_df.index.is_unique:
                     regime_df = regime_df[~regime_df.index.duplicated(keep='first')]
+                    logger.info(f"Removed duplicate indices from regime_df for {symbol} ({timeframe}, {regime_cat}).")
                 regime_df.sort_index(inplace=True)
+                logger.info(f"Regime_df for {symbol} ({timeframe}, {regime_cat}) sorted. Shape: {regime_df.shape}")
                 regime_df.attrs['timeframe'] = timeframe
                 regime_df.attrs['pair'] = symbol
 
@@ -529,7 +569,7 @@ class PreTrainer:
                     )
 
                 processed_regime_dfs[regime_cat] = regime_df
-                logger.info(f"Data voor regime '{regime_cat}' ({symbol}-{timeframe}) verwerkt. {len(regime_df)} candles.")
+                logger.info(f"Data voor regime '{regime_cat}' ({symbol}-{timeframe}) verwerkt. Shape: {regime_df.shape}")
             else:
                 processed_regime_dfs[regime_cat] = pd.DataFrame()
                 logger.warning(f"Lege DataFrame voor regime '{regime_cat}' ({symbol}-{timeframe}) na verwerking.")
@@ -618,38 +658,67 @@ class PreTrainer:
             logger.warning(f"Form detection niet geïmplementeerd voor '{pattern_type}' voor {pair}-{tf}. Defaulting all to True.")
             dataframe['form_pattern_detected'] = True
 
-        if min_pattern_window_size > 0 and not dataframe['form_pattern_detected'].all():
-            df_for_detection = dataframe.reset_index() # Requires 'date' or 'timestamp' column if index is DatetimeIndex
-            if not isinstance(dataframe.index, pd.DatetimeIndex): # Should be DatetimeIndex
-                 logger.error("DataFrame index is niet DatetimeIndex vóór form pattern detection loop.")
-            # if 'date' not in df_for_detection.columns and dataframe.index.name == 'timestamp': # common after set_index
-            #    df_for_detection.rename(columns={'timestamp':'date'}, inplace=True) # ensure 'date' exists if reset_index loses it
+        if min_pattern_window_size > 0: # Proceed only if pattern detection is meaningful
+            if self.cnn_pattern_detector is None:
+                logger.error("CNNPatternDetector not initialized in PreTrainer. Cannot detect form patterns.")
+                dataframe['form_pattern_detected'] = False # Ensure column exists
+            elif dataframe.empty or len(dataframe) < min_pattern_window_size:
+                logger.info(f"DataFrame too short for pattern detection window {min_pattern_window_size}. No patterns detected.")
+                dataframe['form_pattern_detected'] = False
+            else:
+                # Helper function for rolling apply. It uses `dataframe` and `pattern_type` from the outer scope.
+                def _apply_pattern_detection_to_window(window_dummy_series: pd.Series) -> bool:
+                    # window_dummy_series is a rolling window of a single column (e.g. 'close').
+                    # Its index can be used to slice the original multi-column DataFrame.
+                    if len(window_dummy_series) < min_pattern_window_size:
+                        return False # Should be handled by min_periods in rolling()
 
-            for i in range(min_pattern_window_size - 1, len(df_for_detection)):
-                # Ensure we are using original DataFrame's index for assignment
-                original_df_index_at_i = dataframe.index[i]
+                    # Get the actual window from the original 'dataframe' using the window's index
+                    # The window passed to apply() has an index that corresponds to the original DataFrame.
+                    # The slice should be from the start of this window's index to the end.
+                    start_index_val = window_dummy_series.index[0]
+                    end_index_val = window_dummy_series.index[-1]
 
-                window_df_slice = df_for_detection.iloc[max(0, i - min_pattern_window_size + 1) : i + 1]
-                if len(window_df_slice) < min_pattern_window_size: continue
+                    # Slice the original dataframe using .loc to get the multi-column window
+                    actual_window_df = dataframe.loc[start_index_val:end_index_val]
 
-                # _dataframe_to_candles expects 'open', 'high', 'low', 'close', 'volume', 'date'
-                # Ensure 'date' column exists if it's not the index before this call, or adapt _dataframe_to_candles
-                # Current _dataframe_to_candles uses .to_dict(orient='records'), so column names matter.
-                # Assuming OHLCV are present. If 'date' is index, reset_index() would make it a column.
-                # If index is already 'date', it should be fine.
-                # If index is 'timestamp', reset_index() makes it a column.
+                    # _dataframe_to_candles handles DataFrames with DatetimeIndex by resetting index internally
+                    candle_list = self.cnn_pattern_detector._dataframe_to_candles(actual_window_df)
 
-                candle_list = self.cnn_pattern_detector._dataframe_to_candles(window_df_slice)
-                detected = False
-                if pattern_type == 'bullFlag': detected = self.cnn_pattern_detector.detect_bull_flag(candle_list)
-                elif pattern_type == 'bearishEngulfing':
-                    eng_type = self.cnn_pattern_detector._detect_engulfing(candle_list, "bearish")
-                    if eng_type == "bearishEngulfing": detected = True
+                    if not candle_list or len(candle_list) < min_pattern_window_size:
+                        # This check might be redundant if min_periods is set correctly in rolling()
+                        # and actual_window_df correctly reflects the window size.
+                        return False
 
-                if detected: dataframe.loc[original_df_index_at_i, 'form_pattern_detected'] = True
+                    detected = False
+                    if pattern_type == 'bullFlag':
+                        detected = self.cnn_pattern_detector.detect_bull_flag(candle_list)
+                    elif pattern_type == 'bearishEngulfing':
+                        engulfing_type = self.cnn_pattern_detector._detect_engulfing(candle_list, "bearish")
+                        detected = (engulfing_type == "bearishEngulfing")
+                    return detected
+
+                # Apply this to a single column (e.g., 'close') to iterate through windows.
+                # `min_periods` ensures the function is only called on full windows.
+                # `raw=False` ensures the applied function receives a Series with an index.
+                # `engine='python'` is required for apply functions that are not simple reductions.
+                # This approach, while using rolling().apply(), might not be more performant
+                # than a direct loop for this specific type of operation due to the reconstruction
+                # of DataFrame slices inside the applied function.
+                detected_series = dataframe['close'].rolling(
+                    window=min_pattern_window_size,
+                    min_periods=min_pattern_window_size # Ensures func only called on full windows
+                ).apply(_apply_pattern_detection_to_window, raw=False, engine='python')
+
+                dataframe['form_pattern_detected'] = detected_series.fillna(False).astype(bool)
+        else: # No meaningful pattern detection for this pattern_type (e.g. window size is 0)
+            dataframe['form_pattern_detected'] = True # Default to True as per original logic
+            if pattern_type not in ['bullFlag', 'bearishEngulfing']: # Log only if it's an unknown type
+                 logger.warning(f"Form detection not implemented or window size is 0 for '{pattern_type}' on {pair}-{tf}. Defaulting 'form_pattern_detected' to True.")
+
 
         form_detected_count = dataframe['form_pattern_detected'].sum()
-        logger.info(f"For pattern '{pattern_type}' on {pair}-{tf}, {form_detected_count} samples initially identified by form detection.")
+        logger.info(f"For pattern '{pattern_type}' on {pair}-{tf}, {form_detected_count} samples identified by form detection logic.")
 
         # 4. Automatic Labeling for non-gold-labeled data
         configs = self.params_manager.get_param('pattern_labeling_configs')
@@ -710,19 +779,85 @@ class PreTrainer:
         total_positive_labels = dataframe[label_column_name].sum()
         logger.info(f"Totaal {total_positive_labels} positieve labels voor {pair}-{tf}-{pattern_type} na gold en/of automatische labeling.")
 
-        # Cleanup
-        feature_columns = ['open', 'high', 'low', 'close', 'volume', 'rsi', 'macd', 'macdsignal', 'macdhist', 'bb_lowerband', 'bb_middleband', 'bb_upperband']
+        # Cleanup and NaN/inf handling
+        initial_row_count = len(dataframe)
+        logger.info(f"DataFrame shape before NaN/inf handling and dropna: {dataframe.shape} for {pair}-{tf}-{pattern_type}")
+
+        # Define a more comprehensive list of feature columns expected from DUOAI_Strategy.
+        # This should include base OHLCV, primary indicators, EMAs, volume means, and candlestick patterns.
+        # Also, corresponding columns from informative timeframes (e.g., '1h_rsi', '4h_ema_10').
+        # For brevity here, we'll list common base ones and note that a dynamic approach might be better.
+        base_feature_columns = [
+            'open', 'high', 'low', 'close', 'volume',
+            'rsi', 'macd', 'macdsignal', 'macdhist',
+            'bb_lowerband', 'bb_middleband', 'bb_upperband',
+            'ema_10', 'ema_25', 'ema_50', # Assuming these are fixed EMA periods in DUOAI_Strategy
+            'volume_mean_20' # Example volume mean
+        ]
+        # Add candlestick pattern columns (assuming they are like 'cdl_DOJI', 'cdl_ENGULFING')
+        # A more robust way would be to get column names matching 'cdl_*' pattern.
+        candlestick_cols = [col for col in dataframe.columns if col.startswith('cdl_')]
+
+        # Add informative timeframe features. Example for '1h': '1h_rsi', '1h_ema_10', etc.
+        # This part needs to be dynamic based on `self.informative_timeframes` in DUOAI_Strategy.
+        informative_feature_columns = []
+        # Example: if '1h' is an informative timeframe and 'rsi' is a base feature:
+        # informative_feature_columns.append('1h_rsi')
+        # This should ideally be built by iterating through strategy's informative TFs and its indicator list.
+        # For now, we'll use a placeholder or rely on `select_dtypes(include=np.number)` later if this list isn't exhaustive.
+        # However, explicitly listing critical features for dropna is safer.
+        # Let's assume DUOAI_Strategy.informative_timeframes = ['1m', '5m', '15m', '1h', '4h', '1d']
+        # And base indicators are somewhat fixed.
+        for info_tf_prefix in ['1m', '5m', '15m', '1h', '4h', '1d']: # From DUOAI_Strategy.informative_timeframes
+            if f"{info_tf_prefix}_close" in dataframe.columns: # Check if informative timeframe was merged
+                for base_col in base_feature_columns: # Replicate base features for info_tf
+                     informative_feature_columns.append(f"{info_tf_prefix}_{base_col}")
+                for cdl_col in candlestick_cols: # Replicate cdl patterns for info_tf
+                    informative_feature_columns.append(f"{info_tf_prefix}_{cdl_col}")
+
+
+        # Complete list of features to check for NaNs
+        all_feature_columns_to_check = base_feature_columns + candlestick_cols + informative_feature_columns
+        # Filter this list to only include columns actually present in the dataframe
+        all_feature_columns_present = [col for col in all_feature_columns_to_check if col in dataframe.columns]
+
+        logger.info(f"Identified {len(all_feature_columns_present)} feature columns for NaN/inf check.")
+        # It's generally better to drop rows if critical features or the label are NaN.
+        # For some non-critical features, fillna might be an option, but requires careful consideration.
+        # Recommendation: Stick with dropna for core features and labels.
+        # For features where fillna might be acceptable (e.g., some non-critical indicator),
+        # it should be done *before* this stage or very selectively.
+        # For now, we will use dropna on all identified feature columns + label.
+
+        # Handle infinity values first
+        dataframe.replace([np.inf, -np.inf], np.nan, inplace=True)
+        rows_after_inf_handling = len(dataframe)
+        if initial_row_count != rows_after_inf_handling: # This condition is actually for after dropna.
+             # Log if inf values were replaced (though count won't change until dropna)
+             pass # No direct row change from replace to NaN, only value change.
+
         # Ensure label_column_name exists, even if all labeling failed (it's initialized to 0)
         if label_column_name not in dataframe.columns: dataframe[label_column_name] = 0
 
-        cols_to_drop_for_na = [label_column_name, 'future_high', 'future_low'] + feature_columns
-        dataframe.dropna(subset=cols_to_drop_for_na, inplace=True)
+        # Columns to use for dropna: all identified feature columns + the label
+        cols_to_dropna_on = [label_column_name] + all_feature_columns_present
+        # Also include 'future_high' and 'future_low' as they are used for labeling logic before this cleanup.
+        if 'future_high' in dataframe.columns: cols_to_dropna_on.append('future_high')
+        if 'future_low' in dataframe.columns: cols_to_dropna_on.append('future_low')
 
-        # Drop helper and intermediate columns
+        # Ensure only existing columns are in the subset for dropna
+        cols_to_dropna_on = [col for col in cols_to_dropna_on if col in dataframe.columns]
+
+        dataframe.dropna(subset=cols_to_dropna_on, inplace=True)
+        rows_after_dropna = len(dataframe)
+        logger.info(f"DataFrame shape after NaN/inf handling and dropna: {dataframe.shape}. "
+                    f"Rows removed: {initial_row_count - rows_after_dropna} for {pair}-{tf}-{pattern_type}")
+
+        # Drop helper and intermediate columns (already present)
         columns_to_drop_finally = ['future_high', 'future_low', 'form_pattern_detected', 'gold_label_applied']
         dataframe.drop(columns=[col for col in columns_to_drop_finally if col in dataframe.columns], inplace=True, errors='ignore')
 
-        logger.info(f"Trainingsdata voorbereid voor {pattern_type} ({pair}-{tf}) met {len(dataframe)} samples. Label: {label_column_name}, Positives: {dataframe[label_column_name].sum()}")
+        logger.info(f"Trainingsdata voorbereid voor {pattern_type} ({pair}-{tf}) met {len(dataframe)} samples. Label: {label_column_name}, Positives: {dataframe[label_column_name].sum() if label_column_name in dataframe else 'N/A'}")
         return dataframe
 
     async def train_ai_models(self, training_data: pd.DataFrame, symbol: str, timeframe: str, pattern_type: str, target_label_column: str, regime_name: str = "all"):
@@ -1007,14 +1142,25 @@ class PreTrainer:
 
             # Update model name prefix and paths to reflect HPO was run AND the regime
             model_name_prefix = f"{model_name_base}_hpo_{regime_name}"
-            model_save_path = os.path.join(model_dir, f'cnn_model_{pattern_type}_{current_arch_key_orig}_hpo_{regime_name}.pth')
-            scaler_save_path = os.path.join(model_dir, f'scaler_params_{pattern_type}_{current_arch_key_orig}_hpo_{regime_name}.json')
+            # model_dir is self.models_dir / symbol_sani / timeframe
+            # Ensure model_dir is correctly defined before this point; it seems to be missing in this specific method context
+            # Assuming model_dir should be derived similar to pair_tf_models_dir in pretrain()
+            # For now, this part of the logic might be flawed if model_dir is not passed or set for train_ai_models
+            # Let's assume self.models_dir is the base, and we need to construct the full path here.
+            current_model_dir = (self.models_dir / symbol.replace('/', '_') / timeframe).resolve()
+            current_model_dir.mkdir(parents=True, exist_ok=True) # Ensure it exists
+
+            model_save_path = current_model_dir / f'cnn_model_{pattern_type}_{current_arch_key_orig}_hpo_{regime_name}.pth'
+            scaler_save_path = current_model_dir / f'scaler_params_{pattern_type}_{current_arch_key_orig}_hpo_{regime_name}.json'
             logger.info(f"HPO uitgevoerd. Modelnaam prefix: {model_name_prefix}")
         else:
             # No HPO, use regime name in the prefix and paths
             model_name_prefix = f"{model_name_base}_{regime_name}"
-            model_save_path = os.path.join(model_dir, f'cnn_model_{pattern_type}_{current_arch_key_orig}_{regime_name}.pth')
-            scaler_save_path = os.path.join(model_dir, f'scaler_params_{pattern_type}_{current_arch_key_orig}_{regime_name}.json')
+            current_model_dir = (self.models_dir / symbol.replace('/', '_') / timeframe).resolve()
+            current_model_dir.mkdir(parents=True, exist_ok=True) # Ensure it exists
+
+            model_save_path = current_model_dir / f'cnn_model_{pattern_type}_{current_arch_key_orig}_{regime_name}.pth'
+            scaler_save_path = current_model_dir / f'scaler_params_{pattern_type}_{current_arch_key_orig}_{regime_name}.json'
             logger.info(f"Geen HPO uitgevoerd. Modelnaam prefix: {model_name_prefix}")
 
         logger.info(f"Start training PyTorch AI-model '{model_name_prefix}' ({regime_name} regime) met {len(training_data)} samples...")
@@ -1066,21 +1212,21 @@ class PreTrainer:
             logger.debug(f"Final Model - Epoch [{epoch+1}/{num_epochs}], {model_name_prefix}, Train Loss: {epoch_train_loss:.4f}, Val Loss: {current_metrics['loss']:.4f}, Acc: {current_metrics['accuracy']:.4f}, AUC: {current_metrics['auc']:.4f}")
             if current_metrics['loss'] < best_val_loss:
                 best_val_loss, best_metrics, epochs_no_improve = current_metrics['loss'], current_metrics, 0
-                torch.save(final_model.state_dict(), model_save_path)
+                torch.save(final_model.state_dict(), str(model_save_path)) # torch.save might need string path
                 logger.debug(f"Beste final model '{model_name_prefix}' opgeslagen (Epoch {epoch+1}) naar {model_save_path}. Val Loss: {best_val_loss:.4f}")
             else:
                 epochs_no_improve += 1
                 if epochs_no_improve >= patience: logger.info(f"Early stopping final model '{model_name_prefix}' (Epoch {epoch+1})."); break
         try:
-            if os.path.exists(model_save_path): logger.info(f"'{model_name_prefix}' final training voltooid. Model opgeslagen: {model_save_path}")
+            if model_save_path.exists(): logger.info(f"'{model_name_prefix}' final training voltooid. Model opgeslagen: {model_save_path}")
             else: logger.warning(f"'{model_name_prefix}' final training voltooid. Geen model opgeslagen: {model_save_path}.")
             scaler_params_to_save = {'feature_names_in_':feature_names_in_, 'min_':min_, 'scale_':scale_, 'sequence_length':sequence_length}
-            with open(scaler_save_path, 'w') as f: json.dump(scaler_params_to_save, f, indent=4)
+            with scaler_save_path.open('w', encoding='utf-8') as f: json.dump(scaler_params_to_save, f, indent=4)
             logger.info(f"Scaler params '{model_name_prefix}' opgeslagen: {scaler_save_path}")
-        except Exception as e: logger.error(f"Fout opslaan final model/scaler '{model_name_prefix}': {e}")
+        except Exception as e: logger.error(f"Fout opslaan final model/scaler '{model_name_prefix}': {e}", exc_info=True)
 
         await asyncio.to_thread(self._log_pretrain_activity, model_type=model_name_prefix, regime_name=regime_name, data_size=len(X_train_full)+len(X_val_full),
-                                model_path_saved=model_save_path, scaler_params_path_saved=scaler_save_path,
+                                model_path_saved=str(model_save_path), scaler_params_path_saved=str(scaler_save_path), # Log string paths
                                 cv_results=cv_results, **best_metrics)
         logger.info(f"Pre-training {model_name_prefix} ({regime_name} regime) voltooid. Beste Val Loss: {best_metrics.get('loss', float('inf')):.4f}, Acc: {best_metrics.get('accuracy', 0.0):.4f}")
         return best_metrics.get('loss')
@@ -1104,30 +1250,45 @@ class PreTrainer:
             entry['cross_validation_results'] = cv_results
         logs = []
         try:
-            if os.path.exists(PRETRAIN_LOG_FILE) and os.path.getsize(PRETRAIN_LOG_FILE) > 0:
-                with open(PRETRAIN_LOG_FILE, 'r', encoding='utf-8') as f: logs = json.load(f)
-                if not isinstance(logs, list): logs = [logs]
+            if PRETRAIN_LOG_FILE.exists() and PRETRAIN_LOG_FILE.stat().st_size > 0:
+                with PRETRAIN_LOG_FILE.open('r', encoding='utf-8') as f: logs = json.load(f)
+                if not isinstance(logs, list): logs = [logs] # Handle case where file might contain a single dict
             logs.append(entry)
-            with open(PRETRAIN_LOG_FILE, 'w', encoding='utf-8') as f: json.dump(logs, f, indent=2)
-        except Exception as e: logger.error(f"Fout bij loggen pre-train activiteit: {e}")
+            with PRETRAIN_LOG_FILE.open('w', encoding='utf-8') as f: json.dump(logs, f, indent=2)
+        except Exception as e:
+            logger.error(f"Fout bij loggen pre-train activiteit naar {PRETRAIN_LOG_FILE}: {e}", exc_info=True)
 
     async def analyze_time_of_day_effectiveness(self, historical_data: pd.DataFrame, strategy_id: str) -> Dict[str, Any]:
         logger.info(f"Analyseren tijd-van-dag effectiviteit voor strategie {strategy_id}...")
-        if historical_data.empty: return {}
+        if historical_data.empty:
+            logger.info("Historische data is leeg. Kan tijd-van-dag effectiviteit niet analyseren.")
+            return {}
         label_to_analyze = next((lbl for lbl in ['bullFlag_label', 'bearishEngulfing_label'] if lbl in historical_data.columns), None)
         if not label_to_analyze:
             label_to_analyze = next((col for col in historical_data.columns if col.endswith('_label')), None)
-            if label_to_analyze: logger.info(f"Generiek label '{label_to_analyze}' gevonden voor tijd-van-dag analyse.")
-            else: logger.warning("Geen label kolom (*_label) gevonden voor tijd-van-dag analyse."); return {}
-        if not isinstance(historical_data.index, pd.DatetimeIndex):
-            logger.error("DataFrame index geen DatetimeIndex. Kan uur niet extraheren."); return {}
-        df_copy = historical_data.copy(); df_copy['hour_of_day'] = df_copy.index.hour
-        time_effectiveness = df_copy.groupby('hour_of_day')[label_to_analyze].agg(['mean', 'count']).rename(columns={'mean': f'avg_{label_to_analyze}_proportion', 'count': 'num_samples'})
+            if label_to_analyze:
+                logger.info(f"Generiek label '{label_to_analyze}' gevonden voor tijd-van-dag analyse.")
+            else:
+                logger.warning("Geen label kolom (*_label) gevonden voor tijd-van-dag analyse.")
+                return {}
+        if not isinstance(historical_data.index, pd.DatetimeIndex): #This check is correct
+            logger.error("DataFrame index geen DatetimeIndex. Kan uur niet extraheren.") # Logged correctly
+            return {}
+
+        df_copy = historical_data.copy()
+        df_copy['hour_of_day'] = df_copy.index.hour
+        time_effectiveness = df_copy.groupby('hour_of_day')[label_to_analyze].agg(
+            ['mean', 'count']
+        ).rename(columns={'mean': f'avg_{label_to_analyze}_proportion', 'count': 'num_samples'})
+
         result_dict = time_effectiveness.to_dict(orient='index')
         logger.info(f"Tijd-van-dag effectiviteit (obv {label_to_analyze}) geanalyseerd: {result_dict}")
         try:
-            with open(TIME_EFFECTIVENESS_FILE, 'w', encoding='utf-8') as f: json.dump(result_dict, f, indent=2)
-        except Exception as e: logger.error(f"Fout bij opslaan tijd-van-dag effectiviteit: {e}")
+            with TIME_EFFECTIVENESS_FILE.open('w', encoding='utf-8') as f: # TIME_EFFECTIVENESS_FILE is Path
+                json.dump(result_dict, f, indent=2)
+            logger.info(f"Tijd-van-dag effectiviteit opgeslagen naar {TIME_EFFECTIVENESS_FILE.resolve()}")
+        except Exception as e:
+            logger.error(f"Fout bij opslaan tijd-van-dag effectiviteit naar {TIME_EFFECTIVENESS_FILE.resolve()}: {e}", exc_info=True) # exc_info=True is correct
         return result_dict
 
     async def run_pretraining_pipeline(self, strategy_id: str, params_manager=None):
@@ -1196,29 +1357,39 @@ class PreTrainer:
         logger.info(f"Pre-training pipeline voltooid voor strategie {strategy_id} for alle konfigurerte patterns.")
 
 if __name__ == "__main__":
-    import sys # Ensure sys is imported for logging handler
-    from pathlib import Path # For Path object usage in __main__
-    dotenv.load_dotenv(os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '.env'))
+    import sys # sys is used for StreamHandler, ensure it's imported.
+    # Path is already imported.
+    # dotenv.load_dotenv is already imported.
+    dotenv_path_main = PROJECT_ROOT_DIR / '.env' # This is correct
+    if dotenv_path_main.exists():
+        dotenv.load_dotenv(dotenv_path_main) # Correct
+    else:
+        logger.warning(f".env file not found at {dotenv_path_main} for __main__ test run.")
+
     logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', handlers=[logging.StreamHandler(sys.stdout)])
-    from core.params_manager import ParamsManager
-    from core.cnn_patterns import CNNPatterns
+    # ParamsManager is already imported.
+    # CNNPatterns is already imported.
 
-    BITVAVO_API_KEY = os.getenv('BITVAVO_API_KEY')
-    BITVAVO_SECRET_KEY = os.getenv('BITVAVO_SECRET_KEY')
+    BITVAVO_API_KEY = os.getenv('BITVAVO_API_KEY') # Correct
+    BITVAVO_SECRET_KEY = os.getenv('BITVAVO_SECRET_KEY') # Correct
     if not BITVAVO_API_KEY or not BITVAVO_SECRET_KEY:
-        logger.warning("Bitvavo API keys niet gevonden in .env. Data ophalen zal waarschijnlijk falen.")
+        logger.warning("Bitvavo API keys niet gevonden in .env. Data ophalen zal waarschijnlijk falen als Bitvavo exchange geconfigureerd is.")
 
-    # Note: MODELS_DIR used by PreTrainer instance is `user_data/models/cnn_pretrainer`
-    # This global constant should align with how PreTrainer sets `self.models_dir`
-    # For the test, we use this resolved path for clarity in artifact clearing.
-    BASE_USER_DATA_DIR = "user_data" # Assuming this is the root for user data
-    PRETRAINER_MODELS_SUBDIR = "models/cnn_pretrainer"
-    ABSOLUTE_MODELS_DIR = Path(os.path.dirname(os.path.abspath(__file__))) / '..' / BASE_USER_DATA_DIR / PRETRAINER_MODELS_SUBDIR
+    TEST_USER_DATA_DIR = (PROJECT_ROOT_DIR / "user_data_pretrainer_test").resolve()
+
 
     def _get_test_config() -> Dict[str, Any]:
         """Centralized configuration for the test run."""
-        base_dir = Path(os.path.dirname(os.path.abspath(__file__)))
-        test_data_base_dir = base_dir / '..' / 'data' / 'test_pretrainer_artifacts'
+        test_artifacts_input_dir = (PROJECT_ROOT_DIR / 'test_artifacts' / 'pretrainer_inputs').resolve()
+        pretrainer_test_models_output_dir = (TEST_USER_DATA_DIR / "models" / "cnn_pretrainer").resolve()
+
+        # Test-specific file paths using global Path constants as base and adding _test suffix
+        test_market_regimes_file = MARKET_REGIMES_FILE.with_name(MARKET_REGIMES_FILE.name.replace('.json', '_test.json'))
+        test_pretrain_log_file = PRETRAIN_LOG_FILE.with_name(PRETRAIN_LOG_FILE.name.replace('.json', '_test.json'))
+        test_time_effectiveness_file = TIME_EFFECTIVENESS_FILE.with_name(TIME_EFFECTIVENESS_FILE.name.replace('.json', '_test.json'))
+        # Assuming a similar pattern for backtest_results if it were managed by global Path constants
+        test_backtest_results_file = (USER_DATA_MEMORY_DIR / 'backtest_results_test.json').resolve()
+
 
         config = {
             "pairs": ["ETH/EUR"],
@@ -1226,14 +1397,13 @@ if __name__ == "__main__":
             "patterns_to_train": ["bullFlag"],
             "arch_key": "default_simple",
             "regimes": ["all", "testbull"],
-            "test_data_base_dir": test_data_base_dir,
-            "gold_standard_dir": test_data_base_dir / 'gold_standard_data',
-            # MARKET_REGIMES_FILE is the global constant pointing to the runtime location of this file
-            "market_regimes_file_path": Path(MARKET_REGIMES_FILE),
-            "pretrain_log_file_path": Path(PRETRAIN_LOG_FILE),
-            "time_effectiveness_file_path": Path(TIME_EFFECTIVENESS_FILE),
-            "backtest_results_file_path": Path(MEMORY_DIR) / 'backtest_results.json',
-            "models_dir_path": ABSOLUTE_MODELS_DIR, # Path for model outputs based on PreTrainer's logic
+            "test_artifacts_input_dir": test_artifacts_input_dir, # Path for dummy gold standard CSVs
+            "gold_standard_dir": (test_artifacts_input_dir / 'gold_standard_data').resolve(),
+            "market_regimes_file_path": test_market_regimes_file,
+            "pretrain_log_file_path": test_pretrain_log_file,
+            "time_effectiveness_file_path": test_time_effectiveness_file,
+            "backtest_results_file_path": test_backtest_results_file,
+            "pretrainer_test_models_output_dir": pretrainer_test_models_output_dir, # Expected output dir for models
             "dummy_regimes_content": {
                 "ETH/EUR": { # Should match test_config["pairs"][0]
                     "testbull": [{"start_date": "2023-11-01", "end_date": "2023-11-03"}],

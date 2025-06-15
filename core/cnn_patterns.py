@@ -1,6 +1,7 @@
 # core/cnn_patterns.py
 import logging
-import os
+import os # Keep for os.getenv if used, or other non-path operations
+from pathlib import Path # Import Path
 from sklearn.preprocessing import MinMaxScaler
 import json
 import sys
@@ -16,7 +17,7 @@ import torch
 import torch.nn as nn
 
 logger = logging.getLogger(__name__)
-logger.setLevel(logging.INFO)
+# logger.setLevel(logging.INFO) # Logging level configured by application
 
 class SimpleCNN(nn.Module):
     def __init__(self,
@@ -91,11 +92,17 @@ class SimpleCNN(nn.Module):
         x = self.fc(x)
         return x
 
+# Define base paths for module-level constants like MODELS_DIR
+CORE_DIR_CNN = Path(__file__).resolve().parent
+PROJECT_ROOT_DIR_CNN = CORE_DIR_CNN.parent # Assumes 'core' is directly under project root
+
 class CNNPatterns:
-    MODELS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'data', 'models')
+    # MODELS_DIR points to <project_root>/data/models
+    MODELS_DIR = (PROJECT_ROOT_DIR_CNN / "data" / "models").resolve()
+
 
     def __init__(self):
-        from core.params_manager import ParamsManager
+        from core.params_manager import ParamsManager # Keep import here if it avoids circularity at module load time
         self.params_manager = ParamsManager()
         self.models: Dict[str, SimpleCNN] = {}
         self.scalers: Dict[str, MinMaxScaler] = {}
@@ -224,22 +231,25 @@ class CNNPatterns:
 
 
         for pattern_name, meta_info in self.pattern_model_meta_info.items():
-            model_dir = os.path.join(CNNPatterns.MODELS_DIR, symbol_underscore, timeframe)
+            # CNNPatterns.MODELS_DIR is already a Path object
+            model_dir = CNNPatterns.MODELS_DIR / symbol_underscore / timeframe
+            # Ensure model_dir exists before trying to load from it (though model saving should create it)
+            # model_dir.mkdir(parents=True, exist_ok=True) # This might be too aggressive if models are optional
 
             model_filename = f"cnn_model_{pattern_name}_{arch_key_to_load}.pth"
             scaler_filename = f"scaler_params_{pattern_name}_{arch_key_to_load}.json"
 
-            model_path = os.path.join(model_dir, model_filename)
-            scaler_path = os.path.join(model_dir, scaler_filename)
+            model_path = model_dir / model_filename
+            scaler_path = model_dir / scaler_filename
 
             model_key = f"{symbol_underscore}_{timeframe}_{pattern_name}_{arch_key_to_load}"
 
             if model_key in self.models:
                 continue
 
-            if os.path.exists(model_path) and os.path.exists(scaler_path):
+            if model_path.exists() and scaler_path.exists(): # Use Path.exists()
                 try:
-                    with open(scaler_path, 'r', encoding='utf-8') as f:
+                    with scaler_path.open('r', encoding='utf-8') as f: # Use Path.open()
                         scaler_params_json = json.load(f)
 
                     sequence_length = scaler_params_json.get('sequence_length', 30)

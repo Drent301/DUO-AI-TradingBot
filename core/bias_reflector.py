@@ -8,13 +8,18 @@ import asyncio
 import dotenv # Added for the __main__ section
 
 logger = logging.getLogger(__name__)
-logger.setLevel(logging.INFO)
+# logger.setLevel(logging.INFO) # Logging level configured by application
 
-MEMORY_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'memory')
-BIAS_MEMORY_FILE = os.path.join(MEMORY_DIR, 'bias_memory.json')
+from pathlib import Path # Import Path
+
+# Padconfiguratie met pathlib
+CORE_DIR = Path(__file__).resolve().parent
+PROJECT_ROOT_DIR = CORE_DIR.parent # Assumes 'core' is directly under project root
+MEMORY_DIR = (PROJECT_ROOT_DIR / 'user_data' / 'memory').resolve() # Ensure absolute path
+BIAS_MEMORY_FILE = (MEMORY_DIR / 'bias_memory.json').resolve()
 BIAS_COOLDOWN_SECONDS = 3600 # 1 uur cooldown voor aanpassing
 
-os.makedirs(MEMORY_DIR, exist_ok=True)
+MEMORY_DIR.mkdir(parents=True, exist_ok=True)
 
 class BiasReflector:
     """
@@ -28,21 +33,31 @@ class BiasReflector:
 
     def _load_bias_memory(self) -> Dict[str, Any]:
         try:
-            if os.path.exists(BIAS_MEMORY_FILE) and os.path.getsize(BIAS_MEMORY_FILE) > 0:
-                with open(BIAS_MEMORY_FILE, 'r', encoding='utf-8') as f:
+            if BIAS_MEMORY_FILE.exists() and BIAS_MEMORY_FILE.stat().st_size > 0:
+                with BIAS_MEMORY_FILE.open('r', encoding='utf-8') as f:
                     return json.load(f)
             else:
-                return {} # Return empty dict if file doesn't exist or is empty
-        except (FileNotFoundError, json.JSONDecodeError): # FileNotFoundError for completeness
-            logger.warning(f"Bias geheugenbestand {BIAS_MEMORY_FILE} niet gevonden of corrupt. Start met leeg geheugen.")
+                logger.info(f"Bias geheugenbestand {BIAS_MEMORY_FILE} niet gevonden of leeg. Start met leeg geheugen.")
+                return {}
+        except FileNotFoundError:
+            logger.warning(f"Bias geheugenbestand {BIAS_MEMORY_FILE} niet gevonden. Start met leeg geheugen.", exc_info=True)
             return {}
+        except json.JSONDecodeError:
+            logger.warning(f"Fout bij decoderen JSON uit {BIAS_MEMORY_FILE}. Start met leeg geheugen.", exc_info=True)
+            return {}
+        except Exception as e:
+            logger.error(f"Onverwachte fout bij laden bias geheugen {BIAS_MEMORY_FILE}: {e}", exc_info=True)
+            return {}
+
 
     def _save_bias_memory(self):
         try:
-            with open(BIAS_MEMORY_FILE, 'w', encoding='utf-8') as f:
+            with BIAS_MEMORY_FILE.open('w', encoding='utf-8') as f:
                 json.dump(self.bias_memory, f, indent=2)
         except IOError as e:
-            logger.error(f"Fout bij opslaan bias geheugen: {e}")
+            logger.error(f"Fout bij opslaan bias geheugen naar {BIAS_MEMORY_FILE}: {e}", exc_info=True)
+        except Exception as e:
+            logger.error(f"Onverwachte algemene fout bij opslaan bias geheugen naar {BIAS_MEMORY_FILE}: {e}", exc_info=True)
 
     def get_bias_score(self, token: str, strategy_id: str) -> float:
         """
@@ -155,11 +170,15 @@ class BiasReflector:
 # Test sectie
 async def run_test_bias_reflector():
     # Corrected path for .env when running this script directly
-    dotenv_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '.env')
-    dotenv.load_dotenv(dotenv_path)
+    # CORE_DIR and PROJECT_ROOT_DIR are defined at the top of the file
+    dotenv_path = PROJECT_ROOT_DIR / '.env'
+    if dotenv_path.exists():
+        dotenv.load_dotenv(dotenv_path)
+    else:
+        logger.warning(f".env file not found at {dotenv_path} for __main__ test run.")
 
     # Setup basic logging for the test
-    import sys
+    import sys # sys import for StreamHandler
     logging.basicConfig(level=logging.INFO,
                         format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
                         handlers=[logging.StreamHandler(sys.stdout)])
@@ -167,8 +186,8 @@ async def run_test_bias_reflector():
     reflector = BiasReflector()
 
     # Clean up memory file before test if it exists
-    if os.path.exists(BIAS_MEMORY_FILE):
-        os.remove(BIAS_MEMORY_FILE)
+    if BIAS_MEMORY_FILE.exists():
+        BIAS_MEMORY_FILE.unlink() # Use unlink for Path objects
         reflector = BiasReflector() # Re-initialize to ensure clean state
 
     # Test 1: Initial bias
@@ -219,8 +238,8 @@ async def run_test_bias_reflector():
 
     # --- Sentiment-based Adjustment Tests ---
     # Reset memory for these specific tests for clarity, or use a new token/strategy
-    if os.path.exists(BIAS_MEMORY_FILE):
-        os.remove(BIAS_MEMORY_FILE)
+    if BIAS_MEMORY_FILE.exists():
+        BIAS_MEMORY_FILE.unlink()
     reflector = BiasReflector() # Re-initialize
 
     logger.info("\n--- Test 6: Profitable LONG, POSITIVE sentiment (Aligned) ---")
@@ -335,8 +354,8 @@ async def run_test_bias_reflector():
 
     logger.info("\nAll BiasReflector tests passed.")
     # Clean up memory file after test
-    if os.path.exists(BIAS_MEMORY_FILE):
-        os.remove(BIAS_MEMORY_FILE)
+    if BIAS_MEMORY_FILE.exists():
+        BIAS_MEMORY_FILE.unlink()
 
 if __name__ == '__main__':
     asyncio.run(run_test_bias_reflector())

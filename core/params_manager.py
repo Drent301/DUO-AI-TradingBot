@@ -1,18 +1,28 @@
 # core/params_manager.py
 import json
 import logging
-import os
+import os # Keep os for os.remove and os.path.exists for now, or fully migrate if feasible for all uses.
+from pathlib import Path # Import Path
 from typing import Dict, Any, Optional
 import asyncio
 from datetime import datetime
 
 logger = logging.getLogger(__name__)
-logger.setLevel(logging.INFO)
+# logger.setLevel(logging.INFO) # Logging level is usually configured globally
 
-MEMORY_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '..', 'user_data', 'memory')
-PARAMS_FILE = os.path.join(MEMORY_DIR, 'learned_params.json')
+# Define paths using pathlib
+# __file__ is the path to the current script (core/params_manager.py)
+# Resolve() makes it an absolute path
+# .parent navigates up. So .parent.parent.parent is needed to reach project root from core/
+# Then append user_data/memory
+CORE_DIR = Path(__file__).resolve().parent
+PROJECT_ROOT_DIR = CORE_DIR.parent # Assuming core is directly under project root
+# If 'user_data' is at the project root:
+MEMORY_DIR = PROJECT_ROOT_DIR / 'user_data' / 'memory'
+PARAMS_FILE = MEMORY_DIR / 'learned_params.json'
 
-os.makedirs(MEMORY_DIR, exist_ok=True)
+# Ensure MEMORY_DIR exists
+MEMORY_DIR.mkdir(parents=True, exist_ok=True)
 
 class ParamsManager:
     """
@@ -27,13 +37,20 @@ class ParamsManager:
     def _load_params(self) -> Dict[str, Any]:
         """Laadt de leerbare parameters uit een JSON-bestand."""
         try:
-            if os.path.exists(PARAMS_FILE) and os.path.getsize(PARAMS_FILE) > 0:
-                with open(PARAMS_FILE, 'r', encoding='utf-8') as f:
+            if PARAMS_FILE.exists() and PARAMS_FILE.stat().st_size > 0:
+                with PARAMS_FILE.open('r', encoding='utf-8') as f:
                     return json.load(f)
             else:
+                logger.info(f"Parameterbestand {PARAMS_FILE} niet gevonden of leeg. Start met standaardparameters.")
                 return self._get_default_params()
-        except (FileNotFoundError, json.JSONDecodeError):
-            logger.warning(f"Parameterbestand {PARAMS_FILE} niet gevonden of corrupt. Start met standaardparameters.")
+        except FileNotFoundError: # Should be caught by PARAMS_FILE.exists() but good practice
+            logger.warning(f"Parameterbestand {PARAMS_FILE} niet gevonden. Start met standaardparameters.", exc_info=True)
+            return self._get_default_params()
+        except json.JSONDecodeError:
+            logger.warning(f"Fout bij decoderen JSON uit {PARAMS_FILE}. Start met standaardparameters.", exc_info=True)
+            return self._get_default_params()
+        except Exception as e:
+            logger.error(f"Onverwachte fout bij laden parameters uit {PARAMS_FILE}: {e}", exc_info=True)
             return self._get_default_params()
 
     def _get_default_params(self) -> Dict[str, Any]:
@@ -187,9 +204,13 @@ class ParamsManager:
     async def _save_params(self):
         """Slaat de huidige leerbare parameters op naar een JSON-bestand."""
         try:
-            await asyncio.to_thread(lambda: json.dump(self._params, open(PARAMS_FILE, 'w', encoding='utf-8'), indent=2))
+            # asyncio.to_thread is good for blocking I/O. Path.open() is used here.
+            with PARAMS_FILE.open('w', encoding='utf-8') as f:
+                await asyncio.to_thread(json.dump, self._params, f, indent=2)
         except IOError as e:
-            logger.error(f"Fout bij opslaan leerbare parameters: {e}")
+            logger.error(f"Fout bij opslaan leerbare parameters naar {PARAMS_FILE}: {e}", exc_info=True)
+        except Exception as e:
+            logger.error(f"Onverwachte fout bij opslaan parameters naar {PARAMS_FILE}: {e}", exc_info=True)
 
     def get_param(self, key: str, strategy_id: Optional[str] = None) -> Any:
         """Haalt een specifieke leerbare parameter op."""
@@ -284,17 +305,25 @@ class ParamsManager:
 if __name__ == "__main__":
     import dotenv
     import sys
+    # BasicConfig should be called only once, typically at application entry point.
+    # For library modules, it's better to just get a logger and let application configure handlers.
+    # However, for this __main__ test block, it's acceptable.
     logging.basicConfig(level=logging.INFO,
                         format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
                         handlers=[logging.StreamHandler(sys.stdout)])
 
-    dotenv_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '.env')
-    dotenv.load_dotenv(dotenv_path)
+    # Use pathlib for dotenv_path as well
+    dotenv_path = CORE_DIR.parent / '.env' # Assumes .env is in project root
+    if dotenv_path.exists():
+        dotenv.load_dotenv(dotenv_path)
+    else:
+        logger.warning(f".env file not found at {dotenv_path}, some tests requiring API keys might fail if not set in environment.")
+
 
     async def run_test_params_manager():
         # Clear the params file for a clean test run
-        if os.path.exists(PARAMS_FILE):
-            os.remove(PARAMS_FILE)
+        if PARAMS_FILE.exists():
+            PARAMS_FILE.unlink() # pathlib's way to remove a file
             print(f"Verwijderde bestaand parameterbestand: {PARAMS_FILE}")
 
         params_manager = ParamsManager()

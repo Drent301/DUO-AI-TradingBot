@@ -21,13 +21,17 @@ from core.reflectie_lus import ReflectieLus
 from core.grok_sentiment_fetcher import GrokSentimentFetcher
 
 logger = logging.getLogger(__name__)
-logger.setLevel(logging.INFO)
+# logger.setLevel(logging.INFO) # Logging level configured by application
 
-# Padconfiguratie
-MEMORY_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'memory')
-REFLECTIE_LOG_FILE = os.path.join(MEMORY_DIR, 'reflectie-logboek.json') # Same log file as ReflectieLus
+from pathlib import Path # Import Path
 
-os.makedirs(MEMORY_DIR, exist_ok=True)
+# Padconfiguratie met pathlib
+CORE_DIR = Path(__file__).resolve().parent
+PROJECT_ROOT_DIR = CORE_DIR.parent # Assumes 'core' is directly under project root
+MEMORY_DIR = (PROJECT_ROOT_DIR / 'user_data' / 'memory').resolve() # Ensure absolute path
+REFLECTIE_LOG_FILE = (MEMORY_DIR / 'reflectie-logboek.json').resolve() # Same log file as ReflectieLus
+
+MEMORY_DIR.mkdir(parents=True, exist_ok=True)
 
 class AIActivationEngine:
     """
@@ -39,12 +43,12 @@ class AIActivationEngine:
         try:
             self.prompt_builder = PromptBuilder()
         except Exception as e:
-            logger.error(f"Failed to initialize PromptBuilder in AIActivationEngine: {e}")
+            logger.error(f"Failed to initialize PromptBuilder in AIActivationEngine: {e}", exc_info=True)
             self.prompt_builder = None # Fallback
 
         self.reflectie_lus_instance = reflectie_lus_instance
         if self.reflectie_lus_instance is None:
-            logger.error("ReflectieLus instance not provided to AIActivationEngine. AI activation will not work correctly.")
+            logger.error("ReflectieLus instance not provided to AIActivationEngine. AI activation will not work correctly.", exc_info=True) # Consider if exc_info is needed if not an exception
             # Optionally raise an error: raise ValueError("ReflectieLus instance is required")
 
         self.gpt_reflector = GPTReflector()
@@ -54,8 +58,12 @@ class AIActivationEngine:
         try:
             self.grok_sentiment_fetcher = GrokSentimentFetcher()
         except ValueError as e:
-            logger.error(f"Failed to initialize GrokSentimentFetcher: {e}. Sentiment analysis will be disabled.")
+            logger.error(f"Failed to initialize GrokSentimentFetcher: {e}. Sentiment analysis will be disabled.", exc_info=True)
             self.grok_sentiment_fetcher = None
+        except Exception as e_general: # Catch other potential errors during init
+            logger.error(f"Unexpected error initializing GrokSentimentFetcher: {e_general}. Sentiment analysis will be disabled.", exc_info=True)
+            self.grok_sentiment_fetcher = None
+
 
         self.last_reflection_timestamps: Dict[str, float] = {} # Per token
         # CNN_DETECTION_THRESHOLD is used as self.CNN_DETECTION_THRESHOLD
@@ -86,7 +94,7 @@ class AIActivationEngine:
                 else:
                     logger.info(f"No sentiment items found for {symbol}.")
             except Exception as e:
-                logger.error(f"Error fetching sentiment for {symbol}: {e}")
+                logger.error(f"Error fetching sentiment for {symbol}: {e}", exc_info=True)
         else:
             logger.warning("GrokSentimentFetcher not available, skipping sentiment check in _should_trigger_ai.")
 
@@ -127,24 +135,33 @@ class AIActivationEngine:
         """ Slaat een reflectie-entry op in het logboek. """
         logs = []
         try:
-            if os.path.exists(REFLECTIE_LOG_FILE) and os.path.getsize(REFLECTIE_LOG_FILE) > 0:
-                with open(REFLECTIE_LOG_FILE, 'r', encoding='utf-8') as f:
+            if REFLECTIE_LOG_FILE.exists() and REFLECTIE_LOG_FILE.stat().st_size > 0:
+                with REFLECTIE_LOG_FILE.open('r', encoding='utf-8') as f:
                     logs = json.load(f)
-                    if not isinstance(logs, list): logs = []
+                if not isinstance(logs, list):
+                    logger.warning(f"Reflectie logboek {REFLECTIE_LOG_FILE} bevatte geen lijst. Wordt opnieuw gestart als lijst.")
+                    logs = []
         except json.JSONDecodeError:
-            logger.warning(f"Reflectie logboek {REFLECTIE_LOG_FILE} is leeg of corrupt. Start met lege lijst.")
-        except FileNotFoundError:
-             logger.warning(f"Reflectie logboek {REFLECTIE_LOG_FILE} niet gevonden. Start met lege lijst.")
+            logger.warning(f"Reflectie logboek {REFLECTIE_LOG_FILE} is leeg of corrupt. Start met lege lijst.", exc_info=True)
+            logs = [] # Ensure logs is a list
+        except FileNotFoundError: # Should be caught by .exists() but good practice
+             logger.warning(f"Reflectie logboek {REFLECTIE_LOG_FILE} niet gevonden. Start met lege lijst.", exc_info=True)
+             logs = [] # Ensure logs is a list
+        except Exception as e_generic: # Catch any other reading error
+            logger.error(f"Onverwachte fout bij lezen {REFLECTIE_LOG_FILE}: {e_generic}", exc_info=True)
+            logs = [] # Ensure logs is a list
+
 
         logs.append(entry)
         try:
-            # Use await asyncio.to_thread for blocking file I/O
             def save_log_sync():
-                with open(REFLECTIE_LOG_FILE, 'w', encoding='utf-8') as f:
+                with REFLECTIE_LOG_FILE.open('w', encoding='utf-8') as f:
                     json.dump(logs, f, indent=2)
             await asyncio.to_thread(save_log_sync)
         except IOError as e:
-            logger.error(f"Fout bij opslaan reflectielogboek: {e}")
+            logger.error(f"Fout bij opslaan reflectielogboek naar {REFLECTIE_LOG_FILE}: {e}", exc_info=True)
+        except Exception as e_generic_save: # Catch any other saving error
+            logger.error(f"Onverwachte fout bij opslaan reflectielogboek naar {REFLECTIE_LOG_FILE}: {e_generic_save}", exc_info=True)
 
 
     async def activate_ai(
@@ -164,7 +181,7 @@ class AIActivationEngine:
         logger.info(f"[AI-ACTIVATION] Trigger: {trigger_type} voor {token} (Strategie: {strategy_id}) in Mode: {mode}...")
 
         if self.prompt_builder is None:
-            logger.error("PromptBuilder niet geïnitialiseerd in AIActivationEngine. Kan AI niet activeren.")
+            logger.error("PromptBuilder niet geïnitialiseerd in AIActivationEngine. Kan AI niet activeren.", exc_info=False) # No exception context here
             return None
 
         current_bias = bias_reflector_instance.get_bias_score(token, strategy_id) if bias_reflector_instance else 0.5

@@ -8,13 +8,18 @@ import asyncio
 import dotenv # Added for __main__ section
 
 logger = logging.getLogger(__name__)
-logger.setLevel(logging.INFO)
+# logger.setLevel(logging.INFO) # Logging level configured by application
 
-MEMORY_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'memory')
-CONFIDENCE_MEMORY_FILE = os.path.join(MEMORY_DIR, 'confidence_memory.json')
+from pathlib import Path # Import Path
+
+# Padconfiguratie met pathlib
+CORE_DIR = Path(__file__).resolve().parent
+PROJECT_ROOT_DIR = CORE_DIR.parent # Assumes 'core' is directly under project root
+MEMORY_DIR = (PROJECT_ROOT_DIR / 'user_data' / 'memory').resolve() # Ensure absolute path
+CONFIDENCE_MEMORY_FILE = (MEMORY_DIR / 'confidence_memory.json').resolve()
 CONFIDENCE_COOLDOWN_SECONDS = 300 # 5 minuten cooldown
 
-os.makedirs(MEMORY_DIR, exist_ok=True)
+MEMORY_DIR.mkdir(parents=True, exist_ok=True)
 
 class ConfidenceEngine:
     """
@@ -28,21 +33,30 @@ class ConfidenceEngine:
 
     def _load_confidence_memory(self) -> Dict[str, Any]:
         try:
-            if os.path.exists(CONFIDENCE_MEMORY_FILE) and os.path.getsize(CONFIDENCE_MEMORY_FILE) > 0:
-                with open(CONFIDENCE_MEMORY_FILE, 'r', encoding='utf-8') as f:
+            if CONFIDENCE_MEMORY_FILE.exists() and CONFIDENCE_MEMORY_FILE.stat().st_size > 0:
+                with CONFIDENCE_MEMORY_FILE.open('r', encoding='utf-8') as f:
                     return json.load(f)
             else:
-                return {} # Return empty dict if file doesn't exist or is empty
-        except (FileNotFoundError, json.JSONDecodeError): # FileNotFoundError for completeness
-            logger.warning(f"Confidence geheugenbestand {CONFIDENCE_MEMORY_FILE} niet gevonden of corrupt. Start met leeg geheugen.")
+                logger.info(f"Confidence geheugenbestand {CONFIDENCE_MEMORY_FILE} niet gevonden of leeg. Start met leeg geheugen.")
+                return {}
+        except FileNotFoundError:
+            logger.warning(f"Confidence geheugenbestand {CONFIDENCE_MEMORY_FILE} niet gevonden. Start met leeg geheugen.", exc_info=True)
+            return {}
+        except json.JSONDecodeError:
+            logger.warning(f"Fout bij decoderen JSON uit {CONFIDENCE_MEMORY_FILE}. Start met leeg geheugen.", exc_info=True)
+            return {}
+        except Exception as e:
+            logger.error(f"Onverwachte fout bij laden confidence geheugen {CONFIDENCE_MEMORY_FILE}: {e}", exc_info=True)
             return {}
 
     def _save_confidence_memory(self):
         try:
-            with open(CONFIDENCE_MEMORY_FILE, 'w', encoding='utf-8') as f:
+            with CONFIDENCE_MEMORY_FILE.open('w', encoding='utf-8') as f:
                 json.dump(self.confidence_memory, f, indent=2)
         except IOError as e:
-            logger.error(f"Fout bij opslaan confidence geheugen: {e}")
+            logger.error(f"Fout bij opslaan confidence geheugen naar {CONFIDENCE_MEMORY_FILE}: {e}", exc_info=True)
+        except Exception as e:
+            logger.error(f"Onverwachte algemene fout bij opslaan confidence geheugen {CONFIDENCE_MEMORY_FILE}: {e}", exc_info=True)
 
     def get_confidence_score(self, token: str, strategy_id: str) -> float:
         """
@@ -183,10 +197,14 @@ class ConfidenceEngine:
 
 # Test sectie
 async def run_test_confidence_engine():
-    dotenv_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '.env')
-    dotenv.load_dotenv(dotenv_path)
+    # CORE_DIR and PROJECT_ROOT_DIR are defined at the top of the file
+    dotenv_path = PROJECT_ROOT_DIR / '.env'
+    if dotenv_path.exists():
+        dotenv.load_dotenv(dotenv_path)
+    else:
+        logger.warning(f".env file not found at {dotenv_path} for __main__ test run.")
 
-    import sys
+    import sys # sys import for StreamHandler
     logging.basicConfig(level=logging.INFO,
                         format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
                         handlers=[logging.StreamHandler(sys.stdout)])
@@ -194,8 +212,8 @@ async def run_test_confidence_engine():
     engine = ConfidenceEngine()
 
     def _reset_confidence_memory_file():
-        if os.path.exists(CONFIDENCE_MEMORY_FILE):
-            os.remove(CONFIDENCE_MEMORY_FILE)
+        if CONFIDENCE_MEMORY_FILE.exists():
+            CONFIDENCE_MEMORY_FILE.unlink() # Use unlink for Path objects
         return ConfidenceEngine() # Return new instance with clean memory
 
     # --- Test Constants (matching those in the method) ---
@@ -427,8 +445,8 @@ async def run_test_confidence_engine():
 
     logger.info("\nAll ConfidenceEngine tests passed.")
     # Clean up memory file after test
-    if os.path.exists(CONFIDENCE_MEMORY_FILE):
-        os.remove(CONFIDENCE_MEMORY_FILE)
+    if CONFIDENCE_MEMORY_FILE.exists():
+        CONFIDENCE_MEMORY_FILE.unlink()
 
 if __name__ == '__main__':
     asyncio.run(run_test_confidence_engine())

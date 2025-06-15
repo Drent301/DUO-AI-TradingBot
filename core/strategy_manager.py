@@ -16,14 +16,19 @@ from core.bias_reflector import BiasReflector # Added (already imported in __mai
 
 
 logger = logging.getLogger(__name__)
-logger.setLevel(logging.INFO)
+# logger.setLevel(logging.INFO) # Logging level configured by application
 
-# MEMORY_DIR and STRATEGY_MEMORY_FILE are no longer needed for performance
-# os.makedirs(MEMORY_DIR, exist_ok=True) # Not needed if MEMORY_DIR is not used
+from pathlib import Path # Import Path
+
+# Define base directory for context if needed, e.g. project root
+# Assuming this file (core/strategy_manager.py) is in: <project_root>/core/
+PROJECT_ROOT_DIR = Path(__file__).resolve().parent.parent
 
 # FREQTRADE_DB_PATH will be used for the database connection
-# It's good practice to allow override via environment variable
-FREQTRADE_DB_PATH_DEFAULT = 'freqtrade.sqlite'
+# Default location: user_data/freqtrade.sqlite relative to project root
+USER_DATA_DIR = PROJECT_ROOT_DIR / "user_data"
+USER_DATA_DIR.mkdir(parents=True, exist_ok=True) # Ensure user_data directory exists
+FREQTRADE_DB_PATH_DEFAULT = str(USER_DATA_DIR / 'freqtrade.sqlite')
 
 
 class StrategyManager:
@@ -32,10 +37,23 @@ class StrategyManager:
     """
 
     def __init__(self, db_path: Optional[str] = None):
-        # Allow db_path to be overridden, e.g., for testing
-        self.db_path = db_path or os.getenv('FREQTRADE_DB_PATH', FREQTRADE_DB_PATH_DEFAULT)
-        self.params_manager = ParamsManager() # Initialize ParamsManager
-        self.bias_reflector: Optional[BiasReflector] = None # Placeholder, will be set up
+        db_path_str = db_path or os.getenv('FREQTRADE_DB_PATH', FREQTRADE_DB_PATH_DEFAULT)
+        self.db_path = Path(db_path_str)
+        # Resolve to make it absolute. If db_path_str is already absolute, this does nothing.
+        # If it's relative, it's resolved against the current working directory.
+        # For consistency, if a relative path is given for db_path or via env var,
+        # it might be better to resolve it against PROJECT_ROOT_DIR or USER_DATA_DIR.
+        # However, Freqtrade itself might expect it relative to CWD or user_data.
+        # For now, direct Path conversion and .resolve() is a good first step.
+        # If FREQTRADE_DB_PATH_DEFAULT is used, it's already absolute or relative to USER_DATA_DIR.
+        if not self.db_path.is_absolute():
+            # If db_path is still relative (e.g. from input arg or env var),
+            # assume it's relative to USER_DATA_DIR for robustness,
+            # as this is a common Freqtrade convention.
+            self.db_path = (USER_DATA_DIR / self.db_path).resolve()
+
+        self.params_manager = ParamsManager()
+        self.bias_reflector: Optional[BiasReflector] = None
         logger.info(f"StrategyManager initialized. DB path: {self.db_path}")
 
     # _load_strategy_memory and _save_strategy_memory are removed as we use the DB.
@@ -48,11 +66,8 @@ class StrategyManager:
         default_performance = {"winRate": 0.0, "avgProfit": 0.0, "tradeCount": 0}
         conn = None
         try:
+            # sqlite3.connect can handle Path objects directly since Python 3.6
             conn = sqlite3.connect(self.db_path)
-            # Note: Column names like 'close_profit_abs' for profit percentage might vary.
-            # Assuming 'close_profit' is a ratio (e.g., 0.05 for 5%).
-            # Freqtrade stores profit as ratio (e.g. 0.01 = 1%) in close_profit column.
-            # is_open = 0 filters for closed trades.
             query = """
                 SELECT
                     SUM(CASE WHEN close_profit > 0 THEN 1 ELSE 0 END) * 1.0 / COUNT(id) as winRate,
@@ -68,19 +83,18 @@ class StrategyManager:
                 return default_performance
 
             performance = df.iloc[0].to_dict()
-            # Ensure types are correct, especially for winRate which can be NaN if tradeCount is 0
-            performance['winRate'] = float(performance.get('winRate', 0.0) or 0.0) # Handle potential NaN
-            performance['avgProfit'] = float(performance.get('avgProfit', 0.0) or 0.0) # Handle potential NaN
+            performance['winRate'] = float(performance.get('winRate', 0.0) or 0.0)
+            performance['avgProfit'] = float(performance.get('avgProfit', 0.0) or 0.0)
             performance['tradeCount'] = int(performance.get('tradeCount', 0) or 0)
 
             logger.info(f"Performance for {strategy_id}: {performance}")
             return performance
 
         except sqlite3.Error as e:
-            logger.error(f"Database error while fetching performance for {strategy_id}: {e}")
+            logger.error(f"Database error while fetching performance for {strategy_id} from {self.db_path}: {e}", exc_info=True)
             return default_performance
         except Exception as e:
-            logger.error(f"Unexpected error fetching performance for {strategy_id}: {e}")
+            logger.error(f"Unexpected error fetching performance for {strategy_id} from {self.db_path}: {e}", exc_info=True)
             return default_performance
         finally:
             if conn:
@@ -273,10 +287,10 @@ async def get_best_strategy(self, token: str, interval: str) -> Optional[Dict[st
                         logger.info(f"Freqtrade API call successful for {strategy_id}. Status: {response.status}, Response: {response_text}")
                     else:
                         logger.error(f"Freqtrade API call failed for {strategy_id}. Status: {response.status}, Response: {response_text}")
-        except aiohttp.ClientConnectorError as e: # More specific connection error
-            logger.error(f"Error connecting to Freqtrade API at {freqtrade_url} for {strategy_id}: {e}")
-        except aiohttp.ClientError as e: # Catch other aiohttp client errors
-            logger.error(f"AIOHTTP client error during Freqtrade API call for {strategy_id}: {e}")
+        except aiohttp.ClientConnectorError as e:
+            logger.error(f"Error connecting to Freqtrade API at {freqtrade_url} for {strategy_id}: {e}", exc_info=True)
+        except aiohttp.ClientError as e:
+            logger.error(f"AIOHTTP client error during Freqtrade API call for {strategy_id}: {e}", exc_info=True)
         except Exception as e:
             logger.error(f"Unexpected error during Freqtrade API call for {strategy_id}: {e}", exc_info=True)
 
@@ -284,18 +298,23 @@ async def get_best_strategy(self, token: str, interval: str) -> Optional[Dict[st
 # Voorbeeld van hoe je het zou kunnen gebruiken (voor testen)
 if __name__ == "__main__":
     # Corrected path for .env when running this script directly
-    dotenv_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '.env')
-    dotenv.load_dotenv(dotenv_path)
+    # PROJECT_ROOT_DIR is defined at the top of the file
+    dotenv_path = PROJECT_ROOT_DIR / '.env'
+    if dotenv_path.exists():
+        dotenv.load_dotenv(dotenv_path)
+    else:
+        logger.warning(f".env file not found at {dotenv_path} for __main__ test run.")
+
 
     # Setup basic logging for the test
-    import sys
+    import sys # sys import for StreamHandler
     logging.basicConfig(level=logging.INFO,
                         format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
                         handlers=[logging.StreamHandler(sys.stdout)])
 
     # Define a test DB path and ensure it's used by StrategyManager
-    TEST_DB_PATH = "test_freqtrade.sqlite"
-    os.environ['FREQTRADE_DB_PATH'] = TEST_DB_PATH
+    TEST_DB_PATH = Path("test_freqtrade.sqlite").resolve() # Make it an absolute Path object
+    os.environ['FREQTRADE_DB_PATH'] = str(TEST_DB_PATH) # Environment variables must be strings
 
 
     # --- Mock ParamsManager and BiasReflector for testing ---
@@ -432,14 +451,20 @@ if __name__ == "__main__":
     class MockBiasReflector:
         def get_bias_score(self, token: str, strategy_id: str) -> float:
             # Return a predictable bias score for testing
-            if token == "ETH/USDT" and strategy_id == "DUOAI_Strategy":
+            if token == "ETH/USDT" and strategy_id == "DUOAI_Strategy": # Original name
                 return 0.75
+            if token == "ETH/USDT" and strategy_id == "DUOAI_Strategy_V1": # Name used in test data
+                return 0.6 # Example bias for V1
+            if token == "ETH/USDT" and strategy_id == "DUOAI_Strategy_V2":
+                return 0.7 # Example bias for V2
+            if token == "ETH/USDT" and strategy_id == "LowTrade_Strategy":
+                 return 0.8 # Example bias for LowTrade
             return 0.5
 
-    def setup_test_db(db_path: str, custom_trades_data: Optional[List[tuple]] = None): # Corrected Tuple to tuple
-        if os.path.exists(db_path):
-            os.remove(db_path)
-        conn = sqlite3.connect(db_path)
+    def setup_test_db(db_path: Path, custom_trades_data: Optional[List[tuple]] = None): # db_path is Path
+        if db_path.exists():
+            db_path.unlink() # Use unlink for Path objects
+        conn = sqlite3.connect(db_path) # sqlite3.connect handles Path
         cursor = conn.cursor()
         cursor.execute("""
         CREATE TABLE trades (
@@ -689,8 +714,8 @@ async def run_test_strategy_manager():
     logger.info("All StrategyManager tests (merged) passed.")
 
     # Cleanup test DB
-    if os.path.exists(TEST_DB_PATH):
-        os.remove(TEST_DB_PATH)
+    if TEST_DB_PATH.exists(): # TEST_DB_PATH is Path
+        TEST_DB_PATH.unlink()
     logger.info(f"Test database {TEST_DB_PATH} removed.")
 
 
