@@ -101,9 +101,15 @@ class CNNPatterns:
     MODELS_DIR = (PROJECT_ROOT_DIR_CNN / "data" / "models").resolve()
 
 
-    def __init__(self):
-        from core.params_manager import ParamsManager # Keep import here if it avoids circularity at module load time
-        self.params_manager = ParamsManager()
+    def __init__(self, params_manager: Optional[ParamsManager] = None):
+        from core.params_manager import ParamsManager # Keep import here for default instantiation case
+        if params_manager is None:
+            self.params_manager = ParamsManager()
+            logger.info("CNNPatterns initialized its own ParamsManager instance.")
+        else:
+            self.params_manager = params_manager
+            logger.info("CNNPatterns initialized with a provided ParamsManager instance.")
+
         self.models: Dict[str, SimpleCNN] = {}
         self.scalers: Dict[str, MinMaxScaler] = {}
 

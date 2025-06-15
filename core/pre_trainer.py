@@ -65,10 +65,10 @@ STATIC_DATA_DIR.mkdir(parents=True, exist_ok=True) # For MARKET_REGIMES_FILE if 
 
 
 class PreTrainer:
-    def __init__(self, config: Dict[str, Any]):
+    def __init__(self, config: Dict[str, Any], params_manager: ParamsManager):
         self.config = config
-        self.params_manager = ParamsManager()
-        logger.info("ParamsManager initialized in PreTrainer.")
+        self.params_manager = params_manager # Use the provided ParamsManager instance
+        logger.info("PreTrainer initialized with a provided ParamsManager instance.")
 
         self.bitvavo_executor: Optional[BitvavoExecutor] = None
         if self.config.get('exchange', {}).get('name', '').lower() == 'bitvavo':
@@ -80,8 +80,15 @@ class PreTrainer:
             except Exception as e_gen: # Catch other potential init errors
                 logger.error(f"PreTrainer: Unexpected error initializing BitvavoExecutor: {e_gen}", exc_info=True)
 
-
-        self.cnn_pattern_detector: Optional[CNNPatterns] = None
+        # Instantiate CNNPatterns detector
+        # CNNPatterns internally creates its own ParamsManager instance.
+        # If shared PM is needed, CNNPatterns constructor would need modification.
+        try:
+            self.cnn_pattern_detector: CNNPatterns = CNNPatterns(params_manager=self.params_manager)
+            logger.info("CNNPatterns initialized in PreTrainer with shared ParamsManager.")
+        except Exception as e:
+            logger.error(f"Error initializing CNNPatterns in PreTrainer: {e}", exc_info=True)
+            self.cnn_pattern_detector = None # Fallback to None if instantiation fails
 
         # Define models_dir based on user_data_dir from config, resolve to absolute path
         user_data_root_str = self.config.get("user_data_dir", "user_data")
@@ -1655,4 +1662,5 @@ if __name__ == "__main__":
 
         logger.info("--- INTEGRATION TEST FOR PRETRAINER (ALL FEATURES) COMPLETED ---")
 
-    asyncio.run(run_test_pre_trainer())
+    # asyncio.run(run_test_pre_trainer()) # Original __main__ call, now moved to tests
+    logger.info("PreTrainer __main__ execution block has been moved to tests/test_core_modules.py:TestPreTrainerIntegration.")

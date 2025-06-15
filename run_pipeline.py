@@ -197,24 +197,32 @@ async def main():
             # If BitvavoExecutor is initialized by PreTrainer, it might need 'exchange_name' or similar.
             # For now, providing a basic config. PreTrainer should be designed to fetch further
             # specific params it needs from the params_manager instance.
+
+            # Update ParamsManager with the specific pair and timeframe for this pre-training run
+            # if CLI arguments were provided.
+            logger.info(f"Setting ParamsManager: data_fetch_pairs to [{pretrain_pair}], data_fetch_timeframes to [{pretrain_timeframe}] for this pre-training run.")
+            await params_manager.set_param("data_fetch_pairs", [pretrain_pair])
+            await params_manager.set_param("data_fetch_timeframes", [pretrain_timeframe])
+
             pre_trainer_config = {
                 'user_data_dir': str(user_data_dir), # Use validated user_data_dir
                 'exchange_name': exchange_name,   # Use validated exchange_name
                 # Add other necessary basic configs for PreTrainer initialization if any.
             }
-            pre_trainer = PreTrainer(config=pre_trainer_config)
+            # PreTrainer now requires params_manager in its constructor.
+            pre_trainer = PreTrainer(config=pre_trainer_config, params_manager=params_manager)
 
             strategy_id = "DuoAI_Strategy_Pretrain" # Default strategy ID
-            logger.info(f"Running pre-training pipeline for strategy_id: {strategy_id} on pair {pretrain_pair}, timeframe {pretrain_timeframe}...")
+            logger.info(f"Running pre-training pipeline for strategy_id: {strategy_id} (using pairs/timeframes from ParamsManager)...")
 
             # run_pretraining_pipeline is an async method, so it needs to be run in an event loop.
             # Since main() is already async and run with asyncio.run() at the script's end,
             # we can await it here directly.
+            # run_pretraining_pipeline no longer takes pair/timeframe directly.
+            # It uses what's in ParamsManager (which we just set if CLI args were used).
             await pre_trainer.run_pretraining_pipeline(
                 strategy_id=strategy_id,
-                params_manager=params_manager,
-                pair=pretrain_pair,        # Pass pair for pre-training
-                timeframe=pretrain_timeframe # Pass timeframe for pre-training
+                params_manager=params_manager # This ensures the PM instance with CLI overrides is used
             )
             logger.info(f"--- CNN Pre-training Pipeline for strategy_id: {strategy_id} Finished ---")
 
