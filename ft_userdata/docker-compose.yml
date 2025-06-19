@@ -9,7 +9,7 @@ services:
     volumes:
       - "../user_data:/freqtrade/user_data"
       - "../config:/freqtrade/config"
-      - "../strategies:/freqtrade/strategies"
+      - "../strategies:/freqtrade/user_data/strategies"
       - "../core:/freqtrade/core"
     environment:
       - "PYTHONPATH=/freqtrade"

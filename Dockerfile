@@ -5,7 +5,7 @@ WORKDIR /freqtrade
 COPY requirements.txt /freqtrade/requirements.txt
 
 RUN pip install --upgrade pip
-RUN pip install --no-cache-dir -r /freqtrade/requirements.txt --break-system-packages
+RUN pip install --no-cache-dir --force-reinstall -r /freqtrade/requirements.txt --break-system-packages
 
 COPY ./user_data /freqtrade/user_data/
 COPY ./core /freqtrade/core/
