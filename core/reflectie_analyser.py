@@ -2,6 +2,7 @@
 import json
 import logging
 import os
+from pathlib import Path # Make sure Path is imported
 from typing import Dict, Any, List, Optional
 from datetime import datetime
 import numpy as np # Voor gemiddelde
@@ -11,13 +12,15 @@ logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
 
 # Padconfiguratie
-MEMORY_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'memory')
-REFLECTIE_LOG = os.path.join(MEMORY_DIR, 'reflectie-logboek.json')
-BIAS_OUTCOME_LOG = os.path.join(MEMORY_DIR, 'bias-outcome-log.json') # Nieuw
-ANALYSE_LOG = os.path.join(MEMORY_DIR, 'reflectie-analyse.json') # Nieuw
+CORE_DIR_ANALYSER = Path(__file__).resolve().parent
+PROJECT_ROOT_DIR_ANALYSER = CORE_DIR_ANALYSER.parent # Assumes 'core' is directly under project root
+MEMORY_DIR = (PROJECT_ROOT_DIR_ANALYSER / 'user_data' / 'memory').resolve() # Standardized path
+REFLECTIE_LOG = MEMORY_DIR / 'reflectie-logboek.json'
+BIAS_OUTCOME_LOG = MEMORY_DIR / 'bias-outcome-log.json'
+ANALYSE_LOG = MEMORY_DIR / 'reflectie-analyse.json'
 
 # Zorg dat de memory map bestaat
-os.makedirs(MEMORY_DIR, exist_ok=True)
+MEMORY_DIR.mkdir(parents=True, exist_ok=True)
 
 # Import ParamsManager for class usage
 from core.params_manager import ParamsManager
