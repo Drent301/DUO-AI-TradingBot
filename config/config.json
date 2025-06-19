@@ -1,69 +1,50 @@
 {
-  "dry_run": true,
-  "dry_run_wallet": 1000,
-  "exchange": {
-    "name": "binance",
-    "key": "ENV_BINANCE_API_KEY",
-    "secret": "ENV_BINANCE_SECRET_KEY",
-    "password": null,
-    "ccxt_config": {
-      "enableRateLimit": true
+    "max_open_trades": 3,
+    "stake_currency": "BTC",
+    "stake_amount": 100,
+    "dry_run": true,
+    "dry_run_wallet": 5000,
+    "exchange": {
+        "name": "binance",
+        "key": "",
+        "secret": "",
+        "pair_whitelist": [
+            "ZEN/BTC",
+            "LSK/BTC",
+            "ETH/BTC"
+        ]
     },
-    "ccxt_sync_params": {
-      "recvWindow": 10000
-    },
-    "pair_whitelist": [
-      "LSK/BTC",
-      "ETH/BTC",
-      "ZEN/BTC"
+    "pairlists": [
+        {
+            "method": "StaticPairList"
+        }
     ],
-    "pair_blacklist": [],
-    "markets": {}
-  },
-  "stake_currency": "EUR",
-  "stake_amount": "unlimited",
-  "max_open_trades": 3,
-  "position_stacking": true,
-  "max_trade_exposure": 0.5,
-  "tradable_modes": {
-    "backtest": true,
-    "live": false,
-    "dry_run": true
-  },
-  "timeframe": "5m",
-  "startup_candle_count": 100,
-  "runmode": "backtest",
-  "strategy": "DUOAI_Strategy",
-  "minimal_roi": {
-    "0": 0.03,
-    "30": 0.015,
-    "60": 0.005,
-    "120": 0
-  },
-  "protections": [
-    {
-      "method": "CooldownPeriod",
-      "stop_duration_candles": 0
+    "edge": {
+        "enabled": false,
+        "process_throttle_secs": 3600,
+        "calculate_since_number_of_days": 7,
+        "allowed_risk": 0.02
     },
-    {
-      "method": "MaxDrawdown",
-      "lookback_period_candles": 48,
-      "max_drawdown_pct": 0.05
-    }
-  ],
-  "telegram": {
-    "enabled": false
-  },
-  "api_server": {
-    "enabled": false
-  },
-  "webhook": {
-    "enabled": false
-  },
-  "log_level": "info",
-  "log_fileName": "freqtrade.log",
-  "db_url": "sqlite:///freqtrade.sqlite",
-  "internals": {
-    "process_throttle_secs": 5
-  }
+    "telegram": {
+        "enabled": false,
+        "token": "YOUR_TELEGRAM_TOKEN",
+        "chat_id": "YOUR_TELEGRAM_CHAT_ID"
+    },
+    "api_server": {
+        "enabled": false,
+        "listen_ip_address": "127.0.0.1",
+        "listen_port": 8080,
+        "username": "user",
+        "password": "password",
+        "verbosity": "error",
+        "jwt_secret_key": "your-secret-key"
+    },
+    "bot_name": "DUO-AI-TradingBot",
+    "initial_state": "running",
+    "force_entry_enable": false,
+    "logfile": "/freqtrade/user_data/logs/freqtrade.log",
+    "db_url": "sqlite:////freqtrade/user_data/tradesv3.sqlite",
+    "strategy_path": "/freqtrade/user_data/strategies/",
+    "hyperopt_path": "/freqtrade/user_data/hyperopts/",
+    "disable_dataframe_checks": false
 }
