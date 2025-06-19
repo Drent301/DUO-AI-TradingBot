@@ -1,36 +1,20 @@
----
 services:
   freqtrade:
-    # image: freqtradeorg/freqtrade:stable
-    # image: freqtradeorg/freqtrade:develop
-    # Use plotting image
-    # image: freqtradeorg/freqtrade:develop_plot
-    # # Enable GPU Image and GPU Resources (only relevant for freqAI)
-    # # Make sure to uncomment the whole deploy section
-    # deploy:
-    #   resources:
-    #     reservations:
-    #       devices:
-    #         - driver: nvidia
-    #           count: 1
-    #           capabilities: [gpu]
-    # Build step - only needed when additional dependencies are needed
+    image: freqtrade:latest
     build:
       context: ..
       dockerfile: Dockerfile
     restart: unless-stopped
-    container_name: freqtrade
+    container_name: duo-ai-tradingbot
     volumes:
-      - ../user_data:/freqtrade/user_data      # For persistent user data, logs, trades
-      - ../config:/freqtrade/config            # For config.json
+      - "../user_data:/freqtrade/user_data"
+      - "../config:/freqtrade/config"
+      - "../strategies:/freqtrade/strategies"
+      - "../core:/freqtrade/core"
     environment:
-      - PYTHONPATH=/freqtrade
-    # Expose api on port 8080 (localhost only)
-    # Please read the https://www.freqtrade.io/en/stable/rest-api/ documentation
-    # for more information.
+      - "PYTHONPATH=/freqtrade"
     ports:
       - "127.0.0.1:8080:8080"
-    # Default command used when running `docker compose up`
     command: >
       trade
       --logfile /freqtrade/user_data/logs/freqtrade.log
